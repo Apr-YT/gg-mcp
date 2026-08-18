@@ -172,50 +172,33 @@ int watch_start(gg_watch_t *w, gg_driver_t *drv, pid_t pid, uint64_t addr,
     }
 
     /* 路径 2: rwproc33 驱动硬件断点（hwBreakpointProc_module, perf_event, 无密钥门控）。
-     * 模块把断点绑到 pid_task(PIDTYPE_PID) = 目标 pid 的 leader 线程; 游戏写入常来自
-     * 工作线程 → 单点注册几乎不命中。这里枚举目标线程, 给"主线程 + 最活跃线程"各注册
-     * 一个断点（最多 GG_RWPROC_MAX_BPS 个 WRP 槽）。 */
+     * 驱动 read() 命令分发 + CMD 13 INST_PROCESS_HWBP_ALL: 驱动内 for_each_thread 枚举
+     * 进程全部线程各注册一个断点（per-task 断点, 任务切换自动换装, 不受每 CPU WRP 4 槽限）。
+     * 一次调用全覆盖, 不依赖用户态枚举线程。 */
     if (drv && drv->ko_type == KO_TYPE_RWPROC && drv->rwproc_bp_fd >= 0) {
-        int n = 0;
-        pid_t *tids = list_threads(pid, &n);
-        if (!tids || n == 0) {
-            snprintf(w->last_error, sizeof(w->last_error), "no threads for pid %d", (int)pid);
-            free(tids);
+        int nb = 0;
+        if (rwproc_hwbp_start_all(drv, pid, addr, type, len,
+                                  w->rwproc_bp_ids, GG_RWPROC_MAX_BPS, &nb) != 0) {
+            snprintf(w->last_error, sizeof(w->last_error),
+                     "rwproc_hwbp_start_all failed: %s", drv->last_error);
             return -1;
         }
-        /* 把 leader 线程排到最前（tid == pid 即 leader） */
-        for (int i = 0; i < n; i++) {
-            if (tids[i] == pid && i != 0) {
-                pid_t tmp = tids[0]; tids[0] = tids[i]; tids[i] = tmp;
-                break;
-            }
-        }
-        int nb = 0;
-        for (int i = 0; i < n && nb < GG_RWPROC_MAX_BPS; i++) {
-            uint64_t bp_id = 0;
-            if (rwproc_hwbp_start(drv, tids[i], addr, type, len, &bp_id) != 0) {
-                snprintf(w->last_error, sizeof(w->last_error),
-                         "rwproc_hwbp_start(tid=%d) failed: %s", (int)tids[i], drv->last_error);
-                continue;
-            }
-            w->rwproc_bp_tids[nb] = tids[i];
-            w->rwproc_bp_ids[nb] = bp_id;
-            w->rwproc_hit_consumed[nb] = 0;
-            nb++;
-        }
-        free(tids);
         if (nb == 0) {
             snprintf(w->last_error, sizeof(w->last_error),
-                     "rwproc hwbp: all thread registrations failed (%s)", drv->last_error);
+                     "rwproc hwbp: no threads registered (%s)", drv->last_error);
             return -1;
+        }
+        for (int i = 0; i < nb; i++) {
+            w->rwproc_hit_consumed[i] = 0;
         }
         w->use_driver = 2;
         w->drv = drv;
         w->rwproc_bp_count = nb;
+        w->ntids = nb;          /* 显示修复: rwproc33 路径也写回 ntids（原只在 ptrace 路径赋值） */
         w->active = 1;
         snprintf(w->last_error, sizeof(w->last_error),
-                 "rwproc hwbp: pid %d addr 0x%llx type=%d len=%d bps=%d/%d",
-                 (int)pid, (unsigned long long)addr, type, len, nb, n);
+                 "rwproc hwbp: pid %d addr 0x%llx type=%d len=%d bps=%d",
+                 (int)pid, (unsigned long long)addr, type, len, nb);
         return 0;
     }
 

@@ -525,6 +525,44 @@ static ssize_t rwproc_write_mem(gg_driver_t *d, pid_t pid, uint64_t addr,
                        d->rwproc_handle, addr, 0 /* is_force */, buf, len);
 }
 
+/* ---------- GG-TOUCH 内核虚拟触摸（rwProcMem_module CMD_GGTOUCH_*) ---------- */
+/* 仅 rwproc33 型后端支持。display 坐标由驱动内 disp→raw 换算并注入 input 子系统。 */
+
+int driver_touch_tap(gg_driver_t *d, uint32_t x, uint32_t y, uint32_t hold_ms) {
+    if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_mem_fd < 0) {
+        set_err(d, "gg-touch: need rwproc33 driver");
+        return -1;
+    }
+    rwproc_gg_touch_tap_t arg = { x, y, hold_ms };
+    ssize_t r = rwproc_call(d, d->rwproc_mem_fd, RWPROC_CMD_GGTOUCH_TAP,
+                            0, 0, 0, &arg, sizeof(arg));
+    if (r < 0) return -1;
+    if (r != 0) {   /* 驱动返回 0 成功, 负值 -errno */
+        snprintf(d->last_error, sizeof(d->last_error),
+                 "gg-touch CMD_TAP(%u,%u) failed: %lld", x, y, (long long)r);
+        return -1;
+    }
+    return 0;
+}
+
+int driver_touch_swipe(gg_driver_t *d, uint32_t x1, uint32_t y1,
+                       uint32_t x2, uint32_t y2, uint32_t ms) {
+    if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_mem_fd < 0) {
+        set_err(d, "gg-touch: need rwproc33 driver");
+        return -1;
+    }
+    rwproc_gg_touch_swipe_t arg = { x1, y1, x2, y2, ms };
+    ssize_t r = rwproc_call(d, d->rwproc_mem_fd, RWPROC_CMD_GGTOUCH_SWIPE,
+                            0, 0, 0, &arg, sizeof(arg));
+    if (r < 0) return -1;
+    if (r != 0) {
+        snprintf(d->last_error, sizeof(d->last_error),
+                 "gg-touch CMD_SWIPE failed: %lld", (long long)r);
+        return -1;
+    }
+    return 0;
+}
+
 /* ---------- rwproc33 硬件断点（hwBreakpointProc_module） ---------- */
 
 int rwproc_hwbp_start(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int len,
@@ -592,6 +630,51 @@ int rwproc_hwbp_get_hits(gg_driver_t *d, uint64_t bp_id,
 int rwproc_hwbp_stop(gg_driver_t *d, uint64_t bp_id) {
     if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_bp_fd < 0) return -1;
     rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_UNINST_PROCESS_HWBP, bp_id, 0, 0, NULL, 0);
+    return 0;
+}
+
+/* 通用批量注册（驱动 read() 命令分发 + CMD 13 INST_PROCESS_HWBP_ALL）:
+ * 驱动内 for_each_thread 枚举进程全部线程并各注册一个断点, 返回句柄数组。
+ * 不依赖用户态枚举线程, 新线程/线程数超上限由驱动兜底（上限 GG_HWBP_MAX_ALL=256）。 */
+int rwproc_hwbp_start_all(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int len,
+                          uint64_t *ids, int cap, int *count) {
+    if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_bp_fd < 0) return -1;
+    if (type <= 0) type = HW_BP_TYPE_W;
+    if (len <= 0) len = 4;
+    if (count) *count = 0;
+    if (!ids || cap <= 0) { set_err(d, "rwbp start_all bad args"); return -1; }
+    uint64_t handle = 0;
+    ssize_t r = rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_OPEN_PROCESS,
+                            (uint64_t)pid, 0, 0, NULL, 0);
+    if (r < 0) return -1;
+    if (r != 0) {
+        snprintf(d->last_error, sizeof(d->last_error),
+                 "rwbp CMD_OPEN_PROCESS(pid=%d) failed: %lld", (int)pid, (long long)r);
+        return -1;
+    }
+    memcpy(&handle, rwproc_buf + RWPROC_HDR_SZ, sizeof(handle));
+    if (!handle) { set_err(d, "rwbp CMD_OPEN_PROCESS null handle"); return -1; }
+    /* INST_ALL: 返回区 = 4B 注册数 + N*8B 句柄数组 */
+    ssize_t r2 = rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_INST_PROCESS_HWBP_ALL,
+                             handle, addr, RWBP_PARAM3(len, type), NULL, 0);
+    if (r2 < 0) {
+        rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_CLOSE_PROCESS, handle, 0, 0, NULL, 0);
+        return -1;
+    }
+    if (r2 != 0) {
+        snprintf(d->last_error, sizeof(d->last_error),
+                 "rwbp CMD_INST_ALL failed: %lld", (long long)r2);
+        rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_CLOSE_PROCESS, handle, 0, 0, NULL, 0);
+        return -1;
+    }
+    int n = 0;
+    memcpy(&n, rwproc_buf + RWPROC_HDR_SZ, sizeof(n));
+    if (n < 0) n = 0;
+    if (n > cap) n = cap;
+    if (n > 0)
+        memcpy(ids, rwproc_buf + RWPROC_HDR_SZ + sizeof(int),
+               (size_t)n * sizeof(uint64_t));
+    if (count) *count = n;
     return 0;
 }
 

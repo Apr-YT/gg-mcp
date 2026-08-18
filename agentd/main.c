@@ -289,6 +289,8 @@ static const char *cmd_name(uint16_t cmd) {
     case GGCMD_SUBSCRIBE_EVENTS:   return "gg_subscribe_events";
     case GGCMD_UNSUBSCRIBE_EVENTS: return "gg_unsubscribe_events";
     case GGCMD_RELAY_EVENT:        return "gg_relay_event";
+    case GGCMD_GHOST_TAP:          return "gg_ghost_tap";
+    case GGCMD_GHOST_SWIPE:        return "gg_ghost_swipe";
     default:                       return "gg_unknown";
     }
 }
@@ -1462,6 +1464,61 @@ static void h_pause_resume(int fd, uint32_t seq, cJSON *p, int pause) {
     cJSON_Delete(r);
 }
 
+/* GG-TOUCH 内核虚拟触摸注入（rwproc33 驱动 CMD_GGTOUCH_TAP/SWIPE）。
+ * 不依赖 attach（触摸是系统级输入, 与目标进程无关）。 */
+static void h_ghost_tap(int fd, uint32_t seq, cJSON *p) {
+    cJSON *jx = cJSON_GetObjectItem(p, "x");
+    cJSON *jy = cJSON_GetObjectItem(p, "y");
+    if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jy)) {
+        send_err(fd, GGCMD_GHOST_TAP, seq, GGERR_BAD_REQUEST, "need x,y (display coords)");
+        return;
+    }
+    uint32_t x = (uint32_t)jx->valuedouble;
+    uint32_t y = (uint32_t)jy->valuedouble;
+    uint32_t hold = 120;
+    cJSON *jh = cJSON_GetObjectItem(p, "hold_ms");
+    if (cJSON_IsNumber(jh)) hold = (uint32_t)jh->valuedouble;
+
+    if (driver_touch_tap(&g_eng.drv, x, y, hold) != 0) {
+        send_err(fd, GGCMD_GHOST_TAP, seq, GGERR_DEGRADED, g_eng.drv.last_error);
+        return;
+    }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "ok", 1);
+    cJSON_AddNumberToObject(r, "x", x);
+    cJSON_AddNumberToObject(r, "y", y);
+    cJSON_AddNumberToObject(r, "hold_ms", hold);
+    send_ok(fd, GGCMD_GHOST_TAP, seq, r);
+    cJSON_Delete(r);
+}
+
+static void h_ghost_swipe(int fd, uint32_t seq, cJSON *p) {
+    cJSON *p1 = cJSON_GetObjectItem(p, "x1");
+    cJSON *p2 = cJSON_GetObjectItem(p, "y1");
+    cJSON *p3 = cJSON_GetObjectItem(p, "x2");
+    cJSON *p4 = cJSON_GetObjectItem(p, "y2");
+    if (!cJSON_IsNumber(p1) || !cJSON_IsNumber(p2) ||
+        !cJSON_IsNumber(p3) || !cJSON_IsNumber(p4)) {
+        send_err(fd, GGCMD_GHOST_SWIPE, seq, GGERR_BAD_REQUEST, "need x1,y1,x2,y2");
+        return;
+    }
+    uint32_t ms = 300;
+    cJSON *jm = cJSON_GetObjectItem(p, "ms");
+    if (cJSON_IsNumber(jm)) ms = (uint32_t)jm->valuedouble;
+
+    if (driver_touch_swipe(&g_eng.drv,
+                           (uint32_t)p1->valuedouble, (uint32_t)p2->valuedouble,
+                           (uint32_t)p3->valuedouble, (uint32_t)p4->valuedouble,
+                           ms) != 0) {
+        send_err(fd, GGCMD_GHOST_SWIPE, seq, GGERR_DEGRADED, g_eng.drv.last_error);
+        return;
+    }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "ok", 1);
+    send_ok(fd, GGCMD_GHOST_SWIPE, seq, r);
+    cJSON_Delete(r);
+}
+
 static void h_kernel_status(int fd, uint32_t seq, cJSON *p) {
     cJSON *r = cJSON_CreateObject();
     gg_driver_t *d = &g_eng.drv;
@@ -1795,6 +1852,8 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload) {
     case GGCMD_SUBSCRIBE_EVENTS:   h_subscribe(fd, seq, p, 1); break;
     case GGCMD_UNSUBSCRIBE_EVENTS: h_subscribe(fd, seq, p, 0); break;
     case GGCMD_RELAY_EVENT:        h_relay_event(fd, seq, p); break;
+    case GGCMD_GHOST_TAP:          h_ghost_tap(fd, seq, p); break;
+    case GGCMD_GHOST_SWIPE:        h_ghost_swipe(fd, seq, p); break;
     default:
         send_err(fd, h->cmd, seq, GGERR_BAD_REQUEST, "unknown command");
         break;

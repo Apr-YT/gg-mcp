@@ -113,6 +113,16 @@ typedef struct __attribute__((packed)) rwproc_request {
     uint64_t buf_size;
 } rwproc_request_t;            /* sizeof 33 */
 
+/* GG-TOUCH 触摸注入参数（display 坐标, 与驱动 rwProcMem_module.c 的
+ * struct gg_touch_tap / gg_touch_swipe 完全一致; 驱动内做 disp→raw 换算） */
+typedef struct __attribute__((packed)) rwproc_gg_touch_tap {
+    uint32_t x, y, hold_ms;
+} rwproc_gg_touch_tap_t;       /* sizeof 12 */
+
+typedef struct __attribute__((packed)) rwproc_gg_touch_swipe {
+    uint32_t x1, y1, x2, y2, ms;
+} rwproc_gg_touch_swipe_t;     /* sizeof 20 */
+
 /* rwProcMem_module 命令码（与源码 rwProcMem_module.c 一致） */
 enum {
     RWPROC_CMD_INIT_DEVICE_INFO     = 1,
@@ -127,7 +137,9 @@ enum {
     RWPROC_CMD_SET_PROCESS_ROOT      = 10,
     RWPROC_CMD_GET_PROCESS_RSS       = 11,
     RWPROC_CMD_GET_PROCESS_CMDLINE_ADDR = 12,
-    RWPROC_CMD_HIDE_KERNEL_MODULE    = 13
+    RWPROC_CMD_HIDE_KERNEL_MODULE    = 13,
+    RWPROC_CMD_GGTOUCH_TAP           = 15,  /* 内核虚拟触摸: 单点 tap（display 坐标, 驱动内换算 raw） */
+    RWPROC_CMD_GGTOUCH_SWIPE         = 16   /* 内核虚拟触摸: 滑动 swipe */
 };
 
 /* hwBreakpointProc_module 命令码（与源码 hwBreakpointProc_module.c 一致） */
@@ -143,7 +155,8 @@ enum {
     RWBP_CMD_GET_HWBP_HIT_COUNT  = 9,
     RWBP_CMD_GET_HWBP_HIT_DETAIL = 10,
     RWBP_CMD_SET_HOOK_PC         = 11,
-    RWBP_CMD_HIDE_KERNEL_MODULE  = 12
+    RWBP_CMD_HIDE_KERNEL_MODULE  = 12,
+    RWBP_CMD_INST_PROCESS_HWBP_ALL = 13  /* 驱动内 for_each_thread 全线程批量注册 */
 };
 
 /* hwBreakpointProc_module 的命中条目（packed, 与源码 HWBP_HIT_ITEM 一致, sizeof 312） */
@@ -229,6 +242,10 @@ int rwproc_close_process(gg_driver_t *d, uint64_t handle);
  *  rwproc_hwbp_stop: 卸载断点。0 成功；-1 失败/后端不支持。 */
 int rwproc_hwbp_start(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int len,
                       uint64_t *bp_id);
+/* 通用批量注册: 驱动内 for_each_thread 枚举进程全部线程并各注册一个断点。
+ * ids 返回句柄数组（cap 个）, *count 返回实际注册数。一次调用全覆盖, 不依赖用户态枚举线程。 */
+int rwproc_hwbp_start_all(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int len,
+                          uint64_t *ids, int cap, int *count);
 int rwproc_hwbp_get_hits(gg_driver_t *d, uint64_t bp_id,
                          rwproc_hwbp_hit_item_t *out, int cap, int *real);
 int rwproc_hwbp_stop(gg_driver_t *d, uint64_t bp_id);
@@ -272,6 +289,13 @@ int driver_self_test(gg_driver_t *d);
 /* 跨进程读/写。返回实际字节数；失败返回 -1 并置 last_error。 */
 ssize_t driver_read(gg_driver_t *d, pid_t pid, uint64_t addr, void *buf, size_t len);
 ssize_t driver_write(gg_driver_t *d, pid_t pid, uint64_t addr, const void *buf, size_t len);
+
+/* GG-TOUCH 内核虚拟触摸注入（仅 rwproc33 型后端支持; 其他后端返回 -1）。
+ * display 坐标（横屏 2608x1200 逻辑像素）, 驱动内部换算 raw 并注入 input 子系统。
+ * 返回 0 成功；-1 失败并置 last_error。 */
+int driver_touch_tap(gg_driver_t *d, uint32_t x, uint32_t y, uint32_t hold_ms);
+int driver_touch_swipe(gg_driver_t *d, uint32_t x1, uint32_t y1,
+                       uint32_t x2, uint32_t y2, uint32_t ms);
 
 void driver_close(gg_driver_t *d);
 

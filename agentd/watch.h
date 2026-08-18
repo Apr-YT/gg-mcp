@@ -22,7 +22,7 @@
 #define GG_WATCH_MAX_HITS 128
 #define GG_WATCH_STACK_MAX 5
 #define GG_WATCH_DISASM_MAX 32      /* ±16 条（ARM64 定长 4B → pc-64..pc+64） */
-#define GG_RWPROC_MAX_BPS 4         /* ARM64 硬件写监视点槽位数（WRP） */
+#define GG_RWPROC_MAX_BPS 128        /* 全部线程注册（per-task 断点每线程独立 debug 槽位, 不受每 CPU WRP 4 槽限） */
 
 typedef struct gg_watch_insn {
     uint64_t addr;

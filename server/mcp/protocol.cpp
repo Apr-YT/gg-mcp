@@ -40,7 +40,7 @@ json McpProtocol::handle_request(const json& msg) {
         json result;
         result["protocolVersion"] = "2024-11-05";
         result["capabilities"] = {{"tools", {{"listChanged", false}}}};
-        result["serverInfo"] = {{"name", "gg-mcp-server"}, {"version", "1.0.0"}};
+        result["serverInfo"] = {{"name", "gg-ghost-mcp"}, {"version", "1.0.0"}};
         return result;
     }
     if (method == "notifications/initialized" || method == "initialized") {

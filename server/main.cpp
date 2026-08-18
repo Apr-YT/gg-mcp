@@ -1,8 +1,8 @@
-// main.cpp — gg-mcp-server：PC 端 C++ MCP 服务器入口
+// main.cpp — gg-ghost-mcp：PC 端 C++ MCP 服务器入口
 //
 // 用法:
-//   gg-mcp-server --config configs/ggmcp.json --transport stdio
-//   gg-mcp-server --config configs/ggmcp.json --transport http --port 8788
+//   gg-ghost-mcp --config configs/ggmcp.json --transport stdio
+//   gg-ghost-mcp --config configs/ggmcp.json --transport http --port 8788
 //
 // stdio 传输：供 Claude Desktop / Claude Code 等本地 MCP 客户端。
 // http 传输：POST /mcp（Streamable HTTP 风格），供 Cline 等远程客户端。
@@ -25,7 +25,7 @@ namespace gg {
 static void print_banner(const ServerConfig& cfg) {
     std::cerr <<
         "==============================================\n"
-        " gg-mcp-server v1.0.0 (GameGuardian MCP)\n"
+        " GG-GHOST-MCP v1.0.0 (GameGuardian MCP)\n"
         " transport : " << cfg.transport << "\n"
         " agentd    : 127.0.0.1:" << cfg.agent_port << " (adb forward)\n"
         " GG 版本族 : " << cfg.gg_version_pattern
@@ -89,7 +89,7 @@ static int run_http(Session& session, McpProtocol& proto, const ServerConfig& cf
     /* 远程暴露(0.0.0.0)时必须启用 token, 否则同网段任意主机可读写设备内存/执行 shell/加载 GG。
      * 这是加能力不加限制: 远程能力保留, 但强制 bearer 鉴权。 */
     if (cfg.http_host == "0.0.0.0" && cfg.http_token.empty()) {
-        std::cerr << "[gg-mcp-server][FATAL] http_host=0.0.0.0 但 http_token 为空: "
+        std::cerr << "[GG-GHOST-MCP][FATAL] http_host=0.0.0.0 但 http_token 为空: "
                      "拒绝在不可信网络暴露。请设置 --token <secret>/http_token 配置, "
                      "或将 http_host 改为 127.0.0.1(仅本机)\n";
         return 1;
@@ -112,7 +112,7 @@ static int run_http(Session& session, McpProtocol& proto, const ServerConfig& cf
         res.set_content("{\"status\":\"ok\"}", "application/json");
     });
     const std::string& host = cfg.http_host.empty() ? std::string("127.0.0.1") : cfg.http_host;
-    std::cerr << "[gg-mcp-server] listening on " << host << ":" << cfg.http_port
+    std::cerr << "[GG-GHOST-MCP] listening on " << host << ":" << cfg.http_port
               << "/mcp (POST)"
               << (cfg.http_token.empty() ? " [no auth]" : " [bearer auth]") << "\n";
     return svr.listen(host, cfg.http_port) ? 0 : 1;
@@ -120,7 +120,7 @@ static int run_http(Session& session, McpProtocol& proto, const ServerConfig& cf
 
 static void usage(const char* argv0) {
     std::cerr <<
-        "gg-mcp-server — PC 端 GameGuardian MCP 服务器\n"
+        "GG-GHOST-MCP — PC 端 GameGuardian MCP 服务器\n"
         "用法: " << argv0 << " [--config configs/ggmcp.json] [--transport stdio|http]\n"
         "          [--port 8788] [--http-host 127.0.0.1] [--token <secret>]\n"
         "          [--adb <adb路径>] [--serial <设备序列号>]\n"
@@ -142,9 +142,9 @@ int main(int argc, char** argv) {
 
     // 先读配置文件，命令行参数随后覆盖（参数优先）
     if (load_config(config_path, &cfg)) {
-        std::cerr << "[gg-mcp-server] loaded config: " << config_path << "\n";
+        std::cerr << "[GG-GHOST-MCP] loaded config: " << config_path << "\n";
     } else {
-        std::cerr << "[gg-mcp-server] no config at " << config_path
+        std::cerr << "[GG-GHOST-MCP] no config at " << config_path
                   << " (using defaults)\n";
     }
 

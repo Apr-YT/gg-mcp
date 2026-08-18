@@ -314,6 +314,27 @@ static const std::vector<ToolDef>& build() {
              "生成标注上下文纯文本（会话开始/分析前调用，注入到 AI 上下文）",
              json{{"tag", prop("string", "只注入该 tag（空=全部）")}},
              json::array()),
+
+        // ---- GG-TOUCH 内核虚拟触摸 ----
+        tool("gg_ghost_tap",
+             "内核虚拟触摸注入：单点 tap（display 坐标，横屏 2608x1200 逻辑像素；"
+             "经 rwproc33 驱动注册的 gg-touch 虚拟 input 设备注入，无新设备暴露在 InputManager 之外的标准管线）",
+             json{
+                 {"x", prop("integer", "display X（横屏 0-2607）")},
+                 {"y", prop("integer", "display Y（横屏 0-1199）")},
+                 {"hold_ms", prop("integer", "按下保持毫秒（默认 120）")},
+             },
+             json{"x", "y"}),
+        tool("gg_ghost_swipe",
+             "内核虚拟触摸注入：滑动（display 坐标，线性插值）",
+             json{
+                 {"x1", prop("integer", "起点 X")},
+                 {"y1", prop("integer", "起点 Y")},
+                 {"x2", prop("integer", "终点 X")},
+                 {"y2", prop("integer", "终点 Y")},
+                 {"ms", prop("integer", "滑动时长毫秒（默认 300）")},
+             },
+             json{"x1", "y1", "x2", "y2"}),
     };
     return defs;
 }

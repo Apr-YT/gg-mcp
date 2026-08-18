@@ -318,6 +318,25 @@ json tool_resolve_symbol(Session::CallCtx& c, const json& a) {
 json tool_pause(Session::CallCtx& c, const json&) { return c.send(GGCMD_PAUSE); }
 json tool_resume(Session::CallCtx& c, const json&) { return c.send(GGCMD_RESUME); }
 
+// ---- GG-TOUCH 内核虚拟触摸 ----
+json tool_ghost_tap(Session::CallCtx& c, const json& a) {
+    if (!a.contains("x") || !a.contains("y"))
+        return c.fail(GGERR_BAD_REQUEST, "x,y required");
+    c.params["x"] = a["x"];
+    c.params["y"] = a["y"];
+    if (a.contains("hold_ms")) c.params["hold_ms"] = a["hold_ms"];
+    return c.send(GGCMD_GHOST_TAP);
+}
+json tool_ghost_swipe(Session::CallCtx& c, const json& a) {
+    if (!a.contains("x1") || !a.contains("y1") ||
+        !a.contains("x2") || !a.contains("y2"))
+        return c.fail(GGERR_BAD_REQUEST, "x1,y1,x2,y2 required");
+    c.params["x1"] = a["x1"]; c.params["y1"] = a["y1"];
+    c.params["x2"] = a["x2"]; c.params["y2"] = a["y2"];
+    if (a.contains("ms")) c.params["ms"] = a["ms"];
+    return c.send(GGCMD_GHOST_SWIPE);
+}
+
 // ---- 状态/内核 ----
 json tool_kernel_status(Session::CallCtx& c, const json&) { return c.send(GGCMD_KERNEL_STATUS); }
 json tool_kernel_load_gg(Session::CallCtx& c, const json& a) {
@@ -438,6 +457,9 @@ const ToolEntry kTools[] = {
 
     {"gg_pause",            tool_pause,            true},
     {"gg_resume",           tool_resume,           true},
+
+    {"gg_ghost_tap",        tool_ghost_tap,        true},
+    {"gg_ghost_swipe",      tool_ghost_swipe,      true},
 
     {"gg_kernel_status",    tool_kernel_status,    false},
     {"gg_kernel_load_gg",   tool_kernel_load_gg,   true},

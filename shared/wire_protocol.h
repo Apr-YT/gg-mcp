@@ -79,6 +79,8 @@ enum gg_cmd {
     GGCMD_UNSUBSCRIBE_EVENTS,   /* 取消订阅 */
     GGCMD_RELAY_EVENT,          /* PC 端转发事件（标注等 PC 本地动作 → agentd 广播给订阅端）:
                                  * 负载 {"p":{"type":"annotate","data":{...}}} → 事件 {"ev":{"type":...,"data":...}} */
+    GGCMD_GHOST_TAP,            /* 内核虚拟触摸: 单点 tap {"p":{"x":..,"y":..,"hold_ms":..}} */
+    GGCMD_GHOST_SWIPE,          /* 内核虚拟触摸: 滑动 {"p":{"x1":..,"y1":..,"x2":..,"y2":..,"ms":..}} */
     GGCMD_MAX
 };
 
