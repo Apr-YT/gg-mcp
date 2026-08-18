@@ -65,7 +65,7 @@ static _Thread_local char g_last_resp[8192];
 static _Thread_local int  g_last_resp_ok = 0;
 static _Thread_local int  g_last_resp_set = 0;
 
-static void log_msg(const char *fmt, ...) {
+void log_msg(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     if (g_eng.logf) {
@@ -1946,22 +1946,17 @@ static void print_usage(const char *argv0) {
 
 /* ---- 进程伪装：prctl 改名 + 重写 cmdline（argv 区） ----
  * ACE 类反作弊扫描 /proc/<pid>/comm 与 /proc/<pid>/cmdline：
- *   真实进程两者一致；只改 comm 不改 cmdline 反而更可疑。
- * 伪装为系统常驻 root 守护 lmkd（cmdline=/system/bin/lmkd）。
+ *   二进制名=dspbridge（厂商风格），comm 与之一致最自然（不 prctl 改名）。
+ *   cmdline 清空全部参数（--driver rwproc/--rwproc-key 等是硬特征）与
+ *   环境变量区，只保留 argv[0]（程序名），/proc/PID/cmdline 显示 "dspbridge"。
  * 必须在参数解析完成后调用（会清空 argv[1..]，之后不再引用 argv）。 */
 static void hide_process(int argc, char **argv) {
-    const char *fake = "/system/bin/lmkd";
-    (void)argc;
-    prctl(PR_SET_NAME, "lmkd", 0, 0, 0);
-    if (argv[0]) {
-        size_t n = strlen(argv[0]);
-        memset(argv[0], 0, n);
-        size_t fl = strlen(fake);
-        memcpy(argv[0], fake, fl < n ? fl : n);
-    }
+    extern char **environ;
     for (int i = 1; i < argc; i++) {
         if (argv[i]) memset(argv[i], 0, strlen(argv[i]));
     }
+    for (int i = 0; environ && environ[i]; i++)
+        memset(environ[i], 0, strlen(environ[i]));
 }
 
 int main(int argc, char **argv) {
@@ -2004,8 +1999,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* 参数解析完毕：伪装进程（清 argv，之后不再引用） */
-    hide_process(argc, argv);
+    hide_process(argc, argv);   /* 清 cmdline 参数与环境（防 ACE 扫 /proc/PID/cmdline） */
 
     memset(&g_eng, 0, sizeof(g_eng));
     g_eng.session_pid = -1;
@@ -2085,6 +2079,11 @@ int main(int argc, char **argv) {
     if (bind(sfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) { perror("bind"); return 1; }
     if (listen(sfd, 8) < 0) { perror("listen"); return 1; }
     log_msg("listening on 127.0.0.1:%d", port);
+
+    /* 进程伪装：所有 argv 字符串（dtype/keys/logpath/ko_dir 等）已消费完毕，
+     * 此时清 argv 区不再影响任何指针。⚠ 必须放在参数解析与驱动初始化之后：
+     * 提前清空会导致 dtype/key 失效 → 静默降级 hook 型 ko_load + 日志 fopen 失败。 */
+    hide_process(argc, argv);
 
     for (;;) {
         int cfd = accept(sfd, NULL, NULL);
