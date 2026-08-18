@@ -895,7 +895,11 @@ static void h_get_results(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_GET_RESULTS, seq, GGERR_NO_SESSION, "no session"); return; }
     size_t offset = cJSON_GetObjectItem(p, "offset") ? (size_t)cJSON_GetObjectItem(p, "offset")->valuedouble : 0;
     size_t limit = cJSON_GetObjectItem(p, "limit") ? (size_t)cJSON_GetObjectItem(p, "limit")->valuedouble : 100;
-    int type = cJSON_GetObjectItem(p, "type") ? cJSON_GetObjectItem(p, "type")->valueint : VT_DWORD;
+    /* 值类型以结果集自身为准（精确搜索 exact_vt / 模糊物化 fuzzy_vt），调用方 type 仅兜底：
+       避免类型不匹配读错字节数/错值（2026-08-18 CF 实测：带 type 偶发串旧 buffer） */
+    int type = VT_DWORD;
+    if (g_eng.results.exact_vt > 0) type = g_eng.results.exact_vt;
+    else if (g_eng.results.fuzzy_vt > 0) type = g_eng.results.fuzzy_vt;
     if (limit > 10000) limit = 10000;
 
     uint64_t *addrs = malloc(limit * sizeof(uint64_t));

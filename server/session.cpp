@@ -208,7 +208,8 @@ json tool_result_count(Session::CallCtx& c, const json&) { return c.send(GGCMD_R
 json tool_get_results(Session::CallCtx& c, const json& a) {
     c.params["offset"] = a.value("offset", 0);
     c.params["limit"] = a.value("limit", 100);
-    c.params["type"] = c.norm_type(a.value("type", json()));
+    /* type 由 agentd 按结果集自身类型（exact_vt/fuzzy_vt）决定，不再传递，
+       避免调用方 type 误导读值字节数（2026-08-18 CF 实测修复） */
     return c.send(GGCMD_GET_RESULTS);
 }
 json tool_clear_results(Session::CallCtx& c, const json&) { return c.send(GGCMD_CLEAR_RESULTS); }

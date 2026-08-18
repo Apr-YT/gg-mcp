@@ -84,11 +84,11 @@ static const std::vector<ToolDef>& build() {
              "当前搜索结果数量（含模糊候选数）",
              json::object(), json::array()),
         tool("gg_get_results",
-             "分页获取搜索结果（地址+当前值），结果在设备端维护",
+             "分页获取搜索结果（地址+当前值），结果在设备端维护；值的类型自动取搜索结果集自身类型，无需传 type",
              json{
                  {"offset", prop("integer", "起始下标（默认 0）")},
                  {"limit", prop("integer", "返回条数（默认 100，上限 10000）")},
-                 {"type", prop("string", "值的解释类型", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
+                 {"type", prop("string", "已废弃/忽略（agentd 按结果集自身类型读值）", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
              },
              json::array()),
         tool("gg_clear_results",
