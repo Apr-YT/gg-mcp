@@ -55,6 +55,10 @@ input core → evdev → InputReader → InputDispatcher → 应用
 | `.../api_proxy.h` | `__kmalloc()` → `kmalloc()`（6.12 内核宏签名变更） |
 | `.../hide_procfs_dir.h` | `strlcpy()` → `strscpy()`（6.10+ 内核移除 strlcpy） |
 | `.../proc_maps.h` | 6.6.30 实现分支条件扩展 `|| MY_LINUX_VERSION_CODE >= KERNEL_VERSION(6,12,0)` |
+| `rwproc33/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.c` | +`OnCmdInstAllProcessHwbp`（CMD 13 全线程批量注册，`for_each_thread` 两阶段：RCU 内收集 task 引用、RCU 外 vmalloc/register）；`clean_hwbp` 数组改动态分配（128 槽超内核栈 2KB） |
+| `.../hwBreakpointProc_module.h` | +`CMD_INST_PROCESS_HWBP_ALL=13`；`HWBP_MAX_HANDLES` 16→**128**（全线程注册）；`HWBP_HIT_CAP` 1024→512（内存平衡） |
+
+**⚠️ 两阶段注册坑**（2026-08-18 真机重启根因）：`for_each_thread` 需 RCU 读锁，但 `vmalloc`/`register_user_hw_breakpoint` 会睡眠 → RCU 锁内调用 = `scheduling while atomic` → PANIC_ON_OOPS 整机重启。必须 **RCU 内只 `get_task_struct` 收集引用，RCU 外逐个注册，完事 `put_task_struct`**。
 
 **虚拟设备注册**（`gg_touch_register()`）：
 ```c
@@ -94,17 +98,20 @@ raw_y = dx * 100
 
 | 文件 | 改动 |
 |---|---|
-| `agentd/driver.h` | +`RWPROC_CMD_GGTOUCH_TAP=15/SWIPE=16`、`rwproc_gg_touch_tap/swipe_t` 结构、`driver_touch_tap/swipe` 声明 |
-| `agentd/driver.c` | +`driver_touch_tap/swipe` 实现（`rwproc_call()` 通用调用，data 传结构） |
+| `agentd/driver.h` | +`RWPROC_CMD_GGTOUCH_TAP=15/SWIPE=16`、`rwproc_gg_touch_tap/swipe_t` 结构、`driver_touch_tap/swipe` 声明；+`RWBP_CMD_INST_PROCESS_HWBP_ALL=13`、`rwproc_hwbp_start_all` 声明 |
+| `agentd/driver.c` | +`driver_touch_tap/swipe` 实现（`rwproc_call()` 通用调用，data 传结构）；+`rwproc_hwbp_start_all`（一次 IOCTL 全线程注册，返回句柄数组） |
 | `agentd/main.c` | +`h_ghost_tap/h_ghost_swipe` handler（JSON→结构）、cmd_name 映射、dispatch 2 case |
+| `agentd/watch.c` | 路径 2 改为一次 `rwproc_hwbp_start_all`（删 list_threads 逐线程循环）；显示修复 `ntids=nb` 写回 |
 | `shared/wire_protocol.h` | +`GGCMD_GHOST_TAP / GGCMD_GHOST_SWIPE` |
 
-### 3.3 PC 端（gg-mcp-server）
+### 3.3 PC 端（GG-GHOST-MCP，gg-ghost-mcp.exe）
 
 | 文件 | 改动 |
 |---|---|
-| `server/mcp/schema.cpp` | +`gg_ghost_tap` / `gg_ghost_swipe` 工具注册（含参数 schema 与描述） |
+| `server/mcp/schema.cpp` | +`gg_ghost_tap` / `gg_ghost_swipe` 工具注册（含参数 schema 与描述）；全量 45 工具 |
 | `server/session.cpp` | +`tool_ghost_tap/swipe` 函数、`kTools[]` 表 2 条目（`write_op=true`） |
+| `server/main.cpp` | 命名统一 GG-GHOST-MCP（serverInfo.name=gg-ghost-mcp） |
+| `configs/gg-ghost.json` | 配置（原名 ggmcp.json，`safe_mode` 字段控制只读） |
 
 ---
 
@@ -148,11 +155,20 @@ python patch_ko_versions.py <设备厂商ko目录> rwProcMem_module.ko
 # 实测: patched=23 same=24 missing=1 (copy_from_kernel_nofault, 内核导出符号, 不影响加载)
 ```
 
+**硬件断点模块**（hwBreakpointProc_module.ko，全线程断点）：
+```bash
+cd /opt/rwProcMem33/hwBreakpointProcModule/hwBreakpointProc_module
+make -C /opt/gki/out M=$PWD ARCH=arm64 LLVM=1 CC=clang KBUILD_MODPOST_WARN=1 modules
+# 产物: hwBreakpointProc_module.ko (~323KB) → 同样跑 patch_ko_versions.py (patched=11 same=21 missing=0)
+```
+
 **6.12 适配已知坑**：
 1. `__kmalloc` 宏签名变 → 用 `kmalloc`
 2. `strlcpy` 已移除（6.10+）→ 用 `strscpy`
 3. `proc_maps.h` 无 6.12 实现分支 → 复用 6.6.30 分支（条件加 `>= 6.12.0`）
 4. `mm->rss_stat` 类型变（6.6+ 为 `struct percpu_counter[]`）→ `linux_kernel_api.h` 已有 `>= 6.6.0` 分支自动处理
+5. `HWBP_MAX_HANDLES` 扩 128 后 `clean_hwbp` 静态数组超内核栈 2KB（-Wframe-larger-than）→ 改 vmalloc 动态分配
+6. 断点模块 `for_each_thread` 内严禁 vmalloc/register（RCU 锁内睡眠 → 整机重启）→ 两阶段注册
 
 ### 5.2 设备端（gg-ghost-agentd，NDK）
 
@@ -162,7 +178,7 @@ aarch64-linux-android28-clang -O2 -Wall -I%ROOT% -I%CAPSTONE%\include -o gg-ghos
   %ROOT%\third_party\cJSON.c %CAPSTONE%\libcapstone.a -pie
 ```
 
-### 5.3 PC 端（gg-mcp-server，MinGW）
+### 5.3 PC 端（GG-GHOST-MCP，MinGW）
 
 ```bat
 g++ -std=c++17 -O2 -Wall -Wextra ^
@@ -178,11 +194,12 @@ g++ -std=c++17 -O2 -Wall -Wextra ^
 ```
 /data/adb/GG-Ghost/
 ├── GG-Ghost.sh            # 包装启动脚本（start/stop/status）
-├── gg-ghost-agentd              # 设备端守护进程
+├── gg-ghost-agentd        # 设备端守护进程
 ├── libKernelGg.so.gz      # GG 核心 hook so（gzip 压缩存储）
 ├── lib5_stub.gz           # GG 核心 ELF 桩（gzip 压缩存储）
 ├── ko/
-│   └── rwProcMem_module.ko  # 内核驱动（内存读写 + gg-ghost 触摸）
+│   ├── rwProcMem_module.ko      # 内存读写 + gg-ghost 触摸驱动
+│   └── hwBreakpointProc_module.ko  # 硬件断点驱动（全线程 INST_ALL）
 └── README.md              # 部署说明（简版）
 ```
 
@@ -190,7 +207,7 @@ g++ -std=c++17 -O2 -Wall -Wextra ^
 
 - **so 防落盘**：so 以 gzip 压缩存放，`start` 时自解压到 `/data/local/tmp/gg-ghost-runtime/`
 - **3 秒自动删除**：启动完成后 `sleep 3 && rm -f` 解压产物（防检测/取证，不留长期文件）
-- **驱动自动加载**：检查 `/proc/modules`，未加载则 `insmod`
+- **双驱动自动加载**：`load_ko` 加载 rwProcMem_module，`load_ko_bp` 加载断点模块（存在则加载，失败不影响内存/触摸）
 - **管理命令**：`start` / `stop` / `status`
 
 ### 使用
@@ -233,6 +250,24 @@ su -c 'sh /data/adb/GG-Ghost/GG-Ghost.sh stop'      # 停止
 
 **坐标获取**：`adb exec-out screencap -p` 截图 + 像素分析（PIL 扫目标按钮颜色簇质心）。
 
+### 硬件断点（gg_watch_set / poll / clear，全线程）
+
+```json
+{"name": "gg_watch_set", "arguments": {"addr": "0x707c510ed4", "len": 4, "type": 2}}
+{"name": "gg_watch_poll", "arguments": {}}
+{"name": "gg_watch_clear", "arguments": {}}
+```
+
+| 参数 | 说明 |
+|---|---|
+| addr | 监视地址（支持 `libgame+0x702ED4` 偏移语法，脚本端解析） |
+| type | 1=read / 2=write / 3=读写（默认 2） |
+| len | 监视长度字节（默认 4） |
+
+**全线程特性**：驱动 `CMD_INST_PROCESS_HWBP_ALL` 一次注册进程**全部线程**的 per-task 断点（任务切换自动换装 debug 寄存器，不受每 CPU 4 槽限制）。`watch_poll` 返回命中 PC + 反汇编上下文，可 `gg_disassemble` 反查写入代码。
+
+**用法流程**：`watch_set` → 用户操作触发写入 → `watch_poll` 拿命中 PC → `gg_disassemble` 看写入逻辑。
+
 ---
 
 ## 8. 反检测特性
@@ -266,6 +301,26 @@ su -c 'sh /data/adb/GG-Ghost/GG-Ghost.sh stop'      # 停止
 | GG-Ghost.sh 启动 | ✅ agentd RUNNING / ko LOADED / 3s 自动清理 so |
 | MCP 端到端 | ✅ `gg_ghost_tap(2035,918,150)` → `ok:1` → 游戏 UI 响应 |
 
+### 9.1 全线程硬件断点端到端（2026-08-18 20:05）
+
+| 环节 | 结果 |
+|---|---|
+| 全线程注册 | ✅ `gg_watch_set` → bps=65~69（游戏全线程，旧版仅 4-16） |
+| 断点命中 | ✅ 用户买越野摩托（-75000）→ `watch_poll` hits=1 |
+| 命中 PC | `0x707e5ca4ec` = `str w9, [x8]`（购买扣款写回） |
+| 反汇编 | `ldr w9,[x8] / sub w9,w9,w0 / str w9,[x8]` = 读-减-写回（x8=金币地址, w0=花费） |
+| 闭环验证 | 金币 1000059 → 925059（-75000 ✓ 与购买吻合） |
+| 设备稳定 | ✅ 无死机（两阶段注册修复后） |
+
+**对比旧版**：16 槽/4 线程注册 = 0 命中（抓不到工作线程写入）；128 槽/全线程 INST_ALL = 1 命中（抓到扣款代码）。
+
+### 9.2 金币定位与静态偏移（2026-08-18 20:10）
+
+- **逻辑金币静态偏移 = `libgame.so + 0x702ED4`**（.bss 全局变量）
+- 三次跨 ASLR 验证（进程重启后基址变化，偏移恒命中）：`模块基址 + 0x702ED4 = 金币值`
+- 镜像副本在 heap（无静态偏移）；UI 显示独立缓存（事件刷新）
+- 存档对象结构：金币附近 = 车辆条目数组（每 0x28 一条 {ID,flag,指针,112}）+ 状态标志 + 保存时间戳 + 槽名 "slot_0" + 魔数 0x12345678
+
 ---
 
 ## 10. 工具链备忘
@@ -277,7 +332,8 @@ su -c 'sh /data/adb/GG-Ghost/GG-Ghost.sh stop'      # 停止
 | 设备端工具 | `D:\project\ai_workspace\scripts\gg-ghost-touch.c`（用户态 + 内核双模式） |
 | 编译环境 | Linux Mint VM（king@192.168.42.128，key: `~/.ssh/vm_mint_ed25519`，内核树 /opt/gki） |
 | 构建产物 | `gg\build\agentd\gg-ghost-agentd`、`gg\build\pc\gg-ghost-mcp.exe`、`gg\build\native\libKernelGg.so/lib5_stub` |
-| 部署目录 | 设备 `/data/adb/GG-Ghost/`；PC 暂存 `D:\project\ai_workspace\temp\gg_hillclimb\GG-Ghost\` |
+| 部署目录 | 设备 `/data/adb/GG-Ghost/`；**成品包 `D:\Finished product\GG-Ghost\`** |
+| Python 脚本 | `gg\tools\`（ggghost.py / hillclimb_coin.py / ptrscan.py） |
 
 ### 相关命令速查
 
@@ -289,14 +345,59 @@ adb shell /data/local/tmp/gg-ghost-touch -p /proc/<MEM_KEY>/<MEM_KEY> kerneltap 
 
 # gg-mcp-server 启动
 cd D:\project\workbuddy\工具\gg && build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json --transport http --port 8788
+
+# Python 脚本（GG Lua 等价物）
+python gg\tools\ggghost.py read libgame+0x702ED4
+python gg\tools\hillclimb_coin.py freeze 999999
+python gg\tools\ptrscan.py libgame+0x702ED4
 ```
+
+---
+
+## 12. Python 脚本客户端（GG 修改器 Lua 等价物）
+
+`gg/tools/` 下 3 个脚本，封装 MCP 调用 + 静态偏移解析 + 状态保存，**AI 定位数据首选用脚本而非裸 curl**。
+
+| 文件 | 用途 |
+|---|---|
+| `ggghost.py` | 通用 MCP 客户端（45 工具封装，`libgame+0x` 偏移语法，CLI 模式） |
+| `hillclimb_coin.py` | 登山赛车金币脚本：`check` / `freeze` / `unfreeze` / `locate`（读值→搜→存 state）/ `locate2`（交叉→写测→冻结测） |
+| `ptrscan.py` | 多级指针扫描（`gg_set_results`→`gg_pointer_scan`→`gg_pointer_chain`→迭代到模块基址） |
+
+**用法**：
+```bash
+python tools/ggghost.py search <v> [type] [region]
+python tools/ggghost.py freeze libgame+0x702ED4 999999
+python tools/ggghost.py watch libgame+0x702ED4 2 4 && python tools/ggghost.py poll
+python tools/hillclimb_coin.py locate   # 第一步搜当前值存 state
+python tools/hillclimb_coin.py locate2 <新值>  # 第二步交叉收敛
+python tools/ptrscan.py <目标地址> [层数]  # 扫指针链
+```
+
+**适用判断**：全局变量（如金币 .bss）→ 静态偏移直接定位，**无指针链**（代码 adrp+add 相对寻址）；堆上动态对象（玩家/NPC/背包）→ 用 `ptrscan.py` 追指针链到基址。
+
+---
+
+## 13. 成品交付（D:\Finished product\GG-Ghost\）
+
+```
+D:\Finished product\GG-Ghost\
+├── GG-GHOST-MCP\            # PC 端（gg-ghost-mcp.exe + config\gg-ghost.json）
+├── GG-Ghost-Device\         # 设备端部署包（GG-Ghost.sh + agentd + so.gz + ko×2 + README）
+├── docs\GG-GHOST.md         # 本文档
+└── tools\                   # Python 脚本
+```
+
+**成品取用即部署**：设备端 push `/data/adb/GG-Ghost/` → `GG-Ghost.sh start`；PC 端 `gg-ghost-mcp.exe --config config\gg-ghost.json --port 8788`。
 
 ---
 
 ## 11. 后续规划
 
-- [ ] **金币定位闭环**：触摸链路已通 → 进游戏消费/赚取金币 → `gg_search_refine` 收敛唯一地址 → `gg_set_results`/`gg_freeze` 验证
+- [x] **金币定位闭环**：✅ 2026-08-18 完成（逻辑金币 `libgame+0x702ED4`，冻结=无限购买）
+- [x] **全线程硬件断点**：✅ 2026-08-18 完成（INST_ALL 69 线程注册，命中扣款代码）
 - [ ] **手势宏**：驱动侧加 swipe 多段曲线、双击、长按序列
 - [ ] **GG-Ghost 伪装**：虚拟设备参数对齐真实触屏（vendor/product/name），降低设备枚举检测面
 - [ ] **配置收敛**：GG-Ghost.sh 参数（PORT/KEY/KO 路径）抽到独立 config 文件
 - [ ] **Magisk 自启动**：接入 service.d 自动拉起
+- [ ] **钻石定位**：同法（钻石变化→交叉→偏移）
