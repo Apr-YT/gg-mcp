@@ -51,10 +51,10 @@ static const std::vector<ToolDef>& build() {
 
         // ---- 内存搜索 ----
         tool("gg_search",
-             "已知值精确搜索。value 支持十进制/0x十六进制，float/double 支持小数",
+             "已知值精确搜索。value 支持十进制/0x十六进制，float/double 支持小数；type=bytes 时 value 为 hex 字节序列（AoB 特征码，如 \"48 65 4C 4C\"）",
              json{
-                 {"value", prop("string", "要搜索的值（如 \"100\"、\"0x64\"、\"3.14\"）")},
-                 {"type", prop("string", "值类型", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
+                 {"value", prop("string", "要搜索的值（如 \"100\"、\"0x64\"、\"3.14\"；type=bytes 时为 hex 序列如 \"48 65 4C 4C\"）")},
+                 {"type", prop("string", "值类型", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\",\"bytes\"]")},
                  {"region", prop("string", "搜索区域", "\"enum\":[\"anonymous\",\"writable\",\"all\"]")},
              },
              json{"value"}),

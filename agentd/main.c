@@ -677,12 +677,24 @@ static void h_search(int fd, uint32_t seq, cJSON *p) {
     int type = cJSON_GetObjectItem(p, "type") ? cJSON_GetObjectItem(p, "type")->valueint : VT_DWORD;
     const char *vs = cJSON_GetObjectItem(p, "value") ? cJSON_GetObjectItem(p, "value")->valuestring : NULL;
     int region = cJSON_GetObjectItem(p, "region") ? cJSON_GetObjectItem(p, "region")->valueint : REGION_ANONYMOUS;
-    int ok = 0;
-    uint64_t value = parse_value_str(type, vs, &ok);
-    if (!ok) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "bad value"); return; }
     int64_t prev = (int64_t)g_eng.results.count;
-    int64_t found = search_exact(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, value, region);
-    if (found < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_INTERNAL, "search failed"); return; }
+    int64_t found = 0;
+
+    if (type == VT_BYTES) {
+        /* AoB 特征码搜索: value = hex 字符串 "48 65 4C 4C" */
+        uint8_t pat[256];
+        int plen = parse_hex_pattern(vs, pat, sizeof(pat));
+        if (plen <= 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "bad aob pattern"); return; }
+        found = search_aob(&g_eng.drv, g_eng.session_pid, &g_eng.results, pat, (size_t)plen, region);
+        if (found < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_INTERNAL, "aob search failed"); return; }
+    } else {
+        int ok = 0;
+        uint64_t value = parse_value_str(type, vs, &ok);
+        if (!ok) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "bad value"); return; }
+        found = search_exact(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, value, region);
+        if (found < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_INTERNAL, "search failed"); return; }
+    }
+
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "count", (double)found);
     cJSON_AddBoolToObject(r, "truncated", found >= (int64_t)g_eng.results.cap);

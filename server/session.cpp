@@ -72,6 +72,7 @@ int Session::norm_type(const json& t) {
         if (s == "qword" || s == "u64" || s == "long") return VT_QWORD;
         if (s == "float" || s == "f32") return VT_FLOAT;
         if (s == "double" || s == "f64") return VT_DOUBLE;
+        if (s == "bytes" || s == "aob") return VT_BYTES;
     }
     if (t.is_number_integer()) {
         int v = t.get<int>();

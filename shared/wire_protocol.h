@@ -111,7 +111,8 @@ enum gg_vtype {
     VT_DWORD = 3,  /* u32 */
     VT_QWORD = 4,  /* u64 */
     VT_FLOAT = 5,  /* f32 */
-    VT_DOUBLE = 6  /* f64 */
+    VT_DOUBLE = 6, /* f64 */
+    VT_BYTES = 7   /* AoB 字节序列（value=hex 字符串, 如 "48 65 4C 4C"） */
 };
 
 /* 模糊细化操作 */

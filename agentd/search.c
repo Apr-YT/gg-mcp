@@ -10,6 +10,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 /* 内存页大小（用于搜索时容错跳过不可读页，见下方各 got<=0 分支，C2） */
 #define GG_PAGE_SIZE 4096u
@@ -187,6 +188,92 @@ int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
         r->exact_vals = malloc(r->count * sizeof(uint64_t));
         if (r->exact_vals) {
             for (size_t i = 0; i < r->count; i++) r->exact_vals[i] = value;
+        }
+    }
+    return (int64_t)found;
+}
+
+/* ---------- AoB 特征码搜索 ---------- */
+
+/* 解析 hex pattern: 支持 "48 65 4C 4C" / "48654C4C"（空格/逗号可选）。返回字节数; -1 解析失败。 */
+int parse_hex_pattern(const char *s, uint8_t *out, size_t max) {
+    size_t n = 0;
+    if (!s) return -1;
+    while (*s) {
+        while (*s == ' ' || *s == '\t' || *s == ',') s++;
+        if (!*s) break;
+        if (!isxdigit((unsigned char)s[0]) || !isxdigit((unsigned char)s[1])) return -1;
+        int hi = s[0] <= '9' ? s[0] - '0' : (s[0] | 0x20) - 'a' + 10;
+        int lo = s[1] <= '9' ? s[1] - '0' : (s[1] | 0x20) - 'a' + 10;
+        if (n >= max) return -1;
+        out[n++] = (uint8_t)((hi << 4) | lo);
+        s += 2;
+    }
+    return (int)n;
+}
+
+/* AoB 搜索: 在区域内滑动匹配 pat[plen] 字节序列, 命中记录起始地址。
+ * 结果条目值类型记 VT_BYTE。 */
+int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
+                   const uint8_t *pat, size_t plen, int region_type) {
+    if (!pat || plen == 0 || plen > 256) return -1;
+
+    size_t nreg = 0;
+    gg_map_region_t *regs = process_search_regions(pid, &nreg, region_type);
+    if (!regs) return 0;
+
+    size_t keep_cap = r->cap ? r->cap : GG_RESULT_CAP_DEFAULT;
+    results_clear(r);
+    results_init(r, keep_cap);
+
+    static uint8_t chunk[GG_SEARCH_CHUNK + 256];
+    uint64_t found = 0;
+    for (size_t k = 0; k < nreg; k++) {
+        uint64_t addr = regs[k].start;
+        uint64_t len = regs[k].end - regs[k].start;
+        int fail_streak = 0;
+        while (len > 0) {
+            size_t rd = len > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)len;
+            ssize_t got = driver_read(d, pid, addr, chunk, rd);
+            if (got <= 0) {
+                uint64_t adv = gg_fault_advance(addr, len, rd, &fail_streak);
+                addr += adv; len -= adv;
+                continue;
+            }
+            fail_streak = 0;
+            rd = (size_t)got;
+            /* 块内滑动匹配; 块尾若可能跨块则补读补齐 */
+            for (size_t i = 0; i + plen <= rd; i++) {
+                if (memcmp(chunk + i, pat, plen) == 0) {
+                    if (results_push(r, addr + i) < 0) { free(regs); return (int64_t)found; }
+                    found++;
+                }
+            }
+            /* 跨块特征: 块尾不足 plen 时, 若还有后续数据则补读 */
+            if (rd >= plen && len > rd) {
+                /* 检查块尾 plen-1 个字节处是否可能开始特征 */
+                for (size_t i = rd - (plen - 1); i + plen <= rd + plen - 1 && i < rd; i++) {
+                    size_t need = plen - (rd - i);
+                    if (need == 0) continue;
+                    ssize_t got2 = driver_read(d, pid, addr + i, chunk + i, need);
+                    if (got2 > 0 && memcmp(chunk + i, pat, plen) == 0) {
+                        if (results_push(r, addr + i) < 0) { free(regs); return (int64_t)found; }
+                        found++;
+                    }
+                }
+            }
+            len -= rd;
+            addr += rd;
+        }
+    }
+    free(regs);
+
+    r->exact_vt = VT_BYTE;
+    r->exact_value = 0;
+    if (r->count > 0) {
+        r->exact_vals = malloc(r->count * sizeof(uint64_t));
+        if (r->exact_vals) {
+            for (size_t i = 0; i < r->count; i++) r->exact_vals[i] = 0;
         }
     }
     return (int64_t)found;

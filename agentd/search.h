@@ -59,6 +59,11 @@ int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
 int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
                      int vtype, double vmin, double vmax, int region_type);
 
+/* AoB 特征码搜索：pat[plen] 字节序列滑动匹配，命中起始地址。 */
+int parse_hex_pattern(const char *s, uint8_t *out, size_t max);
+int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
+                   const uint8_t *pat, size_t plen, int region_type);
+
 /* 模糊初始化：全置候选 + 快照。返回扫描元素数；-1 出错。 */
 int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
                             int vtype, int region_type);
