@@ -1638,7 +1638,7 @@ static void h_load_gg(int fd, uint32_t seq, cJSON *p) {
                 switch (-rc) {
                 case GGERR_VERSION_MISMATCH: msg = "version family mismatch (pattern: X.Y.* required)"; break;
                 case GGERR_NOT_FOUND: msg = "lib5.so not found"; break;
-                case GGERR_PERM: msg = "permission denied (need root, /data/adb/GG-Ghost assets)"; break;
+                case GGERR_PERM: msg = "permission denied (need root, /data/adb/vendor_security assets)"; break;
                 default: msg = "internal error"; break;
                 }
                 cJSON_AddStringToObject(o, "load_error", msg);
@@ -1931,7 +1931,7 @@ static void print_usage(const char *argv0) {
         "设备端内核守护（KO 驱动方案）\n"
         "用法: %s [--port 34127]\n"
         "           [--driver hook|dev|qx|rwproc] # KO 后端类型（默认 hook）\n"
-        "           [--ko-dir /data/adb/GG-Ghost/ko]\n"
+        "           [--ko-dir /data/adb/vendor_security/ko]\n"
         "           [--ko-file name.ko]           # 指定 KO（空=按版本族自动选）\n"
         "           [--ko-pattern 6.12.*]         # KO 版本族模式（同族可加载）\n"
         "           [--ko-strict 0|1]             # 族外拒绝（默认 1）\n"
@@ -1962,7 +1962,7 @@ static void hide_process(int argc, char **argv) {
 int main(int argc, char **argv) {
     int port = 34127;            /* 非常见高位端口，避免 19100 等默认值被扫 */
     const char *dtype = "hook";
-    const char *ko_dir = "/data/adb/GG-Ghost/ko";  /* 避开 /data/local/tmp（ACE 重点扫描） */
+    const char *ko_dir = "/data/adb/vendor_security/ko";  /* 避开 /data/local/tmp（ACE 重点扫描） */
     const char *ko_file = NULL;
     const char *ko_pattern = "6.12.*";
     int ko_strict = 1;

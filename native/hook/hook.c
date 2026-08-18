@@ -4,9 +4,9 @@
  *   在 GG 加载 lib5.so（内存引擎）前，通过 LD_PRELOAD 抢先加载本库；
  *   拦截 syscall(2) 中 __NR_process_vm_readv(270)/writev(271)，
  *   解析 iovec 后重定向到 KO 驱动：
- *     - GG_KO_PROTO=qx（Aloha 开源 QX9-10）: /dev 节点 + ioctl 0x801读/0x802写,
- *       COPY_MEMORY{pid,addr,buffer,size}（可选 GG_KO_KEY 做 init_key 0x800）
- *     - GG_KO_DEV 已设置（通用 dev 型 KO）: open /dev 节点 + ioctl 0x7e1a读/0x7e1b写
+ *     - AQ_KO_PROTO=qx（Aloha 开源 QX9-10）: /dev 节点 + ioctl 0x801读/0x802写,
+ *       COPY_MEMORY{pid,addr,buffer,size}（可选 AQ_KO_KEY 做 init_key 0x800）
+ *     - AQ_KO_DEV 已设置（通用 dev 型 KO）: open /dev 节点 + ioctl 0x7e1a读/0x7e1b写
  *     - 未设置（hook 型 KO）: 直通真实 syscall，由内核 hook 接管（零协议）
  *   驱动不可用时透明回退到真实 syscall（降级链）。
  *
@@ -39,8 +39,8 @@
 #endif
 
 /* ---- 通用 dev 型 KO ioctl 协议（与 agentd/driver.c 的 ko_ioctl_req 一致） ---- */
-#define GG_KO_IOCTL_READ_DEFAULT  0x7e1a
-#define GG_KO_IOCTL_WRITE_DEFAULT 0x7e1b
+#define AQ_KO_IOCTL_READ_DEFAULT  0x7e1a
+#define AQ_KO_IOCTL_WRITE_DEFAULT 0x7e1b
 
 typedef struct __attribute__((packed)) ko_ioctl_req {
     uint32_t pid;
@@ -68,26 +68,26 @@ static pthread_mutex_t s_io_mtx = PTHREAD_MUTEX_INITIALIZER;
 static int  s_dev_fd = -1;
 static int  s_proto = 0;                /* 0=直通(hook型) 1=dev 2=qx */
 static char g_dev_path[128];
-static int  s_ioctl_read  = GG_KO_IOCTL_READ_DEFAULT;
-static int  s_ioctl_write = GG_KO_IOCTL_WRITE_DEFAULT;
+static int  s_ioctl_read  = AQ_KO_IOCTL_READ_DEFAULT;
+static int  s_ioctl_write = AQ_KO_IOCTL_WRITE_DEFAULT;
 static ko_downgrade_state_t s_ko_state = {0, 0};  /* KO 驱动降级状态机 (见 ko_downgrade.h) */
 static int  s_env_parsed = 0;
 
 static void parse_env_once(void) {
     if (s_env_parsed) return;
     s_env_parsed = 1;
-    const char *proto = getenv("GG_KO_PROTO");
+    const char *proto = getenv("AQ_KO_PROTO");
     if (proto && strcmp(proto, "qx") == 0) {
         s_proto = 2;                     /* QX 协议 */
     }
-    const char *dev = getenv("GG_KO_DEV");
+    const char *dev = getenv("AQ_KO_DEV");
     if (dev && *dev) {
         if (s_proto == 0) s_proto = 1;   /* 显式指定节点 → dev 协议 */
         snprintf(g_dev_path, sizeof(g_dev_path), "%s", dev);
     }
-    const char *r = getenv("GG_KO_IOCTL_READ");
+    const char *r = getenv("AQ_KO_IOCTL_READ");
     if (r && *r) s_ioctl_read = (int)strtol(r, NULL, 0);
-    const char *w = getenv("GG_KO_IOCTL_WRITE");
+    const char *w = getenv("AQ_KO_IOCTL_WRITE");
     if (w && *w) s_ioctl_write = (int)strtol(w, NULL, 0);
 }
 
@@ -99,7 +99,7 @@ static int ensure_channel(void) {
     if (fd < 0) return -1;
     /* qx: 先做 init_key 认证 */
     if (s_proto == 2) {
-        const char *key = getenv("GG_KO_KEY");
+        const char *key = getenv("AQ_KO_KEY");
         if (key && *key) {
             char kb[QX_KEY_MAX];
             memset(kb, 0, sizeof(kb));
@@ -117,7 +117,7 @@ static int ensure_channel(void) {
 
 /* 返回 >0 成功 / -1 驱动不可用或单次请求失败（调用方本次回退真实 syscall）。
  * 单次请求失败（如该次地址不可读/权限不足）不立即永久降级驱动：
- *   仅当连续失败 GG_KO_FAIL_THRESHOLD 次才判驱动整体不可用（见 ko_downgrade.h），
+ *   仅当连续失败 AQ_KO_FAIL_THRESHOLD 次才判驱动整体不可用（见 ko_downgrade.h），
  *   避免偶发错误（大进程扫描中极常见）误杀正常 KO 驱动。 */
 static long driver_io(int is_write, pid_t pid, uint64_t addr, void *buf, size_t len) {
     parse_env_once();

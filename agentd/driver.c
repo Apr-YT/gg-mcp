@@ -18,6 +18,9 @@
 #define _GNU_SOURCE
 
 #include "driver.h"
+
+/* 日志（main.c 定义，非 static；写 --log 文件，失败时静默） */
+void log_msg(const char *fmt, ...);
 #include "version.h"
 
 #include <ctype.h>
@@ -462,7 +465,12 @@ int rwproc_attach(gg_driver_t *d) {
      *    模块内 list_del(modules 链表) + kobject_del(/sys/module)，
      *    /proc/modules 与 /sys/module 立即消失。失败不致命（节点已开，
      *    fd 引用仍在，功能不受影响）。 */
-    rwproc_call(d, d->rwproc_mem_fd, RWPROC_CMD_HIDE_KERNEL_MODULE, 0, 0, 0, NULL, 0);
+    {
+        ssize_t hr = rwproc_call(d, d->rwproc_mem_fd, RWPROC_CMD_HIDE_KERNEL_MODULE,
+                                 0, 0, 0, NULL, 0);
+        if (hr < 0)
+            log_msg("rwproc CMD_HIDE_KERNEL_MODULE failed: %s", d->last_error);
+    }
     snprintf(d->ko_module, sizeof(d->ko_module), "rwproc33");
     snprintf(d->ko_version, sizeof(d->ko_version), "rwProcMem33");
     snprintf(d->ko_file, sizeof(d->ko_file),
@@ -535,7 +543,7 @@ static ssize_t rwproc_write_mem(gg_driver_t *d, pid_t pid, uint64_t addr,
 
 int driver_touch_tap(gg_driver_t *d, uint32_t x, uint32_t y, uint32_t hold_ms) {
     if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_mem_fd < 0) {
-        set_err(d, "gg-touch: need rwproc33 driver");
+        set_err(d, "aq-dsp: need rwproc33 driver");
         return -1;
     }
     rwproc_gg_touch_tap_t arg = { x, y, hold_ms };
@@ -544,7 +552,7 @@ int driver_touch_tap(gg_driver_t *d, uint32_t x, uint32_t y, uint32_t hold_ms) {
     if (r < 0) return -1;
     if (r != 0) {   /* 驱动返回 0 成功, 负值 -errno */
         snprintf(d->last_error, sizeof(d->last_error),
-                 "gg-touch CMD_TAP(%u,%u) failed: %lld", x, y, (long long)r);
+                 "aq-dsp CMD_TAP(%u,%u) failed: %lld", x, y, (long long)r);
         return -1;
     }
     return 0;
@@ -553,7 +561,7 @@ int driver_touch_tap(gg_driver_t *d, uint32_t x, uint32_t y, uint32_t hold_ms) {
 int driver_touch_swipe(gg_driver_t *d, uint32_t x1, uint32_t y1,
                        uint32_t x2, uint32_t y2, uint32_t ms) {
     if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_mem_fd < 0) {
-        set_err(d, "gg-touch: need rwproc33 driver");
+        set_err(d, "aq-dsp: need rwproc33 driver");
         return -1;
     }
     rwproc_gg_touch_swipe_t arg = { x1, y1, x2, y2, ms };
@@ -562,7 +570,7 @@ int driver_touch_swipe(gg_driver_t *d, uint32_t x1, uint32_t y1,
     if (r < 0) return -1;
     if (r != 0) {
         snprintf(d->last_error, sizeof(d->last_error),
-                 "gg-touch CMD_SWIPE failed: %lld", (long long)r);
+                 "aq-dsp CMD_SWIPE failed: %lld", (long long)r);
         return -1;
     }
     return 0;

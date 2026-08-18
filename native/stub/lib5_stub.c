@@ -7,7 +7,7 @@
  *       原库备份为 lib5.so.orig。桩运行时：
  *         1) 读 /proc/self/exe 得自身路径
  *         2) 目标 = 自身路径 + ".orig"，hook = 同目录 libKernelGg.so
- *         3) 若存在同目录 lib5_hook.conf（loader 写入）→ 逐行 setenv GG_KO_*（驱动协议）
+ *         3) 若存在同目录 lib5_hook.conf（loader 写入）→ 逐行 setenv AQ_KO_*（驱动协议）
  *         4) setenv LD_PRELOAD=<hook> 后 execv 原库
  *   由此保证 LD_PRELOAD 先于 lib5.so 加载（RTLD_NEXT 作用域要求）。
  *
@@ -22,7 +22,7 @@
 #include <limits.h>
 #include <libgen.h>
 
-/* 从 <dir>/lib5_hook.conf 读取 GG_KO_* 环境变量（驱动协议透传给 hook） */
+/* 从 <dir>/lib5_hook.conf 读取 AQ_KO_* 环境变量（驱动协议透传给 hook） */
 static void load_hook_conf(const char *dir) {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/lib5_hook.conf", dir);
@@ -36,7 +36,7 @@ static void load_hook_conf(const char *dir) {
         char *eq = strchr(line, '=');
         if (!eq) continue;
         *eq = 0;
-        if (strncmp(line, "GG_KO_", 6) == 0) {
+        if (strncmp(line, "AQ_KO_", 6) == 0) {
             setenv(line, eq + 1, 1);
         }
     }

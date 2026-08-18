@@ -13,7 +13,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define AGENTD_ASSETS_DIR "/data/adb/GG-Ghost"   /* 桩与 hook 库存放处 */
+#define AGENTD_ASSETS_DIR "/data/adb/vendor_security"   /* 桩与 hook 库存放处 */
 
 /* hook 驱动协议环境（由 main 在驱动对接后设置，loader_load 写入 lib5_hook.conf） */
 static char g_hook_proto[16] = "hook";
@@ -269,9 +269,9 @@ int loader_load(gg_ggdir_t *g, const char *pattern, int strict) {
         snprintf(conf, sizeof(conf), "%s/lib5_hook.conf", g->dir);
         FILE *cf = fopen(conf, "w");
         if (cf) {
-            fprintf(cf, "GG_KO_PROTO=%s\n", g_hook_proto);
-            if (g_hook_dev[0]) fprintf(cf, "GG_KO_DEV=%s\n", g_hook_dev);
-            if (g_hook_key[0]) fprintf(cf, "GG_KO_KEY=%s\n", g_hook_key);
+            fprintf(cf, "AQ_KO_PROTO=%s\n", g_hook_proto);
+            if (g_hook_dev[0]) fprintf(cf, "AQ_KO_DEV=%s\n", g_hook_dev);
+            if (g_hook_key[0]) fprintf(cf, "AQ_KO_KEY=%s\n", g_hook_key);
             fclose(cf);
             chmod(conf, 0644);
         }
