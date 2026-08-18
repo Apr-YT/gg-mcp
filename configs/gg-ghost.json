@@ -12,8 +12,8 @@
     "strict": true
   },
   "ko": {
-    "type": "qx",
-    "dir": "/data/local/tmp/ggmcp/ko",
+    "type": "rwproc",
+    "dir": "/data/adb/vendor_security",
     "file": "",
     "version_pattern": "6.12.*",
     "strict": true,
