@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 内存面板（GG 风格 hex 编辑器 + 断点）：地址导航栏 + 三栏 hex 列表 + 长按操作栏 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/bg"
+    android:padding="6dp">
+
+    <!-- 地址导航栏 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/btnMemPrev"
+            style="@style/GGBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_weight="0"
+            android:paddingLeft="10dp"
+            android:paddingRight="10dp"
+            android:text="◀" />
+
+        <EditText
+            android:id="@+id/memAddr"
+            style="@style/GGEdit"
+            android:layout_marginLeft="4dp"
+            android:layout_marginRight="4dp"
+            android:fontFamily="monospace"
+            android:gravity="center"
+            android:hint="0x7f123400"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/btnMemNext"
+            style="@style/GGBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_weight="0"
+            android:paddingLeft="10dp"
+            android:paddingRight="10dp"
+            android:text="▶" />
+
+        <TextView
+            android:id="@+id/btnMemJump"
+            style="@style/GGBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_weight="0"
+            android:layout_marginLeft="4dp"
+            android:paddingLeft="8dp"
+            android:paddingRight="8dp"
+            android:text="跳转" />
+
+        <TextView
+            android:id="@+id/btnMemAdd"
+            style="@style/GGBtnPrimary"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_weight="0"
+            android:layout_marginLeft="4dp"
+            android:paddingLeft="8dp"
+            android:paddingRight="8dp"
+            android:text="+添加" />
+    </LinearLayout>
+
+    <!-- 三栏表头 -->
+    <LinearLayout
+        style="@style/GGHeader"
+        android:layout_marginTop="4dp">
+
+        <TextView style="@style/GGHeaderText" android:layout_width="90dp" android:text="地址" />
+        <TextView style="@style/GGHeaderText" android:layout_width="0dp" android:layout_weight="2" android:text="hex" />
+        <TextView style="@style/GGHeaderText" android:layout_width="0dp" android:layout_weight="1" android:text="ASCII" />
+    </LinearLayout>
+
+    <!-- hex 列表（每行 16 字节） -->
+    <ListView
+        android:id="@+id/memList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="@color/card"
+        android:divider="@color/divider"
+        android:dividerHeight="1dp" />
+
+    <!-- 选中信息 -->
+    <TextView
+        android:id="@+id/memInfo"
+        style="@style/GGInfo"
+        android:text="选中: -" />
+
+    <!-- 长按操作栏（修改/断点/搜索/保存/跳转） -->
+    <LinearLayout
+        android:id="@+id/opBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:background="@drawable/card_bg"
+        android:padding="4dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/btnOpModify"
+            style="@style/GGBtn"
+            android:text="修改" />
+        <TextView
+            android:id="@+id/btnOpBp"
+            style="@style/GGBtn"
+            android:layout_marginLeft="4dp"
+            android:text="断点" />
+        <TextView
+            android:id="@+id/btnOpSearch"
+            style="@style/GGBtn"
+            android:layout_marginLeft="4dp"
+            android:text="搜索" />
+        <TextView
+            android:id="@+id/btnOpSave"
+            style="@style/GGBtn"
+            android:layout_marginLeft="4dp"
+            android:text="保存" />
+        <TextView
+            android:id="@+id/btnOpJump"
+            style="@style/GGBtn"
+            android:layout_marginLeft="4dp"
+            android:text="跳转" />
+        <TextView
+            android:id="@+id/btnOpClose"
+            style="@style/GGBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_weight="0"
+            android:layout_marginLeft="4dp"
+            android:paddingLeft="8dp"
+            android:paddingRight="8dp"
+            android:text="✕" />
+    </LinearLayout>
+</LinearLayout>

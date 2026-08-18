@@ -1,0 +1,94 @@
+<resources>
+    <string name="app_name">GG Tool</string>
+    <string name="start_overlay">启动悬浮窗</string>
+    <string name="stop_overlay">停止悬浮窗</string>
+    <string name="overlay_permission_required">需要悬浮窗权限</string>
+    <string name="grant_permission">去授权</string>
+    <string name="overlay_running">悬浮窗已启动</string>
+
+    <!-- 主窗口 -->
+    <string name="tab_search">搜索</string>
+    <string name="tab_saved">保存</string>
+    <string name="tab_freeze">冻结</string>
+    <string name="close">关闭</string>
+    <string name="minimize">最小化</string>
+    <string name="drag_hint">拖动标题栏移动窗口</string>
+
+    <!-- 搜索 -->
+    <string name="search_value">搜索值</string>
+    <string name="search_value_hint">输入数值…</string>
+    <string name="type">类型</string>
+    <string name="range">范围</string>
+    <string name="new_search">新搜索</string>
+    <string name="search">搜索</string>
+    <string name="result_count">结果：%1$d</string>
+    <string name="no_results">未找到结果</string>
+    <string name="searching">搜索中…</string>
+    <string name="select_all">全选</string>
+    <string name="clear_selection">清空</string>
+
+    <!-- 类型 -->
+    <string name="type_byte">BYTE</string>
+    <string name="type_word">WORD</string>
+    <string name="type_dword">DWORD</string>
+    <string name="type_qword">QWORD</string>
+    <string name="type_float">FLOAT</string>
+    <string name="type_double">DOUBLE</string>
+
+    <!-- 搜索模式 -->
+    <string name="mode_exact">Exact</string>
+    <string name="mode_greater">Greater Than</string>
+    <string name="mode_less">Less Than</string>
+    <string name="mode_changed">Changed</string>
+    <string name="mode_unchanged">Unchanged</string>
+
+    <!-- 范围 -->
+    <string name="range_all">Anonymous</string>
+    <string name="range_heap">Heap</string>
+    <string name="range_lib">libxxx.so</string>
+    <string name="range_stack">Stack</string>
+    <string name="range_ca">Code (A)</string>
+
+    <!-- 结果列表 -->
+    <string name="result_row_hint">%1$s · %2$s</string>
+
+    <!-- 长按菜单 -->
+    <string name="menu_modify">修改数值</string>
+    <string name="menu_add_saved">添加到保存列表</string>
+    <string name="menu_freeze">冻结</string>
+    <string name="menu_unfreeze">解冻</string>
+    <string name="menu_details">查看详情</string>
+    <string name="menu_copy_address">复制地址</string>
+    <string name="menu_cancel">取消</string>
+
+    <!-- 修改对话框 -->
+    <string name="edit_title">修改数值</string>
+    <string name="edit_address">地址</string>
+    <string name="edit_current">当前值</string>
+    <string name="edit_new">新值</string>
+    <string name="edit_ok">修改</string>
+    <string name="edit_cancel">取消</string>
+    <string name="edit_success">已修改</string>
+    <string name="edit_invalid">请输入有效数值</string>
+
+    <!-- 保存列表 -->
+    <string name="saved_title">保存列表</string>
+    <string name="saved_empty">保存列表为空</string>
+    <string name="delete_confirm">确定删除该项？</string>
+    <string name="yes">确定</string>
+    <string name="no">取消</string>
+
+    <!-- 冻结列表 -->
+    <string name="freeze_title">冻结列表</string>
+    <string name="freeze_empty">冻结列表为空</string>
+    <string name="status_frozen">Frozen</string>
+    <string name="status_active">Active</string>
+
+    <!-- 键盘 -->
+    <string name="kb_ok">OK</string>
+    <string name="kb_clear">清除</string>
+
+    <!-- 通知 -->
+    <string name="notif_title">GG Tool 运行中</string>
+    <string name="notif_text">点击返回悬浮球</string>
+</resources>

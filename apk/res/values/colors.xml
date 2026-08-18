@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- GG 101.1 / 宇航员修改器 视觉色板（复刻自 太空旅客 APK 资源表 + 实机截图） -->
+<resources>
+    <!-- 背景层（GG 深蓝灰 #263238，实机为黑底，取其中间值近黑蓝灰） -->
+    <color name="bg">#FF1A2126</color>            <!-- 悬浮窗/面板背景（近黑蓝灰） -->
+    <color name="card">#FF263238</color>           <!-- 卡片/行背景（GG 经典 263238） -->
+    <color name="titlebar">#FF37474F</color>       <!-- 标题栏（蓝灰 700） -->
+    <color name="input_bg">#FF1E262B</color>       <!-- 输入框底（更暗的凹槽） -->
+    <color name="divider">#FF455A64</color>        <!-- 分割线/蓝灰 700 -->
+    <color name="highlight">#3355AAFF</color>      <!-- 选中高亮（霓虹蓝半透明） -->
+
+    <!-- 品牌/按钮 -->
+    <color name="primary">#FF55AAFF</color>        <!-- GG 霓虹蓝（主按钮/强调） -->
+    <color name="primary_pressed">#FF3D8FD8</color>
+    <color name="btn_dark">#FF37474F</color>       <!-- 次按钮（蓝灰） -->
+    <color name="btn_dark_pressed">#FF455A64</color>
+    <color name="on_primary">#FF101010</color>     <!-- 霓虹蓝按钮上的深色文字（对比度≥7:1） -->
+
+    <!-- 文本 -->
+    <color name="text">#FFFFFFFF</color>
+    <color name="text_secondary">#FF94A3B8</color> <!-- 插件推荐 muted fg（6.5:1，替代原 #AAAAAA） -->
+    <color name="text_hint">#FF999999</color>      <!-- 提示（4.6:1） -->
+
+    <!-- GG 霓虹值色（复刻自资源表 35 色） -->
+    <color name="addr">#FF88CCCC</color>           <!-- 地址 浅青 -->
+    <color name="hex">#FFAAFFAA</color>            <!-- hex 浅绿 -->
+    <color name="green">#FF55FFAA</color>          <!-- 冻结/成功 霓虹绿 -->
+    <color name="red">#FFFF0000</color>            <!-- 断点/警告 纯红（边框/圆点） -->
+    <color name="red_text">#FFFF7777</color>       <!-- 红字（4.9:1） -->
+    <color name="alert_red">#FFFF0000</color>      <!-- 断点命中通知底 -->
+    <color name="notif_err">#FFB35900</color>      <!-- 错误通知底 -->
+
+    <!-- 通知文字：红/绿底用深色文字保证 ≥4.5:1 -->
+    <color name="notif_text_dark">#FF101018</color>
+
+    <!-- 日志/命中行（对话框内） -->
+    <color name="hit_bg">#FF2A1418</color>
+    <color name="hit_text">#FFFF7A7A</color>
+    <color name="hit_body">#FFE8B0B0</color>
+</resources>

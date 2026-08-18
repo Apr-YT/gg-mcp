@@ -1,0 +1,31 @@
+{
+  "transport": "http",
+  "http_port": 8788,
+  "adb": "adb",
+  "serial": "134d2f8",
+  "agent_port": 19100,
+  "safe_mode": true,
+  "shell_enabled": false,
+  "result_cap": 100000,
+  "gg": {
+    "version_pattern": "101.*",
+    "strict": true
+  },
+  "ko": {
+    "type": "qx",
+    "dir": "/data/local/tmp/ggmcp/ko",
+    "file": "",
+    "version_pattern": "6.12.*",
+    "strict": true,
+    "dev_path": "",
+    "qx_key": ""
+  },
+  "ida": {
+    "enabled": true,
+    "mcp_url": "http://127.0.0.1:13337",
+    "mcp_path": "/mcp",
+    "tool_name": "decompile_function",
+    "arg_name": "address",
+    "timeout_ms": 3000
+  }
+}

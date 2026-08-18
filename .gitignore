@@ -1,0 +1,18 @@
+# 构建产物
+build/
+*.exe
+*.o
+*.obj
+
+# 设备端部署目录
+*.kpm
+
+# 日志
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# 运行时数据/敏感
+annotations.json

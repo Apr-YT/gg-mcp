@@ -1,0 +1,28 @@
+{
+  "说明": "把本文件内容按你的 MCP 客户端格式配置。stdio 模式需先 build_pc.bat 构建。",
+  "claude_desktop_config": {
+    "mcpServers": {
+      "gg-mcp": {
+        "command": "D:\\project\\workbuddy\\工具\\gg\\build\\pc\\gg-mcp-server.exe",
+        "args": ["--config", "D:\\project\\workbuddy\\工具\\gg\\configs\\ggmcp.json", "--transport", "stdio"]
+      }
+    }
+  },
+  "claude_code": {
+    "mcpServers": {
+      "gg-mcp": {
+        "type": "stdio",
+        "command": "D:/project/workbuddy/工具/gg/build/pc/gg-mcp-server.exe",
+        "args": ["--config", "D:/project/workbuddy/工具/gg/configs/ggmcp.json", "--transport", "stdio"]
+      }
+    }
+  },
+  "cline_http": {
+    "mcpServers": {
+      "gg-mcp": {
+        "type": "http",
+        "url": "http://127.0.0.1:8788/mcp"
+      }
+    }
+  }
+}

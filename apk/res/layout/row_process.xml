@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 进程行：应用标签（主）+ 包名 · PID（次） -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingLeft="10dp"
+    android:paddingRight="10dp"
+    android:paddingTop="7dp"
+    android:paddingBottom="7dp"
+    android:background="@drawable/row_press_bg">
+
+    <TextView
+        android:id="@+id/procLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/text"
+        android:textSize="14sp"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:text="" />
+
+    <TextView
+        android:id="@+id/procMeta"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:fontFamily="monospace"
+        android:textColor="@color/text_secondary"
+        android:textSize="11sp"
+        android:maxLines="1"
+        android:ellipsize="middle"
+        android:text="" />
+</LinearLayout>

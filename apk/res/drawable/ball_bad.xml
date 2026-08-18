@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 悬浮球：断开/重连（红边） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <solid android:color="@color/btn_dark" />
+    <stroke android:width="2dp" android:color="@color/red" />
+</shape>

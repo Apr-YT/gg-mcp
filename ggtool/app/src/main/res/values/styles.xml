@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- GG 书签 tab：等分、48dp 触控、选中白字+浅底 -->
+    <style name="GgTab" parent="android:Widget.Material.TextView">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:gravity">center</item>
+        <item name="android:minHeight">@dimen/touch_min</item>
+        <item name="android:textColor">@color/text_secondary</item>
+        <item name="android:textSize">@dimen/text_sm</item>
+    </style>
+
+    <!-- 选中的书签 tab -->
+    <style name="GgTab.Selected">
+        <item name="android:background">@drawable/tab_sel</item>
+        <item name="android:textColor">@color/on_primary</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
+    <!-- 工具栏 tab 按钮：蓝灰底、等分、48dp 触控 -->
+    <style name="ToolbarTab" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:background">@drawable/btn_dark</item>
+        <item name="android:textColor">@color/text_secondary</item>
+        <item name="android:textSize">@dimen/text_sm</item>
+        <item name="android:minHeight">@dimen/touch_min</item>
+    </style>
+
+    <!-- 选中的 tab -->
+    <style name="ToolbarTab.Selected">
+        <item name="android:background">@drawable/btn_primary</item>
+        <item name="android:textColor">@color/on_primary</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
+    <!-- 紧凑文本框 -->
+    <style name="Widget.GG.EditText" parent="android:Widget.Material.EditText">
+        <item name="android:background">@drawable/edit_bg</item>
+        <item name="android:padding">@dimen/spacing_sm</item>
+        <item name="android:textColor">@color/text</item>
+        <item name="android:textColorHint">@color/text_hint</item>
+        <item name="android:textSize">@dimen/text_md</item>
+        <item name="android:minHeight">@dimen/touch_min</item>
+        <item name="android:singleLine">true</item>
+    </style>
+
+    <!-- 次级文本 -->
+    <style name="GGTextSecondary">
+        <item name="android:textColor">@color/text_secondary</item>
+        <item name="android:textSize">@dimen/text_sm</item>
+    </style>
+
+    <!-- 键盘普通键：等分、暗底 -->
+    <style name="KeyButton" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">@dimen/key_height</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:layout_margin">@dimen/spacing_xs</item>
+        <item name="android:background">@drawable/key_bg</item>
+        <item name="android:textColor">@color/key_text</item>
+        <item name="android:textSize">@dimen/text_lg</item>
+        <item name="android:minWidth">@dimen/key_width</item>
+    </style>
+
+    <!-- 键盘强调键（OK）：霓虹蓝底深字 -->
+    <style name="KeyAccentButton" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">@dimen/key_height</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:layout_margin">@dimen/spacing_xs</item>
+        <item name="android:background">@drawable/key_accent_bg</item>
+        <item name="android:textColor">@color/key_accent_text</item>
+        <item name="android:textSize">@dimen/text_lg</item>
+        <item name="android:minWidth">@dimen/key_width</item>
+    </style>
+
+</resources>

@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 修改数值对话框：地址/当前值/新值 + 内建数字键盘 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@color/card"
+    android:padding="@dimen/spacing_lg">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/edit_title"
+        android:textColor="@color/text"
+        android:textSize="@dimen/text_lg"
+        android:textStyle="bold" />
+
+    <!-- 地址 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/spacing_md"
+        android:text="@string/edit_address"
+        style="@style/GGTextSecondary" />
+
+    <TextView
+        android:id="@+id/tv_address"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fontFamily="monospace"
+        android:textColor="@color/addr"
+        android:textSize="@dimen/text_md" />
+
+    <!-- 当前值 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/spacing_md"
+        android:text="@string/edit_current"
+        style="@style/GGTextSecondary" />
+
+    <TextView
+        android:id="@+id/tv_current"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fontFamily="monospace"
+        android:textColor="@color/hex"
+        android:textSize="@dimen/text_md" />
+
+    <!-- 新值 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/spacing_md"
+        android:text="@string/edit_new"
+        style="@style/GGTextSecondary" />
+
+    <EditText
+        android:id="@+id/et_new_value"
+        style="@style/Widget.GG.EditText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:inputType="numberDecimal|numberSigned"
+        android:focusable="false"
+        android:focusableInTouchMode="false" />
+
+    <!-- 内建数字键盘 -->
+    <LinearLayout
+        android:id="@+id/keyboard_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/spacing_md"
+        android:orientation="vertical" />
+
+    <!-- 按钮行 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/spacing_lg"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btn_cancel"
+            android:layout_width="0dp"
+            android:layout_height="@dimen/touch_min"
+            android:layout_weight="1"
+            android:layout_marginRight="@dimen/spacing_sm"
+            android:background="@drawable/btn_dark"
+            android:text="@string/edit_cancel"
+            android:textColor="@color/text"
+            android:textSize="@dimen/text_md" />
+
+        <Button
+            android:id="@+id/btn_ok"
+            android:layout_width="0dp"
+            android:layout_height="@dimen/touch_min"
+            android:layout_weight="1"
+            android:background="@drawable/btn_primary"
+            android:text="@string/edit_ok"
+            android:textColor="@color/on_primary"
+            android:textSize="@dimen/text_md"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+</LinearLayout>

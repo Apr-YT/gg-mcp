@@ -1,0 +1,320 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 设置面板（GG 分组风格）：引擎 / 显示 / 操作 / 数据 -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="8dp">
+
+        <!-- ============ 引擎 ============ -->
+        <TextView style="@style/GGSection" android:text="引擎" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/card_bg"
+            android:padding="6dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    style="@style/GGHeaderText"
+                    android:text="内核驱动: " />
+                <TextView
+                    android:id="@+id/statusKernel"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:fontFamily="monospace"
+                    android:textColor="@color/hex"
+                    android:textSize="12sp"
+                    android:text="未检测" />
+                <TextView
+                    android:id="@+id/btnRefreshStatus"
+                    style="@style/GGBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:text="刷新" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="4dp"
+                android:gravity="center_vertical">
+
+                <TextView
+                    style="@style/GGHeaderText"
+                    android:text="当前进程: " />
+                <TextView
+                    android:id="@+id/tvProcessName"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:ellipsize="middle"
+                    android:maxLines="1"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp"
+                    android:text="未选择进程" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="6dp">
+
+                <TextView
+                    android:id="@+id/btnSelectProcess"
+                    style="@style/GGBtnPrimary"
+                    android:text="选择进程" />
+                <TextView
+                    android:id="@+id/btnDetach"
+                    style="@style/GGBtn"
+                    android:layout_marginLeft="4dp"
+                    android:text="分离" />
+                <TextView
+                    android:id="@+id/btnEngine"
+                    style="@style/GGBtn"
+                    android:layout_marginLeft="4dp"
+                    android:text="启动引擎" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ============ 显示 ============ -->
+        <TextView style="@style/GGSection" android:text="显示" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/card_bg"
+            android:padding="6dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    style="@style/GGHeaderText"
+                    android:layout_width="wrap_content"
+                    android:text="悬浮窗透明度" />
+                <SeekBar
+                    android:id="@+id/seekOpacity"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginLeft="8dp"
+                    android:max="100"
+                    android:progress="85" />
+                <TextView
+                    android:id="@+id/tvOpacity"
+                    style="@style/GGHeaderText"
+                    android:layout_width="wrap_content"
+                    android:text="85%" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:orientation="horizontal"
+                android:layout_marginTop="6dp"
+                android:gravity="center_vertical">
+
+                <TextView
+                    style="@style/GGHeaderText"
+                    android:layout_width="wrap_content"
+                    android:text="悬浮球大小" />
+                <TextView
+                    android:id="@+id/ballSizeS"
+                    style="@style/GGBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0"
+                    android:layout_marginLeft="8dp"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:text="小" />
+                <TextView
+                    android:id="@+id/ballSizeM"
+                    style="@style/GGBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0"
+                    android:layout_marginLeft="4dp"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:text="中" />
+                <TextView
+                    android:id="@+id/ballSizeL"
+                    style="@style/GGBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0"
+                    android:layout_marginLeft="4dp"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:text="大" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:orientation="horizontal"
+                android:layout_marginTop="6dp"
+                android:gravity="center_vertical">
+
+                <TextView
+                    style="@style/GGHeaderText"
+                    android:layout_width="wrap_content"
+                    android:text="字体大小" />
+                <TextView
+                    android:id="@+id/fontS"
+                    style="@style/GGBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0"
+                    android:layout_marginLeft="8dp"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:text="小" />
+                <TextView
+                    android:id="@+id/fontM"
+                    style="@style/GGBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0"
+                    android:layout_marginLeft="4dp"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:text="中" />
+                <TextView
+                    android:id="@+id/fontL"
+                    style="@style/GGBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="0"
+                    android:layout_marginLeft="4dp"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:text="大" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ============ 操作 ============ -->
+        <TextView style="@style/GGSection" android:text="操作" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/card_bg"
+            android:padding="6dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    style="@style/GGHeaderText"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="断点命中震动" />
+                <Switch
+                    android:id="@+id/swVibrate"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="true" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    style="@style/GGHeaderText"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="断点命中通知" />
+                <Switch
+                    android:id="@+id/swNotify"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="true" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    style="@style/GGHeaderText"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="开机自启" />
+                <Switch
+                    android:id="@+id/swBoot"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="false" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ============ 数据 ============ -->
+        <TextView style="@style/GGSection" android:text="数据" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/btnLog"
+                style="@style/GGBtn"
+                android:text="操作日志" />
+            <TextView
+                android:id="@+id/btnExportSave"
+                style="@style/GGBtn"
+                android:layout_marginLeft="4dp"
+                android:text="导出保存列表" />
+            <TextView
+                android:id="@+id/btnAbout"
+                style="@style/GGBtn"
+                android:layout_marginLeft="4dp"
+                android:text="关于" />
+        </LinearLayout>
+
+        <TextView
+            style="@style/GGInfo"
+            android:layout_marginTop="10dp"
+            android:text="GG-MCP 悬浮监控 v2.0\nGG 纯蓝调 UI · 仅供技术研究\n若 app 被系统冻结: 设置里将本应用设为不优化" />
+    </LinearLayout>
+</ScrollView>

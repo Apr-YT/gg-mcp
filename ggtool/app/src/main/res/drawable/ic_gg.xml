@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- GG 图标：悬浮球/游戏图标（蓝色圆 + GG 字样风格，矢量） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF55AAFF"
+        android:pathData="M12,2A10,10 0 1,0 12,22A10,10 0 1,0 12,2" />
+    <path
+        android:fillColor="#FF101010"
+        android:pathData="M7.5,8.2h2.1l2.4,4.2 2.4,-4.2h2.1v7.6h-2.1v-4.4l-2.4,4.2 -2.4,-4.2v4.4h-2.1z" />
+</vector>

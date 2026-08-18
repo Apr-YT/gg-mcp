@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="types">
+        <item>dword</item>
+        <item>byte</item>
+        <item>word</item>
+        <item>qword</item>
+        <item>float</item>
+        <item>double</item>
+    </string-array>
+    <string-array name="regions">
+        <item>anonymous</item>
+        <item>writable</item>
+        <item>all</item>
+    </string-array>
+    <string-array name="ops">
+        <item>increased</item>
+        <item>decreased</item>
+        <item>unchanged</item>
+        <item>changed</item>
+    </string-array>
+</resources>

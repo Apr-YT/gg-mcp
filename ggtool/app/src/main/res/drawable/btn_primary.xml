@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 主按钮：霓虹蓝底 + 深色文字（对比度 ≥7:1） -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/primary_pressed" />
+            <corners android:radius="@dimen/radius_sm" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/primary" />
+            <corners android:radius="@dimen/radius_sm" />
+        </shape>
+    </item>
+</selector>

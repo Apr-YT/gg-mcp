@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 保存列表行（6 列）：勾选 | 描述 | 地址 | 值 | 类型 | 冻结 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:minHeight="40dp"
+    android:paddingLeft="6dp"
+    android:paddingRight="6dp"
+    android:background="@drawable/row_press_bg">
+
+    <CheckBox
+        android:id="@+id/chkSel"
+        android:layout_width="28dp"
+        android:layout_height="wrap_content"
+        android:buttonTint="@color/green" />
+
+    <TextView
+        android:id="@+id/txtDesc"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1.5"
+        android:textColor="@color/text"
+        android:textSize="12sp"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:text="" />
+
+    <TextView
+        android:id="@+id/txtAddr"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:fontFamily="monospace"
+        android:textColor="@color/addr"
+        android:textSize="11sp"
+        android:shadowColor="#6688CCCC"
+        android:shadowDx="0"
+        android:shadowDy="0"
+        android:shadowRadius="6"
+        android:text="" />
+
+    <TextView
+        android:id="@+id/txtValue"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="0.8"
+        android:fontFamily="monospace"
+        android:textColor="@color/text"
+        android:textSize="12sp"
+        android:gravity="end"
+        android:shadowColor="#55FFFFFF"
+        android:shadowDx="0"
+        android:shadowDy="0"
+        android:shadowRadius="4"
+        android:text="" />
+
+    <TextView
+        android:id="@+id/txtType"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="0.5"
+        android:fontFamily="monospace"
+        android:textColor="@color/hex"
+        android:textSize="11sp"
+        android:gravity="center"
+        android:text="" />
+
+    <CheckBox
+        android:id="@+id/chkFreeze"
+        android:layout_width="28dp"
+        android:layout_height="wrap_content"
+        android:buttonTint="@color/green" />
+</LinearLayout>

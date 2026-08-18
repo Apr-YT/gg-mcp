@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 尺寸：GG 紧凑风格，全部触控目标 ≥48dp -->
+    <dimen name="touch_min">48dp</dimen>
+    <dimen name="icon_size">24dp</dimen>
+    <dimen name="icon_padding">12dp</dimen>
+    <dimen name="spacing_xs">4dp</dimen>
+    <dimen name="spacing_sm">8dp</dimen>
+    <dimen name="spacing_md">12dp</dimen>
+    <dimen name="spacing_lg">16dp</dimen>
+    <dimen name="spacing_xl">24dp</dimen>
+
+    <dimen name="text_xs">10sp</dimen>
+    <dimen name="text_sm">12sp</dimen>
+    <dimen name="text_md">14sp</dimen>
+    <dimen name="text_lg">16sp</dimen>
+    <dimen name="text_xl">18sp</dimen>
+
+    <dimen name="row_height">48dp</dimen>
+    <dimen name="toolbar_height">48dp</dimen>
+    <dimen name="header_height">40dp</dimen>
+    <dimen name="divider_height">1dp</dimen>
+    <dimen name="radius_sm">4dp</dimen>
+    <dimen name="radius_md">8dp</dimen>
+
+    <!-- 悬浮球 -->
+    <dimen name="ball_size">44dp</dimen>
+    <dimen name="ball_drag_threshold">36dp</dimen>
+
+    <!-- 键盘 -->
+    <dimen name="key_width">56dp</dimen>
+    <dimen name="key_height">44dp</dimen>
+</resources>

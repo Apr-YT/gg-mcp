@@ -1,0 +1,147 @@
+/* itest.c — 设备端集成测试：内核引擎全链路
+ *
+ * 场景（在 root 设备上运行）:
+ *   1. fork 子进程: mmap 匿名内存, 写入已知 dword 0x12345678,
+ *      收到 SIGUSR1 后才开始每 50ms 自增（避免搜索前值已变）
+ *   2. 父进程: driver_init + self_test（打印驱动通道状态）
+ *   3. attach 子进程 → search_exact(dword 0x12345678) → 断言命中 >= 1
+ *   4. 取首个地址读回验证 → write 0x99999999 → 读回验证
+ *   5. 发 SIGUSR1（子进程开始自增）→ freeze_add(0x99999999)
+ *      → 等待 300ms → 读回仍为 0x99999999（冻结覆盖自增）
+ *   6. unfreeze → 等待 150ms → 读回 != 0x99999999（自增恢复）
+ * 任何路径都 kill 子进程, 避免孤儿进程悬挂 adb 管道。
+ *
+ * 编译: aarch64-linux-android28-clang -O2 -I<root> itest.c agentd 下全部 .c + third_party/cJSON.c -pie
+ * 运行: adb shell su -c '/data/local/tmp/ggmcp/itest'
+ */
+#include "../../agentd/driver.h"
+#include "../../agentd/freeze.h"
+#include "../../agentd/process.h"
+#include "../../agentd/search.h"
+#include "../../agentd/version.h"
+
+#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static int fails = 0;
+static pid_t g_child = -1;
+#define CHECK(cond, msg) do { \
+    if (!(cond)) { printf("FAIL: %s\n", msg); fails++; } \
+    else { printf("ok  : %s\n", msg); } \
+} while (0)
+
+static volatile int g_start = 0;
+static void on_sigusr1(int s) { (void)s; g_start = 1; }
+
+static void cleanup(void) {
+    if (g_child > 0) {
+        kill(g_child, SIGKILL);
+        waitpid(g_child, NULL, 0);
+        g_child = -1;
+    }
+}
+
+/* 采样 count_equals: 在 delay_ms 间隔内采样 samples 次, 统计值等于 target 的次数 */
+static int count_equals(gg_driver_t *d, pid_t pid, uint64_t addr, uint32_t target,
+                        int samples, int delay_ms) {
+    int hits = 0;
+    for (int i = 0; i < samples; i++) {
+        uint8_t b[4];
+        if (driver_read(d, pid, addr, b, 4) == 4 &&
+            read_bits(b, VT_DWORD) == (uint64_t)target) hits++;
+        usleep((useconds_t)delay_ms * 1000);
+    }
+    return hits;
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);   /* 无缓冲, 崩溃时保留进度输出 */
+    atexit(cleanup);
+    printf("== itest: GG-MCP 引擎集成测试 ==\n");
+
+    /* 1) 子进程: 已知值 + 收到 SIGUSR1 后自增 */
+    g_child = fork();
+    if (g_child == 0) {
+        /* 脱离终端并关闭 stdio, 避免父退出后 adb 管道悬挂 */
+        setsid();
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, 0); dup2(devnull, 1); dup2(devnull, 2);
+            if (devnull > 2) close(devnull);
+        }
+        signal(SIGUSR1, on_sigusr1);
+        void *p = mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) _exit(2);
+        volatile uint32_t *v = (volatile uint32_t *)((char *)p + 4096);
+        *v = 0x12345678u;
+        while (!g_start) usleep(10000);       /* 等 SIGUSR1 */
+        for (;;) {
+            *v = *v + 1u;                     /* 每 50ms 自增 */
+            usleep(50000);
+        }
+    }
+    if (g_child < 0) { printf("FATAL: fork failed\n"); return 1; }
+    usleep(200000);
+
+    /* 2) 驱动初始化 + 自检 */
+    gg_driver_t drv;
+    driver_init(&drv, "hook", NULL, 0x7e1a, 0x7e1b);
+    int st = driver_self_test(&drv);
+    printf("driver self-test: %d (%s)\n", st, driver_state_str(drv.state));
+    CHECK(st >= 0, "driver channel available (kernel or degraded)");
+    printf("  note: state=ko-hook/kernel-driver 表示 KO/QX 通道 OK；degraded 表示走降级链\n");
+
+    /* 3) 精确搜索（子进程尚未自增, 值应为 0x12345678） */
+    gg_results_t res;
+    results_init(&res, 100000);
+    int64_t n = search_exact(&drv, g_child, &res, VT_DWORD, 0x12345678u, REGION_ANONYMOUS);
+    printf("search 0x12345678 -> %lld hits\n", (long long)n);
+    CHECK(n >= 1, "exact search found the value");
+    if (n < 1) return 1;
+    uint64_t addr = res.addrs[0];
+    printf("  first hit: 0x%llx\n", (unsigned long long)addr);
+
+    /* 4) 读回验证 + 写入 */
+    uint8_t buf[8];
+    CHECK(driver_read(&drv, g_child, addr, buf, 4) == 4, "read 4 bytes");
+    CHECK(read_bits(buf, VT_DWORD) == 0x12345678u, "read value matches");
+    uint8_t wbuf[8];   /* encode_value_local 契约: 缓冲区 ≥ 8 字节 */
+    encode_value_local(VT_DWORD, 0x99999999u, wbuf);
+    CHECK(driver_write(&drv, g_child, addr, wbuf, 4) == 4, "write 4 bytes");
+    CHECK(driver_read(&drv, g_child, addr, buf, 4) == 4 &&
+          read_bits(buf, VT_DWORD) == 0x99999999u, "write took effect");
+
+    /* 5) 冻结: 先让子进程开始自增（每 10ms 一次, 加快发散） */
+    kill(g_child, SIGUSR1);
+    usleep(50000);
+    gg_freeze_t fz;
+    freeze_init(&fz, &drv);
+    freeze_start(&fz, g_child);
+    freeze_add(&fz, addr, wbuf, 4);
+    /* 冻结循环每 100ms 写回; 采样 10 次×20ms: 应多次命中 0x99999999 */
+    int frozen_hits = count_equals(&drv, g_child, addr, 0x99999999u, 10, 20);
+    printf("  frozen samples hit 0x99999999: %d/10\n", frozen_hits);
+    CHECK(frozen_hits >= 2, "freeze holds value (self-increment suppressed)");
+
+    /* 6) 解冻: 等 >2 个自增周期(50ms)后, 值必然已离开冻结值 */
+    freeze_remove(&fz, addr);
+    usleep(120000);
+    uint8_t b8[8];
+    uint32_t after = 0;
+    if (driver_read(&drv, g_child, addr, b8, 4) == 4) after = (uint32_t)read_bits(b8, VT_DWORD);
+    printf("  value after unfreeze+120ms: 0x%x\n", after);
+    CHECK(after != 0x99999999u, "unfreeze -> value changes again");
+    freeze_stop(&fz);
+    results_clear(&res);
+    driver_close(&drv);
+
+    printf(fails ? "\n== ITEST FAILED: %d ==\n" : "\n== ITEST ALL PASS ==\n", fails);
+    return fails ? 1 : 0;
+}
