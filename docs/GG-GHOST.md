@@ -276,7 +276,8 @@ su -c 'sh /data/adb/GG-Ghost/GG-Ghost.sh stop'      # 停止
 |---|---|
 | **标准输入管线** | 事件经 input core 分发，非注入 API，无 INJECT_EVENTS 痕迹 |
 | **无新设备暴露**（用户态通道） | `sendevent` 直写真实触屏 `/dev/input/event6`（focaltech_ts）——复用真实设备，InputManager 零感知 |
-| **虚拟设备可枚举**（内核通道） | `gg-ghost` 设备在 `dumpsys input` / `getevent` 可见（Device 10 / input9）——游戏可枚举输入设备检测（少见，注意此面） |
+| **虚拟设备伪装**（内核通道） | 虚拟设备伪装成真实触屏 `focaltech_ts`（同 name/bus/vendor/product，`dumpsys input` 显示两个 focaltech_ts，枚举不可区分） |
+| **触摸行为随机化** | tap 坐标 ±3px + hold ±10ms、swipe 滑点 ±2px 抖动（get_random_u32）——无机械规律，难行为检测 |
 | **so 防落盘** | gzip 存储 + 运行时自解压 + 3 秒自动删除 |
 | **驱动隐藏** | rwProcMem33 支持 `CMD_HIDE_KERNEL_MODULE`（隐藏 /proc/modules 条目与 kobject） |
 

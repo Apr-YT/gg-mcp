@@ -130,7 +130,7 @@ Vector3 WorldToScreen(const Vector3& pos, const Matrix4x4& matrix) {
 | **模块/驱动枚举** | 模块隐藏（rwproc33 CMD_HIDE_KERNEL_MODULE） |
 | **Overlay 窗口枚举** | 透明窗口伪装/硬件 cursor 绘制 |
 
-> **坐标加密专项**（7 种加密形式 + 识别特征 + 解密破解链 + 蜜罐识别 + 防守检测面）→ 见 [ESP-COORD-ANTI.md](ESP-COORD-ANTI.md)
+> **坐标加密专项**（7 种加密形式 + 识别特征 + 解密破解链 + 蜜罐识别 + 防守检测面）→ 见 [坐标加密对抗方法.md](坐标加密对抗方法.md)
 
 ---
 
