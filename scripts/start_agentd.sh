@@ -8,7 +8,7 @@
 #   - 进程名伪装 lmkd（agentd 内部 prctl + 清 argv），pgrep/pkill 按名失效
 #     → 改用 PID 文件管理
 DIR=/data/adb/vendor_security
-BIN=$DIR/gdm
+BIN=$DIR/dspbridge
 PORT=34127
 LOG=$DIR/agentd.log
 PIDFILE=$DIR/agentd.pid
