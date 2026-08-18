@@ -29,8 +29,12 @@ typedef struct gg_map_region {
     char     path[GG_MOD_NAME_MAX];  /* 匿名为 "" */
 } gg_map_region_t;
 
-/* 解析 /proc/<pid>/maps，返回 malloc 数组 + 计数。 */
+/* 解析 /proc/<pid>/maps，返回 malloc 数组 + 计数（会话级缓存副本，TTL 5s）。
+ * 调用方负责 free。 */
 gg_map_region_t *process_maps(pid_t pid, size_t *out_count);
+
+/* 失效 maps 会话缓存（attach/detach 时调用，防 pid 复用串会话）。 */
+void maps_cache_invalidate(void);
 
 /* 解析一行 /proc/<pid>/maps 文本到 region。成功返回 1 并填充 r
  * （匿名映射/特殊段 [anon][heap][stack] 等 path 置空，region_matches 依赖空 path 判 anonymous）；

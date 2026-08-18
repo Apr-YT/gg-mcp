@@ -1,9 +1,9 @@
-/* main.c — gg-agentd：设备端内核守护进程
+/* main.c — 设备端内核守护进程
  *
  * 监听 127.0.0.1:<port>，经 adb forward 供 PC 端 gg-mcp-server 调用。
  * 协议见 shared/wire_protocol.h（20 字节二进制头 + JSON 负载）。
  *
- * 用法: gg-agentd [--port 19100] [--driver ioctl|supercall|auto]
+ * 用法: [--port 34127] [--driver ioctl|supercall|auto]
  *                [--ioctl-read 0x7e1a] [--ioctl-write 0x7e1b]
  *                [--supercall 45] [--log /path/log] [--safe]
  */
@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -570,6 +571,7 @@ static void h_attach(int fd, uint32_t seq, cJSON *p) {
     freeze_stop(&g_eng.freeze);
     results_clear(&g_eng.results);
     results_init(&g_eng.results, g_eng.result_cap);
+    maps_cache_invalidate();   /* maps 会话缓存随会话切换失效 */
 
     g_eng.session_pid = pid;
     snprintf(g_eng.session_name, sizeof(g_eng.session_name), "%d", (int)pid);
@@ -598,6 +600,7 @@ static void h_detach(int fd, uint32_t seq, cJSON *p) {
     watch_stop(&g_watch);
     freeze_stop(&g_eng.freeze);
     results_clear(&g_eng.results);
+    maps_cache_invalidate();   /* maps 会话缓存随会话切换失效 */
     pid_t old_pid = g_eng.session_pid;
     char old_name[256];
     snprintf(old_name, sizeof(old_name), "%s", g_eng.session_name);
@@ -1635,7 +1638,7 @@ static void h_load_gg(int fd, uint32_t seq, cJSON *p) {
                 switch (-rc) {
                 case GGERR_VERSION_MISMATCH: msg = "version family mismatch (pattern: X.Y.* required)"; break;
                 case GGERR_NOT_FOUND: msg = "lib5.so not found"; break;
-                case GGERR_PERM: msg = "permission denied (need root, /data/local/tmp/ggmcp assets)"; break;
+                case GGERR_PERM: msg = "permission denied (need root, /data/adb/GG-Ghost assets)"; break;
                 default: msg = "internal error"; break;
                 }
                 cJSON_AddStringToObject(o, "load_error", msg);
@@ -1925,10 +1928,10 @@ static void *conn_thread(void *arg) {
 
 static void print_usage(const char *argv0) {
     fprintf(stderr,
-        "gg-agentd — GameGuardian 设备端内核守护（KO 驱动方案）\n"
-        "用法: %s [--port 19100]\n"
+        "设备端内核守护（KO 驱动方案）\n"
+        "用法: %s [--port 34127]\n"
         "           [--driver hook|dev|qx|rwproc] # KO 后端类型（默认 hook）\n"
-        "           [--ko-dir /data/local/tmp/ggmcp/ko]\n"
+        "           [--ko-dir /data/adb/GG-Ghost/ko]\n"
         "           [--ko-file name.ko]           # 指定 KO（空=按版本族自动选）\n"
         "           [--ko-pattern 6.12.*]         # KO 版本族模式（同族可加载）\n"
         "           [--ko-strict 0|1]             # 族外拒绝（默认 1）\n"
@@ -1941,10 +1944,30 @@ static void print_usage(const char *argv0) {
         argv0);
 }
 
+/* ---- 进程伪装：prctl 改名 + 重写 cmdline（argv 区） ----
+ * ACE 类反作弊扫描 /proc/<pid>/comm 与 /proc/<pid>/cmdline：
+ *   真实进程两者一致；只改 comm 不改 cmdline 反而更可疑。
+ * 伪装为系统常驻 root 守护 lmkd（cmdline=/system/bin/lmkd）。
+ * 必须在参数解析完成后调用（会清空 argv[1..]，之后不再引用 argv）。 */
+static void hide_process(int argc, char **argv) {
+    const char *fake = "/system/bin/lmkd";
+    (void)argc;
+    prctl(PR_SET_NAME, "lmkd", 0, 0, 0);
+    if (argv[0]) {
+        size_t n = strlen(argv[0]);
+        memset(argv[0], 0, n);
+        size_t fl = strlen(fake);
+        memcpy(argv[0], fake, fl < n ? fl : n);
+    }
+    for (int i = 1; i < argc; i++) {
+        if (argv[i]) memset(argv[i], 0, strlen(argv[i]));
+    }
+}
+
 int main(int argc, char **argv) {
-    int port = 19100;
+    int port = 34127;            /* 非常见高位端口，避免 19100 等默认值被扫 */
     const char *dtype = "hook";
-    const char *ko_dir = "/data/local/tmp/ggmcp/ko";
+    const char *ko_dir = "/data/adb/GG-Ghost/ko";  /* 避开 /data/local/tmp（ACE 重点扫描） */
     const char *ko_file = NULL;
     const char *ko_pattern = "6.12.*";
     int ko_strict = 1;
@@ -1981,12 +2004,15 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* 参数解析完毕：伪装进程（清 argv，之后不再引用） */
+    hide_process(argc, argv);
+
     memset(&g_eng, 0, sizeof(g_eng));
     g_eng.session_pid = -1;
     g_eng.result_cap = GG_RESULT_CAP_DEFAULT;
     pthread_mutex_init(&g_eng.mtx, NULL);
     if (logpath) g_eng.logf = fopen(logpath, "a");
-    log_msg("gg-agentd starting (port=%d driver=%s ko_dir=%s pattern=%s strict=%d safe=%d)",
+    log_msg("starting (port=%d driver=%s ko_dir=%s pattern=%s strict=%d safe=%d)",
             port, dtype, ko_dir, ko_pattern, ko_strict, g_eng.safe_mode);
 
     if (strcmp(dtype, "qx") == 0) {

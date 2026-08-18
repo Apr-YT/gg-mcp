@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifdef __MINGW32__
@@ -119,7 +120,39 @@ int parse_maps_line(const char *line, gg_map_region_t *r) {
     return 1;
 }
 
+/* ---- maps 会话级缓存 ----
+ * 高頻 /proc/<pid>/maps 读取是行为特征（每次 handler 都 fopen 全量解析）。
+ * 缓存当前 attach 会话的 maps，TTL 5s；attach/detach 时 maps_cache_invalidate 强制失效。
+ * 返回副本（调用方 free 不影响缓存）。 */
+#define MAPS_CACHE_TTL_SEC 5
+static pid_t      g_maps_pid = -1;
+static gg_map_region_t *g_maps_cache = NULL;
+static size_t     g_maps_n = 0;
+static time_t     g_maps_ts = 0;
+
+void maps_cache_invalidate(void) {
+    free(g_maps_cache);
+    g_maps_cache = NULL;
+    g_maps_n = 0;
+    g_maps_pid = -1;
+    g_maps_ts = 0;
+}
+
+static gg_map_region_t *maps_dup_cached(size_t *out_count) {
+    gg_map_region_t *dup = malloc(g_maps_n * sizeof(*dup));
+    if (!dup) { *out_count = 0; return NULL; }
+    memcpy(dup, g_maps_cache, g_maps_n * sizeof(*dup));
+    *out_count = g_maps_n;
+    return dup;
+}
+
 gg_map_region_t *process_maps(pid_t pid, size_t *out_count) {
+    /* 命中缓存（同 pid + TTL 内）→ 返回副本 */
+    if (g_maps_pid == pid && g_maps_cache &&
+        (time(NULL) - g_maps_ts) < MAPS_CACHE_TTL_SEC) {
+        return maps_dup_cached(out_count);
+    }
+
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", (int)pid);
     FILE *f = fopen(path, "r");
@@ -140,8 +173,15 @@ gg_map_region_t *process_maps(pid_t pid, size_t *out_count) {
         if (parse_maps_line(line, &arr[n])) n++;
     }
     fclose(f);
+
+    /* 写入缓存（持有 arr），返回副本 */
+    maps_cache_invalidate();
+    g_maps_cache = arr;
+    g_maps_n = n;
+    g_maps_pid = pid;
+    g_maps_ts = time(NULL);
     *out_count = n;
-    return arr;
+    return maps_dup_cached(out_count);
 }
 
 int region_matches(const gg_map_region_t *r, int region_type) {

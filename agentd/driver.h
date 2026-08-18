@@ -251,7 +251,7 @@ int rwproc_hwbp_get_hits(gg_driver_t *d, uint64_t bp_id,
 int rwproc_hwbp_stop(gg_driver_t *d, uint64_t bp_id);
 
 /* 加载 KO：
- *   dir      — .ko 所在目录（如 /data/local/tmp/ggmcp/ko）
+ *   dir      — .ko 所在目录（如 /data/adb/GG-Ghost/ko）
  *   file     — 指定 .ko 文件名（空=自动按版本族选择第一个）
  *   pattern  — 版本族模式（如 "6.12.*"；空=不校验）
  *   strict   — 族外拒绝

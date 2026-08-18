@@ -28,7 +28,7 @@ struct ServerConfig {
     std::string http_token;                // http 鉴权 bearer token（空=不鉴权；绑 0.0.0.0 时强制要求）
     std::string adb = "adb";
     std::string serial;
-    int agent_port = 19100;
+    int agent_port = 34127;      // 设备端 agentd 端口（hide 改造 2026-08-18）
     std::string gg_version_pattern = "101.*";   // 实际包: 宇航员修改器 = GG 101.1
     bool gg_strict = true;
     bool safe_mode = false;

@@ -13,7 +13,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define AGENTD_ASSETS_DIR "/data/local/tmp/ggmcp"   /* 桩与 hook 库存放处 */
+#define AGENTD_ASSETS_DIR "/data/adb/GG-Ghost"   /* 桩与 hook 库存放处 */
 
 /* hook 驱动协议环境（由 main 在驱动对接后设置，loader_load 写入 lib5_hook.conf） */
 static char g_hook_proto[16] = "hook";

@@ -12,8 +12,8 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
 $Adb = "adb"
 $DeviceArg = if ($Serial) { @("-s", $Serial) } else { @() }
-$Port = 19100
-$DevDir = "/data/local/tmp/ggmcp"
+$Port = 34127
+$DevDir = "/data/adb/GG-Ghost"
 
 function Adb-Sh {
     param([string]$Cmd)
@@ -73,18 +73,18 @@ Write-Host "[1/5] 推送 agentd + native 产物" -ForegroundColor Yellow
 # 中文路径(如仓库在 "工具\")必然乱码。先把产物暂存到无中文临时目录再 push。
 $Stage = Join-Path $env:TEMP "ggmcp_stage"
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
-Copy-Item "$Root\build\agentd\gg-agentd" $Stage -Force
+Copy-Item "$Root\build\agentd\gg-agentd" "$Stage\gdm" -Force
 Copy-Item "$Root\build\native\libKernelGg.so" $Stage -Force
 Copy-Item "$Root\build\native\lib5_stub" $Stage -Force
 Copy-Item "$Root\scripts\start_agentd.sh" $Stage -Force
 Copy-Item "$Root\scripts\install_ko.sh" $Stage -Force
 Adb-Sh "mkdir -p $DevDir/ko" | Out-Null
-Adb-Cmd "push" "$Stage\gg-agentd" "$DevDir/"
+Adb-Cmd "push" "$Stage\gdm" "$DevDir/"
 Adb-Cmd "push" "$Stage\libKernelGg.so" "$DevDir/"
 Adb-Cmd "push" "$Stage\lib5_stub" "$DevDir/"
 Adb-Cmd "push" "$Stage\start_agentd.sh" "$DevDir/"
 Adb-Cmd "push" "$Stage\install_ko.sh" "$DevDir/"
-Adb-Sh "chmod 755 $DevDir/gg-agentd $DevDir/lib5_stub $DevDir/start_agentd.sh $DevDir/install_ko.sh"
+Adb-Sh "chmod 755 $DevDir/gdm $DevDir/lib5_stub $DevDir/start_agentd.sh $DevDir/install_ko.sh"
 Adb-Sh "chmod 777 $DevDir/libKernelGg.so"
 
 # 2) KO 内核驱动（可跳过）
@@ -105,7 +105,7 @@ if (-not $SkipKo) {
 }
 
 # 3) 启动 agentd
-Write-Host "[3/5] 启动 gg-agentd" -ForegroundColor Yellow
+Write-Host "[3/5] 启动 agentd" -ForegroundColor Yellow
 Adb-Sh "su -c ""sh $DevDir/start_agentd.sh stop""" | Out-Null
 Adb-Sh "su -c ""sh $DevDir/start_agentd.sh start""" | ForEach-Object { Write-Host "  $_" }
 
@@ -117,11 +117,11 @@ Adb-Cmd "forward" "tcp:$Port" "tcp:$Port"
 Write-Host "[5/5] agentd 自检日志" -ForegroundColor Yellow
 $ready = $false
 for ($i = 0; $i -lt 10; $i++) {
-    $log = & $Adb @DeviceArg shell "tail -n 20 $DevDir/gg-agentd.log 2>/dev/null"
+    $log = & $Adb @DeviceArg shell "tail -n 20 $DevDir/agentd.log 2>/dev/null"
     if ($log -match "listening|started|ready|running|port") { $ready = $true; break }
     Start-Sleep -Milliseconds 500
 }
-& $Adb @DeviceArg shell "tail -n 20 $DevDir/gg-agentd.log 2>/dev/null" | ForEach-Object { Write-Host "  $_" }
+& $Adb @DeviceArg shell "tail -n 20 $DevDir/agentd.log 2>/dev/null" | ForEach-Object { Write-Host "  $_" }
 if (-not $ready) { Write-Host "  警告: 未检测到就绪标记，仍请检查日志确认 agentd 已起" -ForegroundColor DarkYellow }
 
 Write-Host ""

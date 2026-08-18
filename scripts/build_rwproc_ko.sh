@@ -68,4 +68,4 @@ python3 "$ROOT/scripts/patch_ko_versions.py" "$DEV_KO_DIR" \
 
 echo "== 完成 =="
 ls -l "$OUT_DIR"/*.ko
-echo "下一步: 把两个 .ko push 到设备 /data/local/tmp/ggmcp/ko/ 后执行 install_ko.sh"
+echo "下一步: 把两个 .ko push 到设备 /data/adb/GG-Ghost/ko/ 后执行 install_ko.sh"

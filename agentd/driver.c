@@ -458,6 +458,11 @@ int rwproc_attach(gg_driver_t *d) {
         d->rwproc_mem_fd = -1;
         return -GGERR_INTERNAL;
     }
+    /* 4) 触发内核模块隐藏（CMD_HIDE_KERNEL_MODULE=13）:
+     *    模块内 list_del(modules 链表) + kobject_del(/sys/module)，
+     *    /proc/modules 与 /sys/module 立即消失。失败不致命（节点已开，
+     *    fd 引用仍在，功能不受影响）。 */
+    rwproc_call(d, d->rwproc_mem_fd, RWPROC_CMD_HIDE_KERNEL_MODULE, 0, 0, 0, NULL, 0);
     snprintf(d->ko_module, sizeof(d->ko_module), "rwproc33");
     snprintf(d->ko_version, sizeof(d->ko_version), "rwProcMem33");
     snprintf(d->ko_file, sizeof(d->ko_file),
@@ -782,9 +787,21 @@ int ko_load(gg_driver_t *d, const char *dir, const char *file,
         snprintf(path, sizeof(path), "%s/%s", dir, chosen);
     }
 
-    /* SELinux: 多数社区 KO 需要 permissive */
-    system("setenforce 0 2>/dev/null");
+    /* SELinux: 多数社区 KO 需要 permissive。临时放行（仅加载期），
+     * 加载 + dev 节点打开完成后立即恢复 enforcing —— 长期 permissive
+     * 是 ACE 类反作弊的最高优先级检测点（setenforce 0 秒暴露）。 */
+    int se_was_enforcing = 0;
+    {
+        FILE *ef = fopen("/sys/fs/selinux/enforce", "r");
+        if (ef) {
+            char buf[8] = {0};
+            if (fgets(buf, sizeof(buf), ef)) se_was_enforcing = (atoi(buf) == 1);
+            fclose(ef);
+        }
+    }
+    if (se_was_enforcing) system("setenforce 0 2>/dev/null");
 
+    int rc = 0;
     /* 已加载则跳过 insmod */
     char modname[256];
     snprintf(modname, sizeof(modname), "%s", chosen);
@@ -796,12 +813,14 @@ int ko_load(gg_driver_t *d, const char *dir, const char *file,
         if (ko_insmod(path) != 0) {
             snprintf(d->last_error, sizeof(d->last_error),
                      "insmod %s failed (kernel version mismatch? SELinux? perms?)", path);
-            return -GGERR_PERM;
+            rc = -GGERR_PERM;
+            goto out;
         }
         d->ko_loaded = ko_in_modules(modname);
         if (!d->ko_loaded) {
             set_err(d, "insmod succeeded but module not in /proc/modules");
-            return -GGERR_INTERNAL;
+            rc = -GGERR_INTERNAL;
+            goto out;
         }
     }
 
@@ -819,10 +838,14 @@ int ko_load(gg_driver_t *d, const char *dir, const char *file,
             ko_mknod_misc(modname);
         }
         if (dev_open(d) < 0) {
-            return -GGERR_INTERNAL;   /* last_error 已置 */
+            rc = -GGERR_INTERNAL;   /* last_error 已置 */
+            goto out;
         }
     }
-    return 0;
+out:
+    /* 恢复 SELinux enforcing（无论成败） */
+    if (se_was_enforcing) system("setenforce 1 2>/dev/null");
+    return rc;
 }
 
 /* ---------- 对外接口 ---------- */

@@ -17,3 +17,7 @@ build/
 # 运行时数据/敏感
 annotations.json
 *.state
+
+# 归档的废弃脚本（被最终版取代，勿入仓库）
+scripts/_archive/
+

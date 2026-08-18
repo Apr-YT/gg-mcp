@@ -1,10 +1,17 @@
 #!/system/bin/sh
-# start_agentd.sh — 设备端启动/停止 gg-agentd（KO 驱动方案）
-# 用法: su -c 'sh /data/local/tmp/ggmcp/start_agentd.sh [start|stop|status|autostart]'
-DIR=/data/local/tmp/ggmcp
-BIN=$DIR/gg-agentd
-PORT=19100
-LOG=$DIR/gg-agentd.log
+# start_agentd.sh — 设备端启动/停止 agentd（KO 驱动方案）
+# 用法: su -c 'sh /data/adb/GG-Ghost/start_agentd.sh [start|stop|status|autostart]'
+#
+# 2026-08-18 hide 改造:
+#   - 目录 /data/local/tmp/ggmcp → /data/adb/GG-Ghost（避开 ACE 重点扫描目录）
+#   - 端口 19100 → 34127（非常见高位）
+#   - 进程名伪装 lmkd（agentd 内部 prctl + 清 argv），pgrep/pkill 按名失效
+#     → 改用 PID 文件管理
+DIR=/data/adb/GG-Ghost
+BIN=$DIR/gdm
+PORT=34127
+LOG=$DIR/agentd.log
+PIDFILE=$DIR/agentd.pid
 
 # KO 配置（可在此调整）
 KO_DIR=$DIR/ko
@@ -24,6 +31,13 @@ RWPROC_MEM_KEY=e84523d7b60d5d341a7c4d1861773ecd
 RWPROC_BP_KEY=dce3771681d4c7a143d5d06b7d32548e
 # 若用 dev 型, 填节点路径: DEV_PATH=/dev/your_ko_dev
 
+is_running() {
+    [ -f "$PIDFILE" ] || return 1
+    local pid; pid=$(cat "$PIDFILE" 2>/dev/null)
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
 # Magisk service.d 自启动: autostart 把本脚本 cp 进 service.d, Magisk 执行时 $1 为空,
 # 走 * 分支只会打印用法不启动。这里自判 $0 含 service.d 且无参 → 自动 start。
 case "$0" in
@@ -34,7 +48,7 @@ case "$1" in
   start)
     [ "$(id -u)" = "0" ] || { echo "需要 root"; exit 1; }
     [ -x "$BIN" ] || { echo "[FAIL] $BIN 不存在或不可执行 (adb push 会重置权限, 先 chmod 755)"; exit 1; }
-    if pgrep -x gg-agentd >/dev/null 2>&1; then echo "gg-agentd 已在运行"; exit 0; fi
+    if is_running; then echo "agentd 已在运行 (pid $(cat $PIDFILE))"; exit 0; fi
     ARGS="--port $PORT --driver $KO_TYPE"
     if [ "$KO_TYPE" = "qx" ]; then
         [ -n "$QX_KEY" ] && ARGS="$ARGS --qx-key $QX_KEY"
@@ -46,36 +60,42 @@ case "$1" in
         [ -n "$DEV_PATH" ] && ARGS="$ARGS --dev $DEV_PATH"
     fi
     setsid nohup "$BIN" $ARGS --log "$LOG" >/dev/null 2>&1 < /dev/null &
+    echo $! > "$PIDFILE"
     # 轮询就绪(最多 5s, 每 0.5s), 避免 KO 加载慢时过早判失败
     i=0
     while [ $i -lt 10 ]; do
-        if pgrep -x gg-agentd >/dev/null 2>&1; then
-            echo "gg-agentd 已启动 (port $PORT, driver=$KO_TYPE, log $LOG)"
+        if is_running; then
+            echo "agentd 已启动 (port $PORT, driver=$KO_TYPE, log $LOG)"
             exit 0
         fi
         sleep 0.5
         i=$((i+1))
     done
-    echo "[FAIL] gg-agentd 启动失败(5s 内未见到进程), 检查日志: $LOG"
+    echo "[FAIL] agentd 启动失败(5s 内未就绪), 检查日志: $LOG"
     exit 1
     ;;
   stop)
-    pkill -x gg-agentd && echo "已停止" || echo "未在运行"
-    # 等待进程真正退出, 防 deploy 连续 stop→start 时 pgrep 时序误判"已在运行"跳过启动
+    if is_running; then
+        kill "$(cat $PIDFILE)" && echo "已停止" || echo "kill 失败"
+        rm -f "$PIDFILE"
+    else
+        echo "未在运行"; rm -f "$PIDFILE"
+    fi
+    # 等待进程真正退出, 防 deploy 连续 stop→start 时 PID 文件时序误判
     i=0
-    while pgrep -x gg-agentd >/dev/null 2>&1 && [ $i -lt 20 ]; do sleep 0.2; i=$((i+1)); done
+    while is_running && [ $i -lt 20 ]; do sleep 0.2; i=$((i+1)); done
     ;;
   status)
-    if pgrep -x gg-agentd >/dev/null 2>&1; then
-      echo "运行中:"; ps -A | grep gg-agentd
+    if is_running; then
+      echo "运行中: pid $(cat $PIDFILE)"; ps -A | grep -E "lmkd|$(cat $PIDFILE)" | head -3
     else
       echo "未运行"
     fi
     ;;
   autostart)
-    cp "$0" /data/adb/service.d/ggmcp-agentd.sh
-    chmod 755 /data/adb/service.d/ggmcp-agentd.sh
-    echo "已写入 /data/adb/service.d/ggmcp-agentd.sh"
+    cp "$0" /data/adb/service.d/90gdm.sh
+    chmod 755 /data/adb/service.d/90gdm.sh
+    echo "已写入 /data/adb/service.d/90gdm.sh"
     ;;
   *)
     echo "用法: $0 [start|stop|status|autostart]"

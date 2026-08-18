@@ -19,7 +19,7 @@ public:
     struct Config {
         std::string adb = "adb";        // adb 可执行路径
         std::string serial;             // 设备序列号（空=单设备）
-        int agent_port = 19100;         // 设备端 agentd 端口
+        int agent_port = 34127;         // 设备端 agentd 端口（hide 改造 2026-08-18）
         int connect_timeout_ms = 5000;
         int io_timeout_ms = 300000;     // 搜索可能较久
         bool print_events = false;      // 订阅并打印 agentd 事件帧（调试/监控用）
