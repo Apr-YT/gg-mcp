@@ -16,3 +16,4 @@ build/
 
 # 运行时数据/敏感
 annotations.json
+*.state
