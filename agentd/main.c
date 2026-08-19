@@ -1960,33 +1960,51 @@ static void hide_process(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    /* 参数值必须拷贝到独立 buffer：hide_process() 会清空 argv[] 内存，
+       dtype 等若直接指向 argv[i]，被 memset 后变空串 → strcmp 全失败 →
+       误走默认 hook 型（用户态 process_vm_readv，违反内核通道纪律）。
+       修复（2026-08-19）：解析时一律 snprintf 到本地 buffer。 */
+    static char dtype_buf[16], ko_dir_buf[256], ko_file_buf[512];
+    static char dev_path_buf[128], qx_key_buf[0x100];
+    static char rwproc_key_buf[128], rwproc_bp_key_buf[128], logpath_buf[256];
+    static char ko_pattern_buf[64];
+    const char *dtype = dtype_buf, *ko_dir = ko_dir_buf, *ko_file = ko_file_buf;
+    const char *dev_path = dev_path_buf, *qx_key = qx_key_buf;
+    const char *rwproc_key = rwproc_key_buf, *rwproc_bp_key = rwproc_bp_key_buf;
+    const char *logpath = logpath_buf, *ko_pattern = ko_pattern_buf;
     int port = 34127;            /* 非常见高位端口，避免 19100 等默认值被扫 */
-    const char *dtype = "hook";
-    const char *ko_dir = "/data/adb/vendor_security/ko";  /* 避开 /data/local/tmp（ACE 重点扫描） */
-    const char *ko_file = NULL;
-    const char *ko_pattern = "6.12.*";
+    snprintf(dtype_buf, sizeof(dtype_buf), "%s", "hook");
+    snprintf(ko_dir_buf, sizeof(ko_dir_buf), "%s",
+             "/data/adb/vendor_security/ko");  /* 避开 /data/local/tmp（ACE 重点扫描） */
+    snprintf(ko_pattern_buf, sizeof(ko_pattern_buf), "%s", "6.12.*");
+    ko_file_buf[0] = dev_path_buf[0] = qx_key_buf[0] = 0;
+    rwproc_key_buf[0] = rwproc_bp_key_buf[0] = logpath_buf[0] = 0;
     int ko_strict = 1;
-    const char *dev_path = NULL;
     int ioctl_read = 0x7e1a, ioctl_write = 0x7e1b;
-    const char *qx_key = NULL;
-    const char *rwproc_key = NULL;
-    const char *rwproc_bp_key = NULL;
-    const char *logpath = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) port = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--driver") == 0 && i + 1 < argc) dtype = argv[++i];
-        else if (strcmp(argv[i], "--ko-dir") == 0 && i + 1 < argc) ko_dir = argv[++i];
-        else if (strcmp(argv[i], "--ko-file") == 0 && i + 1 < argc) ko_file = argv[++i];
-        else if (strcmp(argv[i], "--ko-pattern") == 0 && i + 1 < argc) ko_pattern = argv[++i];
+        else if (strcmp(argv[i], "--driver") == 0 && i + 1 < argc)
+            snprintf(dtype_buf, sizeof(dtype_buf), "%s", argv[++i]);
+        else if (strcmp(argv[i], "--ko-dir") == 0 && i + 1 < argc)
+            snprintf(ko_dir_buf, sizeof(ko_dir_buf), "%s", argv[++i]);
+        else if (strcmp(argv[i], "--ko-file") == 0 && i + 1 < argc)
+            snprintf(ko_file_buf, sizeof(ko_file_buf), "%s", argv[++i]);
+        else if (strcmp(argv[i], "--ko-pattern") == 0 && i + 1 < argc)
+            snprintf(ko_pattern_buf, sizeof(ko_pattern_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--ko-strict") == 0 && i + 1 < argc) ko_strict = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--dev") == 0 && i + 1 < argc) dev_path = argv[++i];
+        else if (strcmp(argv[i], "--dev") == 0 && i + 1 < argc)
+            snprintf(dev_path_buf, sizeof(dev_path_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--ioctl-read") == 0 && i + 1 < argc) ioctl_read = (int)strtol(argv[++i], NULL, 0);
         else if (strcmp(argv[i], "--ioctl-write") == 0 && i + 1 < argc) ioctl_write = (int)strtol(argv[++i], NULL, 0);
-        else if (strcmp(argv[i], "--qx-key") == 0 && i + 1 < argc) qx_key = argv[++i];
-        else if (strcmp(argv[i], "--rwproc-key") == 0 && i + 1 < argc) rwproc_key = argv[++i];
-        else if (strcmp(argv[i], "--rwproc-bp-key") == 0 && i + 1 < argc) rwproc_bp_key = argv[++i];
-        else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) logpath = argv[++i];
+        else if (strcmp(argv[i], "--qx-key") == 0 && i + 1 < argc)
+            snprintf(qx_key_buf, sizeof(qx_key_buf), "%s", argv[++i]);
+        else if (strcmp(argv[i], "--rwproc-key") == 0 && i + 1 < argc)
+            snprintf(rwproc_key_buf, sizeof(rwproc_key_buf), "%s", argv[++i]);
+        else if (strcmp(argv[i], "--rwproc-bp-key") == 0 && i + 1 < argc)
+            snprintf(rwproc_bp_key_buf, sizeof(rwproc_bp_key_buf), "%s", argv[++i]);
+        else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc)
+            snprintf(logpath_buf, sizeof(logpath_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--safe") == 0) g_eng.safe_mode = 1;
         else if (strcmp(argv[i], "--shell") == 0) g_eng.shell_enabled = 1;
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {

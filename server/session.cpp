@@ -224,6 +224,51 @@ json tool_read(Session::CallCtx& c, const json& a) {
 }
 json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / gg_hex_dump
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
+    // 落盘模式（save_to）：server 自动分段循环读（agentd 单段上限 65536），
+    // 原始二进制写本地文件，只返回 {saved,size,segments,skipped}，不占对话带宽。
+    // 分段失败处补 0 保持文件长度 = len（位置对齐，后续拼接不串位）。
+    if (a.contains("save_to")) {
+        const std::string path = a["save_to"].get<std::string>();
+        long long len = a.value("len", 64);
+        if (len <= 0) len = 64;
+        int force = a.contains("force") ? a["force"].get<int>() : 0;
+        std::string addr0 = a["addr"].is_string()
+                                ? a["addr"].get<std::string>()
+                                : std::to_string(a["addr"].get<long long>());
+        uint64_t addr = strtoull(addr0.c_str(), nullptr, 0);
+        FILE* f = fopen(path.c_str(), "wb");
+        if (!f) return c.fail(GGERR_BAD_REQUEST, "cannot open save_to: " + path);
+        const long long SEG = 65536;   // 与 agentd h_read_bytes 上限一致
+        size_t total = 0, segs = 0, skipped = 0;
+        json params;
+        for (long long done = 0; done < len; done += SEG) {
+            long long chunk = (len - done < SEG) ? (len - done) : SEG;
+            char addr_buf[32];
+            snprintf(addr_buf, sizeof(addr_buf), "0x%llx",
+                     (unsigned long long)(addr + (uint64_t)done));
+            params["addr"] = addr_buf;
+            params["len"] = chunk;
+            if (force) params["force"] = force;
+            json out;
+            int rc = c.device_call(GGCMD_READ_BYTES, params, &out);
+            std::string hex;
+            if (rc == 0 && out.contains("hex") && out["hex"].is_string())
+                hex = out["hex"].get<std::string>();
+            size_t n = hex.size() / 2;
+            if (n < (size_t)chunk) skipped++;
+            for (size_t i = 0; i < n; i++) {
+                unsigned int b;
+                if (sscanf(hex.c_str() + i * 2, "%2x", &b) != 1) b = 0;
+                fputc((int)b, f);
+            }
+            for (size_t i = n; i < (size_t)chunk; i++) fputc(0, f);   // 失败段补 0
+            total += (size_t)chunk;
+            segs++;
+        }
+        fclose(f);
+        json r{{"saved", path}, {"size", total}, {"segments", segs}, {"skipped", skipped}};
+        return c.ok(r);
+    }
     c.params["addr"] = a["addr"];
     c.params["len"] = a.value("len", 64);
     if (a.contains("force")) c.params["force"] = a["force"].get<int>();

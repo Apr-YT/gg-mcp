@@ -900,6 +900,10 @@ int driver_self_test(gg_driver_t *d) {
     uint32_t back = 0;
     pid_t self = (pid_t)getpid();
     d->state = ST_UNAVAILABLE;
+    /* ko_loaded 以"通道自检/节点打开"为准，与 /proc/modules 名字匹配解耦：
+     * 驱动伪装改名（apr_dlkm 等）后按名字查必然误报；自检回环通过即驱动
+     * 真实加载（节点在、ioctl 注册、数据可读），名字无关。 */
+    d->ko_loaded = 0;
 
     /* rwproc33 型: 打开自身进程句柄 + 读回环 */
     if (d->ko_type == KO_TYPE_RWPROC && d->rwproc_mem_fd >= 0) {
@@ -909,6 +913,7 @@ int driver_self_test(gg_driver_t *d) {
                                         &back, sizeof(back));
             if (r == (ssize_t)sizeof(back) && back == 0x12345678u) {
                 d->state = ST_DRIVER;
+                d->ko_loaded = 1;
                 return 1;
             }
         }
@@ -923,6 +928,7 @@ int driver_self_test(gg_driver_t *d) {
                       (uint64_t)(uintptr_t)&s_magic, &back, sizeof(back));
             if (r == 0) {
                 d->state = ST_DRIVER;
+                d->ko_loaded = 1;
                 return 1;
             }
         } else {
@@ -930,6 +936,7 @@ int driver_self_test(gg_driver_t *d) {
                        (uint64_t)(uintptr_t)&s_magic, &back, sizeof(back));
             if (r == (ssize_t)sizeof(back) && back == 0x12345678u) {
                 d->state = ST_DRIVER;
+                d->ko_loaded = 1;
                 return 1;
             }
             /* 写通道回环 */
@@ -940,6 +947,7 @@ int driver_self_test(gg_driver_t *d) {
             if (w == (ssize_t)sizeof(s_magic) && r2 == (ssize_t)sizeof(back) &&
                 back == 0x12345678u) {
                 d->state = ST_DRIVER;
+                d->ko_loaded = 1;
                 return 1;
             }
         }
@@ -952,11 +960,13 @@ int driver_self_test(gg_driver_t *d) {
         ssize_t rv = vm_read(self, &back, sizeof(back), (uint64_t)(uintptr_t)&s_magic);
         if (rv == (ssize_t)sizeof(back) && back == 0x12345678u) {
             d->state = ST_KO_HOOK;
+            d->ko_loaded = 1;
             return 1;
         }
         ssize_t rm = mem_io(self, &back, sizeof(back), (uint64_t)(uintptr_t)&s_magic, 0);
         if (rm == (ssize_t)sizeof(back) && back == 0x12345678u) {
             d->state = ST_PROC_MEM;
+            d->ko_loaded = 1;
             return 0;
         }
     }
