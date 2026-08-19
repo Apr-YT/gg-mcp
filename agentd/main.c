@@ -675,11 +675,49 @@ static void h_module_list(int fd, uint32_t seq, cJSON *p) {
     cJSON_Delete(r);
 }
 
+/* ---- type/region 参数兼容解析（2026-08-19） ----
+ * MCP 层（PC 端 session.cpp）会把字符串转 int 再转发，但直连 agentd 的
+ * 客户端（gg_direct.py 等）传字符串会拿到 valueint=0 → 静默失败/走默认。
+ * 统一在此兼容两种形式：数字直接取，字符串按名字映射（与 PC 端
+ * norm_type/norm_region 同一套名字）。 */
+static int parse_vt(const cJSON *p, int def) {
+    const cJSON *j = cJSON_GetObjectItem(p, "type");
+    if (!j) return def;
+    if (j->type == cJSON_Number) return j->valueint;
+    if (j->type == cJSON_String) {
+        const char *s = j->valuestring;
+        if (s && *s) {
+            if (!strcmp(s, "byte") || !strcmp(s, "u8")) return VT_BYTE;
+            if (!strcmp(s, "word") || !strcmp(s, "u16")) return VT_WORD;
+            if (!strcmp(s, "dword") || !strcmp(s, "u32") || !strcmp(s, "int")) return VT_DWORD;
+            if (!strcmp(s, "qword") || !strcmp(s, "u64") || !strcmp(s, "long")) return VT_QWORD;
+            if (!strcmp(s, "float") || !strcmp(s, "f32")) return VT_FLOAT;
+            if (!strcmp(s, "double") || !strcmp(s, "f64")) return VT_DOUBLE;
+            if (!strcmp(s, "bytes") || !strcmp(s, "aob")) return VT_BYTES;
+        }
+    }
+    return def;
+}
+static int parse_region(const cJSON *p, int def) {
+    const cJSON *j = cJSON_GetObjectItem(p, "region");
+    if (!j) return def;
+    if (j->type == cJSON_Number) return j->valueint;
+    if (j->type == cJSON_String) {
+        const char *s = j->valuestring;
+        if (s && *s) {
+            if (!strcmp(s, "anonymous") || !strcmp(s, "anon")) return REGION_ANONYMOUS;
+            if (!strcmp(s, "writable")) return REGION_WRITABLE;
+            if (!strcmp(s, "all")) return REGION_ALL;
+        }
+    }
+    return def;
+}
+
 static void h_search(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_NO_SESSION, "no session"); return; }
-    int type = cJSON_GetObjectItem(p, "type") ? cJSON_GetObjectItem(p, "type")->valueint : VT_DWORD;
+    int type = parse_vt(p, VT_DWORD);
     const char *vs = cJSON_GetObjectItem(p, "value") ? cJSON_GetObjectItem(p, "value")->valuestring : NULL;
-    int region = cJSON_GetObjectItem(p, "region") ? cJSON_GetObjectItem(p, "region")->valueint : REGION_ANONYMOUS;
+    int region = parse_region(p, REGION_ANONYMOUS);
     int64_t prev = (int64_t)g_eng.results.count;
     int64_t found = 0;
 
@@ -709,10 +747,10 @@ static void h_search(int fd, uint32_t seq, cJSON *p) {
 
 static void h_search_range(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_SEARCH_RANGE, seq, GGERR_NO_SESSION, "no session"); return; }
-    int type = cJSON_GetObjectItem(p, "type") ? cJSON_GetObjectItem(p, "type")->valueint : VT_DWORD;
+    int type = parse_vt(p, VT_DWORD);
     double vmin = cJSON_GetObjectItem(p, "min") ? cJSON_GetObjectItem(p, "min")->valuedouble : 0;
     double vmax = cJSON_GetObjectItem(p, "max") ? cJSON_GetObjectItem(p, "max")->valuedouble : 0;
-    int region = cJSON_GetObjectItem(p, "region") ? cJSON_GetObjectItem(p, "region")->valueint : REGION_ANONYMOUS;
+    int region = parse_region(p, REGION_ANONYMOUS);
     int64_t prev = (int64_t)g_eng.results.count;
     int64_t found = search_range(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, vmin, vmax, region);
     if (found < 0) { send_err(fd, GGCMD_SEARCH_RANGE, seq, GGERR_INTERNAL, "range search failed"); return; }
@@ -727,8 +765,8 @@ static void h_search_range(int fd, uint32_t seq, cJSON *p) {
 
 static void h_unknown_init(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_NO_SESSION, "no session"); return; }
-    int type = cJSON_GetObjectItem(p, "type") ? cJSON_GetObjectItem(p, "type")->valueint : VT_DWORD;
-    int region = cJSON_GetObjectItem(p, "region") ? cJSON_GetObjectItem(p, "region")->valueint : REGION_ANONYMOUS;
+    int type = parse_vt(p, VT_DWORD);
+    int region = parse_region(p, REGION_ANONYMOUS);
     int64_t prev = (int64_t)g_eng.results.count;
     int64_t elems = search_unknown_init(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, region);
     if (elems < 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_INTERNAL, "unknown-init failed"); return; }
@@ -947,7 +985,7 @@ static void h_clear_results(int fd, uint32_t seq, cJSON *p) {
 static void h_read(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_READ, seq, GGERR_NO_SESSION, "no session"); return; }
     const char *as = cJSON_GetObjectItem(p, "addr") ? cJSON_GetObjectItem(p, "addr")->valuestring : NULL;
-    int type = cJSON_GetObjectItem(p, "type") ? cJSON_GetObjectItem(p, "type")->valueint : VT_DWORD;
+    int type = parse_vt(p, VT_DWORD);
     if (!as) { send_err(fd, GGCMD_READ, seq, GGERR_BAD_REQUEST, "addr required"); return; }
     uint64_t addr = strtoull(as, NULL, 0);
     int sz = vt_size(type);
@@ -1288,7 +1326,7 @@ static void h_write(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.safe_mode) { send_err(fd, GGCMD_WRITE, seq, GGERR_SAFE_MODE, "safe mode: write denied"); return; }
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_WRITE, seq, GGERR_NO_SESSION, "no session"); return; }
     const char *as = cJSON_GetObjectItem(p, "addr") ? cJSON_GetObjectItem(p, "addr")->valuestring : NULL;
-    int type = cJSON_GetObjectItem(p, "type") ? cJSON_GetObjectItem(p, "type")->valueint : VT_DWORD;
+    int type = parse_vt(p, VT_DWORD);
     const char *vs = cJSON_GetObjectItem(p, "value") ? cJSON_GetObjectItem(p, "value")->valuestring : NULL;
     if (!as || !vs) { send_err(fd, GGCMD_WRITE, seq, GGERR_BAD_REQUEST, "addr+value required"); return; }
     int ok = 0;
@@ -1308,7 +1346,7 @@ static void h_write(int fd, uint32_t seq, cJSON *p) {
 static void h_set_results(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.safe_mode) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_SAFE_MODE, "safe mode: write denied"); return; }
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_NO_SESSION, "no session"); return; }
-    int type = cJSON_GetObjectItem(p, "type") ? cJSON_GetObjectItem(p, "type")->valueint : VT_DWORD;
+    int type = parse_vt(p, VT_DWORD);
     cJSON *vals = cJSON_GetObjectItem(p, "values");
     if (!cJSON_IsArray(vals)) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_BAD_REQUEST, "values array required"); return; }
     if (g_eng.results.fuzzy_active) results_materialize(&g_eng.results);
@@ -1352,7 +1390,7 @@ static void h_freeze(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.safe_mode) { send_err(fd, GGCMD_FREEZE, seq, GGERR_SAFE_MODE, "safe mode: freeze denied"); return; }
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_FREEZE, seq, GGERR_NO_SESSION, "no session"); return; }
     const char *as = cJSON_GetObjectItem(p, "addr") ? cJSON_GetObjectItem(p, "addr")->valuestring : NULL;
-    int type = cJSON_GetObjectItem(p, "type") ? cJSON_GetObjectItem(p, "type")->valueint : VT_DWORD;
+    int type = parse_vt(p, VT_DWORD);
     const char *vs = cJSON_GetObjectItem(p, "value") ? cJSON_GetObjectItem(p, "value")->valuestring : NULL;
     if (!as || !vs) { send_err(fd, GGCMD_FREEZE, seq, GGERR_BAD_REQUEST, "addr+value required"); return; }
     int ok = 0;
@@ -1445,7 +1483,7 @@ static void h_calc_offset(int fd, uint32_t seq, cJSON *p) {
 
 static void h_pointer_scan(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_POINTER_SCAN, seq, GGERR_NO_SESSION, "no session"); return; }
-    int type = cJSON_GetObjectItem(p, "type") ? cJSON_GetObjectItem(p, "type")->valueint : VT_QWORD;
+    int type = parse_vt(p, VT_QWORD);
     size_t cap = cJSON_GetObjectItem(p, "cap") ? (size_t)cJSON_GetObjectItem(p, "cap")->valuedouble : 5000;
     if (g_eng.results.fuzzy_active) results_materialize(&g_eng.results);
 
