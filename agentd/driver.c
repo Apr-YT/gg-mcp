@@ -449,11 +449,14 @@ int rwproc_attach(gg_driver_t *d) {
     d->rwproc_mem_fd = rwproc_open_node(d, d->rwproc_mem_key);
     if (d->rwproc_mem_fd < 0) return -GGERR_NOT_FOUND;
     /* 2) 打开断点模块节点（可选; 失败不影响内存读写） */
+    char mem_err[256];
+    snprintf(mem_err, sizeof(mem_err), "%s", d->last_error);
     d->rwproc_bp_fd = rwproc_open_node(d, d->rwproc_bp_key);
     if (d->rwproc_bp_fd < 0) {
-        snprintf(d->last_error, sizeof(d->last_error),
-                 "hwBreakpoint node open failed (watch 不可用, 内存读写正常): %s",
-                 d->last_error);
+        /* bp 节点缺失（单模块 apr_dlkm 无 hwbp）= watch 不可用，非错误：
+           只进日志，恢复 last_error 为 mem 节点状态，避免 kernel_status 误报。 */
+        log_msg("hwbp node not found (watch 不可用, 内存读写正常): %s", d->last_error);
+        snprintf(d->last_error, sizeof(d->last_error), "%s", mem_err);
     }
     /* 3) CMD_INIT_DEVICE_INFO（必须首个命令） */
     if (rwproc_init_device_info(d, d->rwproc_mem_fd) != 0) {
