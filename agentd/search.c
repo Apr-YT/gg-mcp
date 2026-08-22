@@ -11,6 +11,156 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <pthread.h>
+
+/* 并行搜索: region 分片, 每 worker 扫一段 region 子集 + 本地结果缓冲。
+ * driver_read 为独立 ioctl, 线程安全; handler 级 g_eng.mtx 已保证搜索互斥。 */
+#define GG_SEARCH_NTHREADS 4
+
+/* 前向声明（定义在本文件后部, worker 先引用） */
+static inline uint64_t gg_fault_advance(uint64_t addr, uint64_t len, size_t rd, int *fail_streak);
+static double read_as_double(const uint8_t *p, int vtype);
+static int results_push(gg_results_t *r, uint64_t addr);
+
+typedef struct {
+    gg_driver_t *d;
+    pid_t pid;
+    const gg_map_region_t *regs;
+    size_t rbegin, rend;
+    int vtype;
+    int mode;              /* 0=exact 1=range 2=aob */
+    uint8_t pat[256];      /* exact: 编码 pattern; aob: 原始 pattern */
+    size_t pat_len;        /* aob 用 */
+    uint64_t ilo, ihi;     /* range 整数边界 */
+    double dlo, dhi;       /* range 浮点边界 */
+    uint64_t *hits;
+    size_t hits_n, hit_cap;
+} search_worker_t;
+
+static inline int w_push(search_worker_t *w, uint64_t addr) {
+    if (w->hits_n >= w->hit_cap) return -1;
+    if (!w->hits) {
+        w->hits = malloc(w->hit_cap * sizeof(uint64_t));
+        if (!w->hits) return -1;
+    }
+    w->hits[w->hits_n++] = addr;
+    return 0;
+}
+
+/* 单 worker 扫描 rbegin..rend 的 region 子集（模式由 w->mode 决定） */
+static void *search_worker_main(void *arg) {
+    search_worker_t *w = arg;
+    gg_driver_t *d = w->d;
+    int sz = vt_size(w->vtype);
+    if (sz <= 0) return NULL;
+    uint8_t *chunk = malloc(GG_SEARCH_CHUNK + 256);
+    if (!chunk) return NULL;
+    uint64_t found = 0;
+    for (size_t k = w->rbegin; k < w->rend; k++) {
+        uint64_t addr = w->regs[k].start;
+        uint64_t len = w->regs[k].end - w->regs[k].start;
+        int fail_streak = 0;
+        size_t carry = 0;
+        while (len > 0) {
+            size_t rd = len > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)len;
+            ssize_t got;
+            if (w->mode == 2)
+                got = driver_read(d, w->pid, addr, chunk + carry, rd);
+            else
+                got = driver_read(d, w->pid, addr, chunk, rd);
+            if (got <= 0) {
+                carry = 0;
+                uint64_t adv = gg_fault_advance(addr, len, rd, &fail_streak);
+                addr += adv; len -= adv;
+                continue;
+            }
+            fail_streak = 0;
+            rd = (size_t)got;
+            if (w->mode == 0) {
+                /* exact: 首字节 memchr 预筛 */
+                const uint8_t first = w->pat[0];
+                for (size_t i = 0; i + (size_t)sz <= rd; ) {
+                    const uint8_t *hit = memchr(chunk + i, first, rd - i - (size_t)sz + 1);
+                    if (!hit) break;
+                    size_t off = (size_t)(hit - chunk);
+                    if (memcmp(hit, w->pat, (size_t)sz) == 0) {
+                        if (w_push(w, addr + off) < 0) { free(chunk); return NULL; }
+                        found++;
+                    }
+                    i = off + 1;
+                }
+            } else if (w->mode == 1) {
+                if (w->vtype == VT_BYTE || w->vtype == VT_WORD ||
+                    w->vtype == VT_DWORD || w->vtype == VT_QWORD) {
+                    for (size_t i = 0; i + (size_t)sz <= rd; i++) {
+                        uint64_t v = read_bits(chunk + i, w->vtype);
+                        if (v >= w->ilo && v <= w->ihi) {
+                            if (w_push(w, addr + i) < 0) { free(chunk); return NULL; }
+                            found++;
+                        }
+                    }
+                } else {
+                    for (size_t i = 0; i + (size_t)sz <= rd; i++) {
+                        double v = read_as_double(chunk + i, w->vtype);
+                        if (v >= w->dlo && v <= w->dhi) {
+                            if (w_push(w, addr + i) < 0) { free(chunk); return NULL; }
+                            found++;
+                        }
+                    }
+                }
+            } else {
+                /* aob: carry 缓冲跨块匹配 */
+                size_t total = carry + rd;
+                for (size_t i = 0; i + w->pat_len <= total; i++) {
+                    if (memcmp(chunk + i, w->pat, w->pat_len) == 0) {
+                        if (w_push(w, addr + i - carry) < 0) { free(chunk); return NULL; }
+                        found++;
+                    }
+                }
+                size_t keep = total >= w->pat_len - 1 ? w->pat_len - 1 : total;
+                if (keep) memmove(chunk, chunk + total - keep, keep);
+                carry = keep;
+            }
+            len -= rd;
+            addr += rd;
+        }
+    }
+    free(chunk);
+    w->hits_n = found;
+    return NULL;
+}
+
+/* 并行执行: 调用方已填好 ws[i].rbegin/rend/hit_cap; 创建线程 → join → 合并到 r。
+ * 返回合并总数; err 置 1 表示结果截断（达到 cap）。 */
+static uint64_t search_run_parallel(search_worker_t *ws, pthread_t *ths, size_t nt,
+                                    gg_results_t *r, int *err) {
+    for (size_t i = 0; i < nt; i++) {
+        ws[i].hits = NULL;
+        ws[i].hits_n = 0;
+        pthread_create(&ths[i], NULL, search_worker_main, &ws[i]);
+    }
+    for (size_t i = 0; i < nt; i++) pthread_join(ths[i], NULL);
+    uint64_t total = 0;
+    for (size_t i = 0; i < nt; i++) {
+        for (size_t j = 0; j < ws[i].hits_n; j++) {
+            if (results_push(r, ws[i].hits[j]) < 0) { *err = 1; break; }
+            total++;
+        }
+        free(ws[i].hits);
+    }
+    return total;
+}
+
+/* 把 nreg 个 region 均分到 nt 个 worker（填入 rbegin/rend） */
+static void search_split_regions(search_worker_t *ws, size_t nt, size_t nreg) {
+    size_t per = nreg / nt, rem = nreg % nt;
+    size_t begin = 0;
+    for (size_t i = 0; i < nt; i++) {
+        ws[i].rbegin = begin;
+        begin += per + (i < rem ? 1 : 0);
+        ws[i].rend = begin;
+    }
+}
 
 /* 内存页大小（用于搜索时容错跳过不可读页，见下方各 got<=0 分支，C2） */
 #define GG_PAGE_SIZE 4096u
@@ -151,38 +301,21 @@ int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
     uint8_t pat[8];
     encode_value(vtype, value, pat);
 
-    static uint8_t chunk[GG_SEARCH_CHUNK + 8];
-    uint64_t found = 0;
-    for (size_t k = 0; k < nreg; k++) {
-        uint64_t addr = regs[k].start;
-        uint64_t len = regs[k].end - regs[k].start;
-        int fail_streak = 0;
-        while (len > 0) {
-            size_t rd = len > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)len;
-            ssize_t got = driver_read(d, pid, addr, chunk, rd);
-            if (got <= 0) {
-                /* 不可读推进: 孤立故障页逐页(最多漏一页 4KB, C2); 连续 64 页失败大步跳过(X4) */
-                uint64_t adv = gg_fault_advance(addr, len, rd, &fail_streak);
-                addr += adv; len -= adv;
-                continue;
-            }
-            fail_streak = 0;
-            rd = (size_t)got;
-            /* 首字节预筛: memchr 找 pattern 首字节, 命中才 memcmp 全串（大块扫描提速） */
-            const uint8_t first = pat[0];
-            for (size_t i = 0; i + (size_t)sz <= rd; ) {
-                const uint8_t *hit = memchr(chunk + i, first, rd - i - (size_t)sz + 1);
-                if (!hit) break;
-                size_t off = (size_t)(hit - chunk);
-                if (memcmp(hit, pat, (size_t)sz) == 0) {
-                    if (results_push(r, addr + off) < 0) { free(regs); return (int64_t)found; }
-                    found++;
-                }
-                i = off + 1;
-            }
-            len -= rd;
-            addr += rd;
+    uint64_t total = 0;
+    if (nreg > 0) {
+        size_t nt = nreg < GG_SEARCH_NTHREADS ? nreg : GG_SEARCH_NTHREADS;
+        search_worker_t ws[GG_SEARCH_NTHREADS];
+        pthread_t ths[GG_SEARCH_NTHREADS];
+        for (size_t i = 0; i < nt; i++) {
+            memset(&ws[i], 0, sizeof(ws[i]));
+            ws[i].d = d; ws[i].pid = pid; ws[i].regs = regs;
+            ws[i].vtype = vtype; ws[i].mode = 0;
+            memcpy(ws[i].pat, pat, sizeof(pat));
+            ws[i].hit_cap = keep_cap;
         }
+        search_split_regions(ws, nt, nreg);
+        int err = 0;
+        total = search_run_parallel(ws, ths, nt, r, &err);
     }
     free(regs);
 
@@ -196,7 +329,7 @@ int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
             for (size_t i = 0; i < r->count; i++) r->exact_vals[i] = value;
         }
     }
-    return (int64_t)found;
+    return (int64_t)total;
 }
 
 /* ---------- AoB 特征码搜索 ---------- */
@@ -232,41 +365,22 @@ int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
     results_clear(r);
     results_init(r, keep_cap);
 
-    static uint8_t chunk[GG_SEARCH_CHUNK + 256];
-    uint64_t found = 0;
-    for (size_t k = 0; k < nreg; k++) {
-        uint64_t addr = regs[k].start;
-        uint64_t len = regs[k].end - regs[k].start;
-        int fail_streak = 0;
-        size_t carry = 0;   /* 上一块尾部保留 plen-1 字节（跨块特征免补读） */
-        while (len > 0) {
-            size_t rd = len > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)len;
-            /* 跨块: 上一块尾部 carry 字节已在 chunk 开头, 本块数据接在后面 */
-            ssize_t got = driver_read(d, pid, addr, chunk + carry, rd);
-            if (got <= 0) {
-                /* 故障页: carry 丢弃（故障页前后特征必然断裂, 正确语义） */
-                carry = 0;
-                uint64_t adv = gg_fault_advance(addr, len, rd, &fail_streak);
-                addr += adv; len -= adv;
-                continue;
-            }
-            fail_streak = 0;
-            rd = (size_t)got;
-            size_t total = carry + rd;
-            /* 在 carry+本块 的连续窗口内滑动匹配（覆盖跨块边界） */
-            for (size_t i = 0; i + plen <= total; i++) {
-                if (memcmp(chunk + i, pat, plen) == 0) {
-                    if (results_push(r, addr + i - carry) < 0) { free(regs); return (int64_t)found; }
-                    found++;
-                }
-            }
-            /* 保留块尾 plen-1 字节到 chunk 开头（若尾部与后续块可拼出特征） */
-            size_t keep = total >= plen - 1 ? plen - 1 : total;
-            if (keep) memmove(chunk, chunk + total - keep, keep);
-            carry = keep;
-            len -= rd;
-            addr += rd;
+    uint64_t total = 0;
+    if (nreg > 0) {
+        size_t nt = nreg < GG_SEARCH_NTHREADS ? nreg : GG_SEARCH_NTHREADS;
+        search_worker_t ws[GG_SEARCH_NTHREADS];
+        pthread_t ths[GG_SEARCH_NTHREADS];
+        for (size_t i = 0; i < nt; i++) {
+            memset(&ws[i], 0, sizeof(ws[i]));
+            ws[i].d = d; ws[i].pid = pid; ws[i].regs = regs;
+            ws[i].vtype = VT_BYTE; ws[i].mode = 2;
+            memcpy(ws[i].pat, pat, plen);
+            ws[i].pat_len = plen;
+            ws[i].hit_cap = keep_cap;
         }
+        search_split_regions(ws, nt, nreg);
+        int err = 0;
+        total = search_run_parallel(ws, ths, nt, r, &err);
     }
     free(regs);
 
@@ -278,7 +392,7 @@ int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
             for (size_t i = 0; i < r->count; i++) r->exact_vals[i] = 0;
         }
     }
-    return (int64_t)found;
+    return (int64_t)total;
 }
 
 /* ---------- 区间搜索 ---------- */
@@ -291,9 +405,7 @@ int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
     int sz = vt_size(vtype);
     if (sz <= 0) return -1;
 
-    int is_int = (vtype == VT_BYTE || vtype == VT_WORD ||
-                  vtype == VT_DWORD || vtype == VT_QWORD);
-    /* double 输入本身受 2^53 限制；但内存值比较必须走整数路径才不丢精度 */
+    /* double 输入本身受 2^53 限制；worker 内整数类型走 u64 比较不丢精度 */
     uint64_t ilo = (uint64_t)vmin, ihi = (uint64_t)vmax;
 
     size_t nreg = 0;
@@ -304,46 +416,25 @@ int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
     results_clear(r);
     results_init(r, keep_cap);
 
-    static uint8_t chunk[GG_SEARCH_CHUNK];
-    uint64_t found = 0;
-    for (size_t k = 0; k < nreg; k++) {
-        uint64_t addr = regs[k].start;
-        uint64_t len = regs[k].end - regs[k].start;
-        int fail_streak = 0;
-        while (len > 0) {
-            size_t rd = len > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)len;
-            ssize_t got = driver_read(d, pid, addr, chunk, rd);
-            if (got <= 0) {
-                /* 区间搜索同样做容错推进(见 search_exact 注释: C2 逐页 + X4 大步) */
-                uint64_t adv = gg_fault_advance(addr, len, rd, &fail_streak);
-                addr += adv; len -= adv;
-                continue;
-            }
-            fail_streak = 0;
-            rd = (size_t)got;
-            if (is_int) {
-                for (size_t i = 0; i + (size_t)sz <= rd; i++) {
-                    uint64_t v = read_bits(chunk + i, vtype);
-                    if (v >= ilo && v <= ihi) {
-                        if (results_push(r, addr + i) < 0) { free(regs); return (int64_t)found; }
-                        found++;
-                    }
-                }
-            } else {
-                for (size_t i = 0; i + (size_t)sz <= rd; i++) {
-                    double v = read_as_double(chunk + i, vtype);
-                    if (v >= vmin && v <= vmax) {
-                        if (results_push(r, addr + i) < 0) { free(regs); return (int64_t)found; }
-                        found++;
-                    }
-                }
-            }
-            len -= rd;
-            addr += rd;
+    uint64_t total = 0;
+    if (nreg > 0) {
+        size_t nt = nreg < GG_SEARCH_NTHREADS ? nreg : GG_SEARCH_NTHREADS;
+        search_worker_t ws[GG_SEARCH_NTHREADS];
+        pthread_t ths[GG_SEARCH_NTHREADS];
+        for (size_t i = 0; i < nt; i++) {
+            memset(&ws[i], 0, sizeof(ws[i]));
+            ws[i].d = d; ws[i].pid = pid; ws[i].regs = regs;
+            ws[i].vtype = vtype; ws[i].mode = 1;
+            ws[i].ilo = ilo; ws[i].ihi = ihi;
+            ws[i].dlo = vmin; ws[i].dhi = vmax;
+            ws[i].hit_cap = keep_cap;
         }
+        search_split_regions(ws, nt, nreg);
+        int err = 0;
+        total = search_run_parallel(ws, ths, nt, r, &err);
     }
     free(regs);
-    return (int64_t)found;
+    return (int64_t)total;
 }
 
 /* ---------- 模糊搜索 ---------- */
@@ -448,6 +539,7 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
                 /* 模糊 refine 读: 容错推进(见 search_exact 注释: C2 逐页 + X4 大步) */
                 uint64_t abs = fr->start + off;
                 uint64_t adv = gg_fault_advance(abs, fr->len - off, rd, &fail_streak);
+                memset(r->fuzzy_snapshot + fr->snap_off + off, 0, adv);
                 off += adv;
                 continue;
             }
@@ -471,24 +563,10 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
                 }
                 if (!keep) bm_clr(r->fuzzy_bitmap, gi);
             }
+            /* 快照就地更新（读到的 chunk 即当前字节, 无需第二次读）:
+             * 合并双读 → 每轮 refine 只读一次全量内存 */
+            memcpy(r->fuzzy_snapshot + fr->snap_off + off, chunk, rd);
             off += rd;
-        }
-        /* 更新快照为该区域当前字节（下一轮比较基准） */
-        off = 0;
-        int fail_streak2 = 0;
-        while (off < fr->len) {
-            size_t rd = (fr->len - off) > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)(fr->len - off);
-            ssize_t got = driver_read(d, pid, fr->start + off, r->fuzzy_snapshot + fr->snap_off + off, rd);
-            if (got <= 0) {
-                uint64_t abs = fr->start + off;
-                uint64_t adv = gg_fault_advance(abs, fr->len - off, rd, &fail_streak2);
-                memset(r->fuzzy_snapshot + fr->snap_off + off, 0, adv);
-                off += adv;
-                continue;
-            }
-            fail_streak2 = 0;
-            if ((size_t)got < rd) memset(r->fuzzy_snapshot + fr->snap_off + off + (size_t)got, 0, rd - (size_t)got);
-            off += (size_t)got;
         }
     }
     return (int64_t)bm_count(r->fuzzy_bitmap, r->fuzzy_elem_count);

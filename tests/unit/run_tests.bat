@@ -41,6 +41,14 @@ rem AoB cross-block/fault-page: search_aob carry buffer
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
   -o "%ROOT%\build\pc\test_aob.exe" "%ROOT%\tests\unit\test_aob.c" "%ROOT%\agentd\search.c"
 if errorlevel 1 ( echo [FAIL] test_aob build & exit /b 1 )
+
+rem 多 region 并行分片: search_exact 在多个 region 下线程合并正确
+gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" -lpthread ^
+  -o "%ROOT%\build\pc\test_parallel.exe" "%ROOT%\tests\unit\test_parallel.c" "%ROOT%\agentd\search.c"
+if errorlevel 1 ( echo [FAIL] test_parallel build & exit /b 1 )
+echo === test_parallel ===
+"%ROOT%\build\pc\test_parallel.exe"
+if errorlevel 1 ( echo [FAIL] test_parallel & exit /b 1 )
 echo === test_aob ===
 "%ROOT%\build\pc\test_aob.exe"
 if errorlevel 1 ( echo [FAIL] test_aob & exit /b 1 )

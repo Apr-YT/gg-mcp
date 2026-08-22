@@ -38,7 +38,7 @@ gg_map_region_t *process_search_regions(pid_t pid, size_t *out_count, int region
 }
 ssize_t driver_read(gg_driver_t *d, pid_t pid, uint64_t addr, void *buf, size_t len) {
     (void)d; (void)pid;
-    g_read_calls++;
+    __atomic_fetch_add(&g_read_calls, 1, __ATOMIC_RELAXED);  /* 并行搜索时原子计数 */
     if (addr < TEST_MEM_BASE) { errno = EFAULT; return -1; }
     uint64_t rel = addr - TEST_MEM_BASE;
     if (rel >= TEST_MEM_SZ)  { errno = EFAULT; return -1; }
