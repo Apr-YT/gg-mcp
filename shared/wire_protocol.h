@@ -27,6 +27,16 @@ extern "C" {
 #define GGWF_RESP   0x0002u   /* 响应 */
 #define GGWF_ERR    0x0004u   /* 错误响应（负载为 {"e":{code,message}}） */
 #define GGWF_EVENT  0x0008u   /* 异步事件（无 seq 语义） */
+#define GGWF_ENC    0x0010u   /* 负载已 XOR 混淆（滚动 key，防被动嗅探一眼看穿） */
+
+/* 负载混淆（GGWF_ENC）: 滚动 XOR, 每字节异或 (GG_XOR_SEED + 位置)。
+ * 同一函数既加密也解密（XOR 自逆）。仅作防"明文秒懂"的轻量混淆，
+ * 非加密安全——对抗主动分析的强度取决于部署端随机化。 */
+#define GG_XOR_SEED 0xA5u
+static inline void gg_xor_payload(unsigned char *buf, size_t len) {
+    for (size_t i = 0; i < len; i++)
+        buf[i] ^= (unsigned char)(GG_XOR_SEED + i);
+}
 
 typedef struct gg_wire_header {
     uint32_t magic;

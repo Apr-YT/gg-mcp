@@ -105,12 +105,18 @@ static int send_full(int fd, const void *buf, size_t len) {
 }
 
 static int send_frame(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
-                      const char *payload, size_t plen) {
+                      char *payload, size_t plen) {
     gg_wire_header_t h;
     h.magic = GGWM_MAGIC;
     h.ver = GGWM_VERSION;
     h.cmd = cmd;
     h.seq = seq;
+    /* 负载混淆: 滚动 XOR（防被动嗅探一眼看穿）, 置 GGWF_ENC 让对端解密。
+     * payload 原地改写（调用方均为 malloc 缓冲: send_ok/send_err/broadcast_event）。 */
+    if (plen && payload) {
+        gg_xor_payload((unsigned char *)payload, plen);
+        flags |= GGWF_ENC;
+    }
     h.flags = flags;
     h.payload_len = (uint32_t)plen;
     if (send_full(fd, &h, sizeof(h)) < 0) return -1;
@@ -1975,6 +1981,9 @@ static void *conn_thread(void *arg) {
             break;
         }
         payload[h.payload_len] = 0;
+        /* 请求负载解密（客户端若开 GGWF_ENC 则 XOR; 未开保持明文, 向后兼容） */
+        if ((h.flags & GGWF_ENC) && h.payload_len)
+            gg_xor_payload((unsigned char *)payload, h.payload_len);
         dispatch(fd, &h, payload);
         free(payload);
     }

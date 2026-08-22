@@ -46,6 +46,7 @@ private:
     int fd_ = -1;
     uint32_t seq_ = 0;
     std::mutex mtx_;
+    bool enc_on_ = false;   /* 自适应混淆: 收到 GGWF_ENC 响应后, 请求也加密 (兼容旧 agentd) */
 };
 
 }  // namespace gg

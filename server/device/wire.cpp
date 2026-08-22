@@ -219,8 +219,16 @@ int AgentClient::write_frame(int fd, uint16_t cmd, uint32_t seq, const std::stri
     h.ver = GGWM_VERSION;
     h.cmd = cmd;
     h.seq = seq;
+    /* 请求负载混淆: 收到过 GGWF_ENC 响应后启用（自适应, 兼容旧 agentd 明文请求）。
+     * 加密在发头之前完成——头里的 flags/payload_len 必须与实际发送内容一致。 */
     h.flags = GGWF_REQ;
     h.payload_len = static_cast<uint32_t>(payload.size());
+    std::string enc = payload;
+    if (enc_on_) {
+        gg_xor_payload(reinterpret_cast<unsigned char*>(&enc[0]), enc.size());
+        h.flags |= GGWF_ENC;
+        h.payload_len = static_cast<uint32_t>(enc.size());
+    }
     size_t off = 0;
     const char* p = reinterpret_cast<const char*>(&h);
     while (off < sizeof(h)) {
@@ -233,11 +241,11 @@ int AgentClient::write_frame(int fd, uint16_t cmd, uint32_t seq, const std::stri
         char hex[64] = {0};
         for (size_t i = 0; i < sizeof(h); i++) snprintf(hex + i * 2, 3, "%02x", (unsigned char)p[i]);
         GG_LOG(3, "[wire] sent hdr[%zu]: %s cmd=%d seq=%u flags=%u plen=%zu\n",
-                sizeof(h), hex, h.cmd, h.seq, h.flags, payload.size());
+                sizeof(h), hex, h.cmd, h.seq, h.flags, enc.size());
     }
     off = 0;
-    while (off < payload.size()) {
-        int n = ::send(fd, payload.data() + off, static_cast<int>(payload.size() - off), 0);
+    while (off < enc.size()) {
+        int n = ::send(fd, enc.data() + off, static_cast<int>(enc.size() - off), 0);
         if (n > 0) { off += static_cast<size_t>(n); continue; }
         if (n < 0 && gg_is_eintr()) continue;
         return -1;
@@ -263,6 +271,11 @@ int AgentClient::read_frame(int fd, gg_wire_header_t* h, std::string* payload) {
         if (n > 0) { off += static_cast<size_t>(n); continue; }
         if (n < 0 && gg_is_eintr()) continue;
         return -1;
+    }
+    /* 响应负载解密（agentd 统一置 GGWF_ENC; 兼容未加密的旧 agentd） */
+    if ((h->flags & GGWF_ENC) && h->payload_len) {
+        gg_xor_payload(reinterpret_cast<unsigned char*>(&(*payload)[0]), h->payload_len);
+        enc_on_ = true;   /* 握手: agentd 支持混淆 → 后续请求也加密 */
     }
     return 0;
 }
