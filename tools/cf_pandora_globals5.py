@@ -28,7 +28,7 @@ class Conn:
         while len(body) < plen:
             body += self.s.recv(plen - len(body))
         if flags & GGWF_ENC:  # 0x0010 响应 XOR 混淆
-            body = bytes(b ^ (0xA5 + i) for i, b in enumerate(body))
+            body = bytes(b ^ ((0xA5 + i) & 0xFF) for i, b in enumerate(body))
         j = json.loads(body)
         if flags & GGWF_ERR:
             return {"err": j.get("e")}
