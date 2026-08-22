@@ -619,6 +619,12 @@ static void h_detach(int fd, uint32_t seq, cJSON *p) {
     event_session_change("detached", old_pid, old_name);
 }
 
+/* 模块名 = path basename（供客户端按 name 索引, 免解析 path） */
+static const char *mod_basename(const char *path) {
+    const char *s = strrchr(path, '/');
+    return s ? s + 1 : path;
+}
+
 static void h_target_info(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_TARGET_INFO, seq, GGERR_NO_SESSION, "no session"); return; }
     size_t nr = 0;
@@ -651,6 +657,7 @@ static void h_target_info(int fd, uint32_t seq, cJSON *p) {
             char base[32];
             snprintf(base, sizeof(base), "0x%llx", (unsigned long long)mods[i].base);
             cJSON_AddStringToObject(o, "path", mods[i].path);
+            cJSON_AddStringToObject(o, "name", mod_basename(mods[i].path));
             cJSON_AddStringToObject(o, "base", base);
             cJSON_AddNumberToObject(o, "size", (double)mods[i].size);
             cJSON_AddItemToArray(modules, o);
@@ -672,6 +679,7 @@ static void h_module_list(int fd, uint32_t seq, cJSON *p) {
         char base[32];
         snprintf(base, sizeof(base), "0x%llx", (unsigned long long)mods[i].base);
         cJSON_AddStringToObject(o, "path", mods[i].path);
+        cJSON_AddStringToObject(o, "name", mod_basename(mods[i].path));
         cJSON_AddStringToObject(o, "base", base);
         cJSON_AddNumberToObject(o, "size", (double)mods[i].size);
         cJSON_AddItemToArray(modules, o);
@@ -1031,7 +1039,7 @@ static void h_read_bytes(int fd, uint32_t seq, cJSON *p) {
     const char *as = cJSON_GetObjectItem(p, "addr") ? cJSON_GetObjectItem(p, "addr")->valuestring : NULL;
     size_t len = cJSON_GetObjectItem(p, "len") ? (size_t)cJSON_GetObjectItem(p, "len")->valuedouble : 64;
     if (!as) { send_err(fd, GGCMD_READ_BYTES, seq, GGERR_BAD_REQUEST, "addr required"); return; }
-    if (len > 65536) len = 65536;
+    if (len > GG_SEARCH_CHUNK) len = GG_SEARCH_CHUNK;   /* 单次读上限 256KB（= RWPROC_MAX_IO） */
     uint64_t addr = strtoull(as, NULL, 0);
     uint8_t *buf = malloc(len);
     ssize_t got = driver_read(&g_eng.drv, g_eng.session_pid, addr, buf, len);

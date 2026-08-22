@@ -93,11 +93,32 @@ case "$1" in
     fi
     ;;
   autostart)
+    # Magisk service.d（Magisk 设备用）
     cp "$0" /data/adb/service.d/90gdm.sh
     chmod 755 /data/adb/service.d/90gdm.sh
     echo "已写入 /data/adb/service.d/90gdm.sh"
     ;;
+  autostart-ksu)
+    # KernelSU 模块 boot service（KernelSU 无 service.d, 用 /data/adb/modules/）
+    mkdir -p /data/adb/modules/vsec
+    cat > /data/adb/modules/vsec/module.prop <<'KEOF'
+id=vsec
+name=vsec-autostart
+version=1
+versionCode=1
+author=gg
+description=autostart dspbridge + apr_dlkm at boot
+KEOF
+    cat > /data/adb/modules/vsec/service.sh <<'KEOF'
+#!/system/bin/sh
+# KernelSU boot: 启动 agentd（dspbridge 伪装）+ 内核通道恢复
+sh /data/adb/vendor_security/start_agentd.sh start
+KEOF
+    chmod 755 /data/adb/modules/vsec/service.sh
+    echo "已写入 /data/adb/modules/vsec (KernelSU boot service)"
+    echo "注意: KernelSU 需在管理器里对 vsec 模块保持启用, 重启后 service.sh 自动执行"
+    ;;
   *)
-    echo "用法: $0 [start|stop|status|autostart]"
+    echo "用法: $0 [start|stop|status|autostart|autostart-ksu]"
     ;;
 esac

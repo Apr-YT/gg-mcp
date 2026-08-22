@@ -37,6 +37,14 @@ echo === test_search ===
 "%ROOT%\build\pc\test_search.exe"
 if errorlevel 1 ( echo [FAIL] test_search & exit /b 1 )
 
+rem AoB cross-block/fault-page: search_aob carry buffer
+gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
+  -o "%ROOT%\build\pc\test_aob.exe" "%ROOT%\tests\unit\test_aob.c" "%ROOT%\agentd\search.c"
+if errorlevel 1 ( echo [FAIL] test_aob build & exit /b 1 )
+echo === test_aob ===
+"%ROOT%\build\pc\test_aob.exe"
+if errorlevel 1 ( echo [FAIL] test_aob & exit /b 1 )
+
 rem T2 maps 解析护栏：process_maps 抽取的 parse_maps_line 纯函数（单一事实源），
 rem 覆盖文件映射/匿名(path 置空)/特殊段/带空格路径/畸形行；防搜索 region 过滤回归。
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" ^

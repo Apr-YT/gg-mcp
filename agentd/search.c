@@ -168,11 +168,17 @@ int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
             }
             fail_streak = 0;
             rd = (size_t)got;
-            for (size_t i = 0; i + (size_t)sz <= rd; i++) {
-                if (memcmp(chunk + i, pat, (size_t)sz) == 0) {
-                    if (results_push(r, addr + i) < 0) { free(regs); return (int64_t)found; }
+            /* 首字节预筛: memchr 找 pattern 首字节, 命中才 memcmp 全串（大块扫描提速） */
+            const uint8_t first = pat[0];
+            for (size_t i = 0; i + (size_t)sz <= rd; ) {
+                const uint8_t *hit = memchr(chunk + i, first, rd - i - (size_t)sz + 1);
+                if (!hit) break;
+                size_t off = (size_t)(hit - chunk);
+                if (memcmp(hit, pat, (size_t)sz) == 0) {
+                    if (results_push(r, addr + off) < 0) { free(regs); return (int64_t)found; }
                     found++;
                 }
+                i = off + 1;
             }
             len -= rd;
             addr += rd;
@@ -232,36 +238,32 @@ int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
         uint64_t addr = regs[k].start;
         uint64_t len = regs[k].end - regs[k].start;
         int fail_streak = 0;
+        size_t carry = 0;   /* 上一块尾部保留 plen-1 字节（跨块特征免补读） */
         while (len > 0) {
             size_t rd = len > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)len;
-            ssize_t got = driver_read(d, pid, addr, chunk, rd);
+            /* 跨块: 上一块尾部 carry 字节已在 chunk 开头, 本块数据接在后面 */
+            ssize_t got = driver_read(d, pid, addr, chunk + carry, rd);
             if (got <= 0) {
+                /* 故障页: carry 丢弃（故障页前后特征必然断裂, 正确语义） */
+                carry = 0;
                 uint64_t adv = gg_fault_advance(addr, len, rd, &fail_streak);
                 addr += adv; len -= adv;
                 continue;
             }
             fail_streak = 0;
             rd = (size_t)got;
-            /* 块内滑动匹配; 块尾若可能跨块则补读补齐 */
-            for (size_t i = 0; i + plen <= rd; i++) {
+            size_t total = carry + rd;
+            /* 在 carry+本块 的连续窗口内滑动匹配（覆盖跨块边界） */
+            for (size_t i = 0; i + plen <= total; i++) {
                 if (memcmp(chunk + i, pat, plen) == 0) {
-                    if (results_push(r, addr + i) < 0) { free(regs); return (int64_t)found; }
+                    if (results_push(r, addr + i - carry) < 0) { free(regs); return (int64_t)found; }
                     found++;
                 }
             }
-            /* 跨块特征: 块尾不足 plen 时, 若还有后续数据则补读 */
-            if (rd >= plen && len > rd) {
-                /* 检查块尾 plen-1 个字节处是否可能开始特征 */
-                for (size_t i = rd - (plen - 1); i + plen <= rd + plen - 1 && i < rd; i++) {
-                    size_t need = plen - (rd - i);
-                    if (need == 0) continue;
-                    ssize_t got2 = driver_read(d, pid, addr + i, chunk + i, need);
-                    if (got2 > 0 && memcmp(chunk + i, pat, plen) == 0) {
-                        if (results_push(r, addr + i) < 0) { free(regs); return (int64_t)found; }
-                        found++;
-                    }
-                }
-            }
+            /* 保留块尾 plen-1 字节到 chunk 开头（若尾部与后续块可拼出特征） */
+            size_t keep = total >= plen - 1 ? plen - 1 : total;
+            if (keep) memmove(chunk, chunk + total - keep, keep);
+            carry = keep;
             len -= rd;
             addr += rd;
         }
