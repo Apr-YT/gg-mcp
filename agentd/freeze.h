@@ -27,7 +27,7 @@ typedef struct gg_freeze {
     pid_t        pid;
     gg_freeze_entry_t entries[GG_FREEZE_MAX];
     size_t       count;
-    int          running;
+    volatile int running;   /* 跨线程可见性: freeze_loop 无锁轮询, volatile 防编译器缓存寄存器 */
     void        *mtx;       /* pthread_mutex_t* */
     void        *thread;    /* pthread_t* */
 } gg_freeze_t;

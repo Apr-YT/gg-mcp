@@ -48,9 +48,9 @@ int qx_hwbp_get_hits(gg_driver_t *d, pid_t pid, uint64_t addr,
 }
 
 /* watch_start/watch_stop 引用但测试不走的符号: 恒失败/无操作 */
-int rwproc_hwbp_start(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int len,
-                      uint64_t *bp_id) {
-    (void)d; (void)pid; (void)addr; (void)type; (void)len; (void)bp_id;
+int rwproc_hwbp_start_all(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int len,
+                          uint64_t *bp_ids, int max_bps, int *nb) {
+    (void)d; (void)pid; (void)addr; (void)type; (void)len; (void)bp_ids; (void)max_bps; (void)nb;
     errno = ENOSYS;
     return -1;
 }

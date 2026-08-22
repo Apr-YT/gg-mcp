@@ -289,10 +289,11 @@ void watch_stop(gg_watch_t *w) {
         return;
     }
     w->stop = 1;
+    /* 唤醒阻塞在 waitpid(-1) 的后台线程: 先 detach 所有 tid, 使其不再是 traced
+     * child, 后台线程的 waitpid 最终返回 ECHILD → loop 退出。否则若目标不持续
+     * 触发硬件断点, waitpid 不返回, loop 永远检查不到 w->stop, pthread_join 死锁。 */
+    for (int i = 0; i < w->ntids; i++) ptrace(PTRACE_DETACH, w->tids[i], 0, 0);
     pthread_join(w->th, NULL);
-    for (int i = 0; i < w->ntids; i++) {
-        ptrace(PTRACE_DETACH, w->tids[i], 0, 0);
-    }
     free(w->tids);
     w->tids = NULL;
     w->ntids = 0;

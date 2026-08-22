@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #ifdef __MINGW32__
@@ -129,13 +130,21 @@ static pid_t      g_maps_pid = -1;
 static gg_map_region_t *g_maps_cache = NULL;
 static size_t     g_maps_n = 0;
 static time_t     g_maps_ts = 0;
+static pthread_mutex_t g_maps_mtx = PTHREAD_MUTEX_INITIALIZER;
 
-void maps_cache_invalidate(void) {
+/* 内部版: 调用方须持 g_maps_mtx 锁（process_maps 持锁时复用, 避免递归死锁） */
+static void maps_cache_invalidate_locked(void) {
     free(g_maps_cache);
     g_maps_cache = NULL;
     g_maps_n = 0;
     g_maps_pid = -1;
     g_maps_ts = 0;
+}
+
+void maps_cache_invalidate(void) {
+    pthread_mutex_lock(&g_maps_mtx);
+    maps_cache_invalidate_locked();
+    pthread_mutex_unlock(&g_maps_mtx);
 }
 
 static gg_map_region_t *maps_dup_cached(size_t *out_count) {
@@ -147,20 +156,23 @@ static gg_map_region_t *maps_dup_cached(size_t *out_count) {
 }
 
 gg_map_region_t *process_maps(pid_t pid, size_t *out_count) {
+    pthread_mutex_lock(&g_maps_mtx);
     /* 命中缓存（同 pid + TTL 内）→ 返回副本 */
     if (g_maps_pid == pid && g_maps_cache &&
         (time(NULL) - g_maps_ts) < MAPS_CACHE_TTL_SEC) {
-        return maps_dup_cached(out_count);
+        gg_map_region_t *d = maps_dup_cached(out_count);
+        pthread_mutex_unlock(&g_maps_mtx);
+        return d;
     }
 
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", (int)pid);
     FILE *f = fopen(path, "r");
-    if (!f) { *out_count = 0; return NULL; }
+    if (!f) { *out_count = 0; pthread_mutex_unlock(&g_maps_mtx); return NULL; }
 
     size_t cap = 256, n = 0;
     gg_map_region_t *arr = malloc(cap * sizeof(*arr));
-    if (!arr) { fclose(f); *out_count = 0; return NULL; }
+    if (!arr) { fclose(f); *out_count = 0; pthread_mutex_unlock(&g_maps_mtx); return NULL; }
 
     char line[512];
     while (fgets(line, sizeof(line), f)) {
@@ -175,13 +187,15 @@ gg_map_region_t *process_maps(pid_t pid, size_t *out_count) {
     fclose(f);
 
     /* 写入缓存（持有 arr），返回副本 */
-    maps_cache_invalidate();
+    maps_cache_invalidate_locked();
     g_maps_cache = arr;
     g_maps_n = n;
     g_maps_pid = pid;
     g_maps_ts = time(NULL);
     *out_count = n;
-    return maps_dup_cached(out_count);
+    gg_map_region_t *d = maps_dup_cached(out_count);
+    pthread_mutex_unlock(&g_maps_mtx);
+    return d;
 }
 
 int region_matches(const gg_map_region_t *r, int region_type) {

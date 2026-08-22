@@ -55,7 +55,7 @@ if errorlevel 1 ( echo [FAIL] test_aob & exit /b 1 )
 
 rem T2 maps 解析护栏：process_maps 抽取的 parse_maps_line 纯函数（单一事实源），
 rem 覆盖文件映射/匿名(path 置空)/特殊段/带空格路径/畸形行；防搜索 region 过滤回归。
-gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" ^
+gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -lpthread ^
   -o "%ROOT%\build\pc\test_process_maps.exe" "%ROOT%\tests\unit\test_process_maps.c" "%ROOT%\agentd\process.c"
 if errorlevel 1 ( echo [FAIL] test_process_maps build & exit /b 1 )
 echo === test_process_maps ===
