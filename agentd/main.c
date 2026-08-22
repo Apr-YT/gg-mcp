@@ -683,7 +683,11 @@ static void h_module_list(int fd, uint32_t seq, cJSON *p) {
 static int parse_vt(const cJSON *p, int def) {
     const cJSON *j = cJSON_GetObjectItem(p, "type");
     if (!j) return def;
-    if (j->type == cJSON_Number) return j->valueint;
+    if (j->type == cJSON_Number) {
+        int v = j->valueint;
+        if (v >= VT_BYTE && v <= VT_BYTES) return v;
+        return -1;   /* 越界数字 → 调用方报错（替代静默走默认） */
+    }
     if (j->type == cJSON_String) {
         const char *s = j->valuestring;
         if (s && *s) {
@@ -695,13 +699,18 @@ static int parse_vt(const cJSON *p, int def) {
             if (!strcmp(s, "double") || !strcmp(s, "f64")) return VT_DOUBLE;
             if (!strcmp(s, "bytes") || !strcmp(s, "aob")) return VT_BYTES;
         }
+        return -1;   /* 字符串不识别 → 调用方报错 */
     }
     return def;
 }
 static int parse_region(const cJSON *p, int def) {
     const cJSON *j = cJSON_GetObjectItem(p, "region");
     if (!j) return def;
-    if (j->type == cJSON_Number) return j->valueint;
+    if (j->type == cJSON_Number) {
+        int v = j->valueint;
+        if (v >= REGION_ANONYMOUS && v <= REGION_ALL) return v;
+        return -1;
+    }
     if (j->type == cJSON_String) {
         const char *s = j->valuestring;
         if (s && *s) {
@@ -709,15 +718,22 @@ static int parse_region(const cJSON *p, int def) {
             if (!strcmp(s, "writable")) return REGION_WRITABLE;
             if (!strcmp(s, "all")) return REGION_ALL;
         }
+        return -1;
     }
     return def;
 }
 
+/* type/region 无效值统一报错文案（省得每个命令重复写） */
+#define VT_HINT "type: 1-7 或 byte/word/dword/qword/float/double/bytes"
+#define REGION_HINT "region: 1-3 或 anonymous/writable/all"
+
 static void h_search(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_NO_SESSION, "no session"); return; }
     int type = parse_vt(p, VT_DWORD);
-    const char *vs = cJSON_GetObjectItem(p, "value") ? cJSON_GetObjectItem(p, "value")->valuestring : NULL;
     int region = parse_region(p, REGION_ANONYMOUS);
+    if (type < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "invalid " VT_HINT); return; }
+    if (region < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "invalid " REGION_HINT); return; }
+    const char *vs = cJSON_GetObjectItem(p, "value") ? cJSON_GetObjectItem(p, "value")->valuestring : NULL;
     int64_t prev = (int64_t)g_eng.results.count;
     int64_t found = 0;
 
@@ -748,9 +764,11 @@ static void h_search(int fd, uint32_t seq, cJSON *p) {
 static void h_search_range(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_SEARCH_RANGE, seq, GGERR_NO_SESSION, "no session"); return; }
     int type = parse_vt(p, VT_DWORD);
+    int region = parse_region(p, REGION_ANONYMOUS);
+    if (type < 0) { send_err(fd, GGCMD_SEARCH_RANGE, seq, GGERR_BAD_REQUEST, "invalid " VT_HINT); return; }
+    if (region < 0) { send_err(fd, GGCMD_SEARCH_RANGE, seq, GGERR_BAD_REQUEST, "invalid " REGION_HINT); return; }
     double vmin = cJSON_GetObjectItem(p, "min") ? cJSON_GetObjectItem(p, "min")->valuedouble : 0;
     double vmax = cJSON_GetObjectItem(p, "max") ? cJSON_GetObjectItem(p, "max")->valuedouble : 0;
-    int region = parse_region(p, REGION_ANONYMOUS);
     int64_t prev = (int64_t)g_eng.results.count;
     int64_t found = search_range(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, vmin, vmax, region);
     if (found < 0) { send_err(fd, GGCMD_SEARCH_RANGE, seq, GGERR_INTERNAL, "range search failed"); return; }
@@ -767,6 +785,8 @@ static void h_unknown_init(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_NO_SESSION, "no session"); return; }
     int type = parse_vt(p, VT_DWORD);
     int region = parse_region(p, REGION_ANONYMOUS);
+    if (type < 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_BAD_REQUEST, "invalid " VT_HINT); return; }
+    if (region < 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_BAD_REQUEST, "invalid " REGION_HINT); return; }
     int64_t prev = (int64_t)g_eng.results.count;
     int64_t elems = search_unknown_init(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, region);
     if (elems < 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_INTERNAL, "unknown-init failed"); return; }
@@ -986,6 +1006,7 @@ static void h_read(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_READ, seq, GGERR_NO_SESSION, "no session"); return; }
     const char *as = cJSON_GetObjectItem(p, "addr") ? cJSON_GetObjectItem(p, "addr")->valuestring : NULL;
     int type = parse_vt(p, VT_DWORD);
+    if (type < 0) { send_err(fd, GGCMD_READ, seq, GGERR_BAD_REQUEST, "invalid " VT_HINT); return; }
     if (!as) { send_err(fd, GGCMD_READ, seq, GGERR_BAD_REQUEST, "addr required"); return; }
     uint64_t addr = strtoull(as, NULL, 0);
     int sz = vt_size(type);

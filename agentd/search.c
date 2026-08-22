@@ -281,10 +281,18 @@ int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
 
 /* ---------- 区间搜索 ---------- */
 
+/* 区间搜索：min <= value <= max。
+ * 精度：整数类型（BYTE/WORD/DWORD/QWORD）走 u64 整数比较——read_as_double
+ * 对 >2^53 的 u64 会丢精度（大数值区间搜索出错误结果）。float/double 走 double。 */
 int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
                      int vtype, double vmin, double vmax, int region_type) {
     int sz = vt_size(vtype);
     if (sz <= 0) return -1;
+
+    int is_int = (vtype == VT_BYTE || vtype == VT_WORD ||
+                  vtype == VT_DWORD || vtype == VT_QWORD);
+    /* double 输入本身受 2^53 限制；但内存值比较必须走整数路径才不丢精度 */
+    uint64_t ilo = (uint64_t)vmin, ihi = (uint64_t)vmax;
 
     size_t nreg = 0;
     gg_map_region_t *regs = process_search_regions(pid, &nreg, region_type);
@@ -311,11 +319,21 @@ int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
             }
             fail_streak = 0;
             rd = (size_t)got;
-            for (size_t i = 0; i + (size_t)sz <= rd; i++) {
-                double v = read_as_double(chunk + i, vtype);
-                if (v >= vmin && v <= vmax) {
-                    if (results_push(r, addr + i) < 0) { free(regs); return (int64_t)found; }
-                    found++;
+            if (is_int) {
+                for (size_t i = 0; i + (size_t)sz <= rd; i++) {
+                    uint64_t v = read_bits(chunk + i, vtype);
+                    if (v >= ilo && v <= ihi) {
+                        if (results_push(r, addr + i) < 0) { free(regs); return (int64_t)found; }
+                        found++;
+                    }
+                }
+            } else {
+                for (size_t i = 0; i + (size_t)sz <= rd; i++) {
+                    double v = read_as_double(chunk + i, vtype);
+                    if (v >= vmin && v <= vmax) {
+                        if (results_push(r, addr + i) < 0) { free(regs); return (int64_t)found; }
+                        found++;
+                    }
                 }
             }
             len -= rd;
@@ -490,26 +508,62 @@ int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) 
     uint64_t *dst = r->addrs;
     uint64_t *dstv = r->exact_vals;
     size_t n = 0;
-    uint8_t buf[8];
-    for (size_t i = 0; i < r->count; i++) {
-        uint64_t addr = r->addrs[i];
-        if (driver_read(d, pid, addr, buf, (size_t)sz) != sz) continue;
-        double cur = read_as_double(buf, r->exact_vt);
-        double prev = read_as_double((const uint8_t *)&r->exact_vals[i], r->exact_vt);
-        int keep = 0;
-        switch (op) {
-        case REFINE_INCREASED: keep = (cur > prev); break;
-        case REFINE_DECREASED: keep = (cur < prev); break;
-        case REFINE_UNCHANGED: keep = (cur == prev); break;
-        case REFINE_CHANGED:   keep = (cur != prev); break;
-        default: keep = 0; break;
+    uint8_t *bigbuf = malloc(GG_SEARCH_CHUNK);
+    if (!bigbuf) return -1;
+    for (size_t i = 0; i < r->count; ) {
+        size_t seg_n = 0;
+        uint64_t cur = r->addrs[i];
+        while (i + seg_n < r->count && r->addrs[i + seg_n] == cur &&
+               (seg_n + 1) * (size_t)sz <= GG_SEARCH_CHUNK) {
+            seg_n++;
+            cur += (uint64_t)sz;
         }
-        if (keep) {
-            dst[n] = addr;
-            dstv[n] = read_bits(buf, r->exact_vt);
-            n++;
+        ssize_t got = driver_read(d, pid, r->addrs[i], bigbuf, seg_n * (size_t)sz);
+        if (got == (ssize_t)(seg_n * (size_t)sz)) {
+            for (size_t j = 0; j < seg_n; j++) {
+                uint64_t addr = r->addrs[i + j];
+                double curv = read_as_double(bigbuf + j * (size_t)sz, r->exact_vt);
+                double prev = read_as_double((const uint8_t *)&r->exact_vals[i + j], r->exact_vt);
+                int keep = 0;
+                switch (op) {
+                case REFINE_INCREASED: keep = (curv > prev); break;
+                case REFINE_DECREASED: keep = (curv < prev); break;
+                case REFINE_UNCHANGED: keep = (curv == prev); break;
+                case REFINE_CHANGED:   keep = (curv != prev); break;
+                default: keep = 0; break;
+                }
+                if (keep) {
+                    dst[n] = addr;
+                    dstv[n] = read_bits(bigbuf + j * (size_t)sz, r->exact_vt);
+                    n++;
+                }
+            }
+        } else {
+            /* 段读失败：逐地址回退（保持原有容错语义） */
+            for (size_t j = 0; j < seg_n; j++) {
+                uint64_t addr = r->addrs[i + j];
+                uint8_t buf[8] = {0};
+                if (driver_read(d, pid, addr, buf, (size_t)sz) != sz) continue;
+                double curv = read_as_double(buf, r->exact_vt);
+                double prev = read_as_double((const uint8_t *)&r->exact_vals[i + j], r->exact_vt);
+                int keep = 0;
+                switch (op) {
+                case REFINE_INCREASED: keep = (curv > prev); break;
+                case REFINE_DECREASED: keep = (curv < prev); break;
+                case REFINE_UNCHANGED: keep = (curv == prev); break;
+                case REFINE_CHANGED:   keep = (curv != prev); break;
+                default: keep = 0; break;
+                }
+                if (keep) {
+                    dst[n] = addr;
+                    dstv[n] = read_bits(buf, r->exact_vt);
+                    n++;
+                }
+            }
         }
+        i += seg_n;
     }
+    free(bigbuf);
     r->count = n;
     return (int64_t)n;
 }
@@ -540,6 +594,27 @@ size_t results_materialize(gg_results_t *r) {
     return n;
 }
 
+/* 批量读连续地址段：addrs[0..n) 中从 idx 起收集连续段（步长 sz，段长 ≤ GG_SEARCH_CHUNK），
+ * 一次 driver_read 拉整段，逐项写入 vals[]。返回段内元素数；段读失败返回 0（调用方回退逐项）。 */
+static size_t bulk_read_segment(gg_driver_t *d, pid_t pid, const uint64_t *addrs,
+                                size_t n, size_t idx, int vtype,
+                                uint8_t *bigbuf, uint64_t *vals) {
+    int sz = vt_size(vtype);
+    size_t seg_n = 0;
+    uint64_t cur = addrs[idx];
+    while (idx + seg_n < n && addrs[idx + seg_n] == cur &&
+           (seg_n + 1) * (size_t)sz <= GG_SEARCH_CHUNK) {
+        seg_n++;
+        cur += (uint64_t)sz;
+    }
+    if (seg_n == 0) return 0;
+    if (driver_read(d, pid, addrs[idx], bigbuf, seg_n * (size_t)sz) != (ssize_t)(seg_n * (size_t)sz))
+        return 0;   /* 段读失败（页保护等）→ 调用方逐项回退 */
+    for (size_t j = 0; j < seg_n; j++)
+        vals[j] = read_bits(bigbuf + j * (size_t)sz, vtype);
+    return seg_n;
+}
+
 int results_get_page(gg_driver_t *d, pid_t pid, gg_results_t *r,
                      size_t offset, size_t limit,
                      uint64_t *out_addrs, uint64_t *out_values, int vtype, size_t *out_count) {
@@ -547,21 +622,28 @@ int results_get_page(gg_driver_t *d, pid_t pid, gg_results_t *r,
     if (sz <= 0) return -1;
     if (r->fuzzy_active) results_materialize(r);
     size_t n = 0;
-    for (size_t i = offset; i < r->count && n < limit; i++) {
-        uint64_t addr = r->addrs[i];
-        uint8_t buf[8] = {0};
-        ssize_t got = driver_read(d, pid, addr, buf, (size_t)sz);
-        if (got >= (ssize_t)sz) {
-            uint64_t v = 0;
-            if (vtype == VT_FLOAT || vtype == VT_DOUBLE) { memcpy(&v, buf, (size_t)sz); }
-            else { memcpy(&v, buf, (size_t)sz); }
-            out_values[n] = v;
+    uint8_t *bigbuf = malloc(GG_SEARCH_CHUNK);
+    if (!bigbuf) return -1;
+    for (size_t i = offset; i < r->count && n < limit; ) {
+        size_t seg = bulk_read_segment(d, pid, r->addrs, r->count, i, vtype,
+                                       bigbuf, out_values + n);
+        if (seg > 0) {
+            for (size_t j = 0; j < seg; j++)
+                out_addrs[n + j] = r->addrs[i + j];
+            n += seg;
+            i += seg;
         } else {
-            out_values[n] = 0;
+            /* 段读失败：单地址回退（保持原有容错语义） */
+            uint8_t buf[8] = {0};
+            ssize_t got = driver_read(d, pid, r->addrs[i], buf, (size_t)sz);
+            if (got >= (ssize_t)sz) out_values[n] = read_bits(buf, vtype);
+            else out_values[n] = 0;
+            out_addrs[n] = r->addrs[i];
+            n++;
+            i++;
         }
-        out_addrs[n] = addr;
-        n++;
     }
+    free(bigbuf);
     *out_count = n;
     return 0;
 }
