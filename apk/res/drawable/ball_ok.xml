@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- 悬浮球：连接正常（深底霓虹蓝边框） -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android"
-    android:shape="oval">
-    <solid android:color="@color/btn_dark" />
-    <stroke android:width="2dp" android:color="@color/primary" />
-</shape>
