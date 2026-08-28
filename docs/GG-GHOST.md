@@ -402,3 +402,76 @@ D:\Finished product\GG-Ghost\
 - [ ] **配置收敛**：GG-Ghost.sh 参数（PORT/KEY/KO 路径）抽到独立 config 文件
 - [ ] **Magisk 自启动**：接入 service.d 自动拉起
 - [ ] **钻石定位**：同法（钻石变化→交叉→偏移）
+
+---
+
+## 15. 反检测伪装措施清单（对抗 ACE，已部署 2026-08-19 设备验证）
+
+> **命名说明**：本文档 §3/§6 描述的是**源码原名**（`rwProcMem_module.ko` / `gg-ghost-agentd` / `gg-*`）；本节描述的是**设备侧已部署的伪装变体名**（`apr_dlkm` / `dspbridge` / `aq_*`），二者为同一套件在不同命名阶段的形态。本套件在腾讯 ACE（CF / 三角洲同源）环境存活所实施的全部伪装。**剩余暴露面见 15.3，治本需 susfs / 刷内核。**
+
+### 15.1 内核驱动伪装（apr_dlkm，rwproc33 协议）
+- **模块名伪装**：`rwProcMem_module` → **`apr_dlkm`**（高通音频 DSP 风格名），ACE 扫 `/proc/modules` 只见"厂商音频固件"。
+- **大小伪装**：`.bss` 加 256KB padding（`g_module_size_pad[262144]`）→ lsmod Size 32768→**294912（288KB）**，落入真实厂商驱动大小区间，规避 `module_size_in_range` 过小判定；`.bss` 不占 `.ko` 文件空间、不影响功能。
+- **内核符号去特征**：`gg_*` → `aq_*`（含 printk `"gg-ghost"`→`"aq-dsp"`）；目录/文件 `rwProcMem*` → `adsp_hal_dlkm/aq_*`；Makefile `-ffile-prefix-map` 去编译路径（`__FILE__` 泄露）。验证：`/proc/kallsyms` 的 `rwProcMem/gg_` = 0。
+- **节点改名**：`/proc` 节点由 `ver_control.h` 硬编码 `CONFIG_PROC_NODE_AUTH_KEY`（32 位 hex 特征）→ 改名 **`aqmem`**（厂商风格，fd 显示 `/proc/aqmem/aqmem`）。
+- **固件化加载**：驱动存 **`apr_dlkm.fw`**（`insmod` 不看扩展名，实测成功）→ 设备上任何时刻无 `.ko` 文件，ACE 扫目录只见"厂商固件"。
+- **无痕读取**：手写 xarray 遍历 + `page_address` 直读 shmem page cache——**零缺页（不 fault-in）/零接触/零新增导出符号**；读路径 PTE 直读优先 → 页缓存回退 → 判空洞。
+
+### 15.2 agentd 伪装（dspbridge）
+- 二进制改名 **`dspbridge`**（避开系统已有 `qseecomd`），部署 `/data/adb/vendor_security/`（vsec.sh 启停）。
+- **cmdline 隐藏**：`main` 解析参数后调用 `hide_process` 清空 `argv[1..]` + `environ`（保留 `argv[0]`=程序名），`/proc/PID/cmdline` 仅程序名、comm 与二进制名一致，消除 `--driver rwproc/--rwproc-key aqmem/--rwproc-bp-key ...` 泄露（`libckguard` `/proc/%u/cmdline` 检测入口）。
+- **二进制 strings 清零**：`/data/adb/GG-Ghost` 路径、`gg-touch`、`GG_KO_*` 环境变量名等特征批量替换，新二进制 strings 归零。
+- **tmp 不留文件**：push 中转后立即删除；ko 直接 `insmod /data/adb/vendor_security/apr_dlkm.fw`，无自解压/无 tmp 写。
+
+### 15.3 KernelSU 痕迹处理与剩余暴露面
+- **已修**：`ksud` → **`adspd`** 改名（su 功能不受影响）；重启清 dmesg `last unloaded: rwProcMem_module`；删 `/data/adb/GG-Ghost` 旧目录 + `/data/local/tmp` 残留（`gg-agentd`/`tp2_watch*`/`sox` 等 ACE 重点目录）。
+- **剩余暴露面（治本需 susfs / 刷内核，当前未做）**：`u:r:ksu:s0` 域（KernelSU su 不支持 `--context`）、`/system/bin/su`、`/data/adb/ksu/`、`kernelsu` 内核模块名、`/system/bin/su` 路径检测可能命中 TuringFD。
+- **封号归因提示**：历史 7 天封号主因更可能是 **TEE 伪造套件被识破**（TEESimulator/tricky_store，腾讯对 TEE/KeyMint 零容忍）+ KernelSU root 痕迹，工具 fault-in/伪装贡献次要。
+
+### 15.4 铁律
+- **CF / 腾讯系游戏绝不 `gg_attach`**（注入 = ACE 秒封）；只读驱动直读才安全。
+- 进程/设备重启后 ASLR 变化 → 读内存前必须实时查 `/proc/PID/maps`（旧基址读新进程误判驱动坏，实际驱动正常）。
+
+---
+
+## 16. 三角洲行动手游：坐标无痕读取 + Unicorn 解密（设计 2026-08-19）
+
+> 本套件在三角洲（`com.tencent.tmgp.dfm`，1.201.x）的**数据获取方案**。游戏分析面（ACE 集成深度/坐标加密机制）见独立文档 `三角洲行动手游ACE分析.md`（属游戏 ACE 分析，不在此文档重复）。
+
+### 16.1 难度增量（相比 CF）
+
+CF 关键数据是**明文全局变量**（libgame.so + 偏移，读完即用）。三角洲的**玩家坐标/物资被 ACE shellcode 实时加密**——用驱动直读拿到的是密文，须先解密。这是三角洲比 CF 多出来的一截难度。
+
+### 16.2 ACE 加密机制（逆向结论）
+
+- **Hook**：`libUE4.so` 的 `USceneComponent::SetRelativeLocation` → `BR X16` 跳进**运行时 mmap 注入的 940KB RWX 匿名区 shellcode**（43 个 OLLVM CFF 函数，不在 so 文件）。
+- **数据布局**（相对 component / actor）：
+  - `+0x168` 明文 `FEncVector`（X/Y/Z + 标志，解密读取点）
+  - `+0x210` 加密坐标（ACE 写入）
+  - `+0x174` `FEncHandler`（加密标志）
+  - `AActor +0x180` = `RootComponent`
+- **解密**：Unicorn 模拟 `shellcode+0x9E000`（栈 0x290），`X0`=component、`X1`=加密区、`LR`=RET_STUB；另含 `+0x50000` 查找、`+0x510A0` MurmurHash3。
+- `files/ace_shell_di.dat`（22B）仅 shellcode 版本/配置标记，不含密钥。
+
+### 16.3 我们的无痕方案（本套件杀手锏）
+
+公开 `dfm_android_unicorn` 用 `process_vm_readv` + `ptrace`（用户态，TPRT 监控面）。本套件用内核驱动绕开：
+
+| 步骤 | 公开方案（会被检） | 本套件（apr_dlkm 无痕） |
+|---|---|---|
+| 抓 RWX shellcode / 读内存 | `process_vm_readv` | rwproc33 零缺页页缓存直读，不改页状态 |
+| 取 `TPIDR_EL0`（解密必需） | `ptrace` 挂 GameThread | 内核直读 `task_struct->tpidr_el0`，不 ptrace |
+| 读 maps 定位 RWX 区 | `/proc/PID/maps` | 内核读目标 `mm` 结构 |
+| 解密 | PC Unicorn 模拟 `shellcode+0x9E000` | **同**（与读取解耦） |
+
+### 16.4 执行流程（待用户实机）
+
+1. **用户启动三角洲进对局**（坐标有值、shellcode 才注入）。
+2. gg 无痕驱动抓：`libUE4` maps → RWX 区 940KB shellcode → 加密坐标(`+0x210`) → GameThread `TPIDR_EL0`。
+3. PC 端 Unicorn 模拟 `shellcode+0x9E000` 解密，从 `+0x168` 读明文。
+4. 版本偏移 37114 vs README 37110 可能微调 → 解构后若读歪，需重定位偏移（RWX 区 base 由 maps 动态取，shellcode 内偏移需实测校准）。
+
+### 16.5 风险
+
+- 解密依赖逆向偏移，**游戏大版本更新即失效**，需随版本重定位（与 CF 静态偏移同理，但三角洲多了 shellcode 一层）。
+- Unicorn 模拟需精确还原寄存器/内存环境，否则解密歪；先用真实进程内存 dump 校准再批量跑。

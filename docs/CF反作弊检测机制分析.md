@@ -63,11 +63,14 @@
 ### 3.2 TssSDK/TP2 架构
 
 - **客户端**：libtersafe.so（tp2_sdk_init → 采集 → tss_get_report_data 上报）
-- **内核模块**：`adt.s3.t`（释放到 `/data/data/<pkg>/files/`，加载后自删）
-  - 加载链：fcn.00168dbc（混淆控制流）→ fcn.0016a814（fopen 路径）
-  - 协议：ioctl + magic（`MagicCodeWrong`）+ 签名（`TSS_SDK_SIGDATA`/`tss_recv_sec_signature`）+ `time_magic`
-  - **服务端签名下发才加载**（`TssSDKOnRecvSignature`）
-- **实测结论**（2026-08-19）：大号（封号）/小号/全新进程/设备重启后，**adt.s3.t 均不加载**；lsmod 663 模块集合大号 vs 小号 100% 一致。当前 CF 版本在 root/KernelSU 设备上**纯用户态检测**。
+- **内核模块（ACE 唯一内核态检测组件）**：`adt.s3.t`
+  - 释放路径：字符串实锤 `/data/data/%s/files/adt.s3.t`（libtersafe @0x495860，fopen 函数 `fcn.0016a814`，加载链 `fcn.00168dbc` 混淆控制流）。
+  - 后缀 `.t` **非标准 .ko**——疑似加密/压缩格式，需专用 loader 解密后再 insmod（解释"加载后自删"）。
+  - 用户态桥：`tp2_sdk_ioctl` @0xdb094（4184B）/ `TssSDKIoctl` @0x17f3c0（libtprt）——向内核模块发 ioctl；**设备节点名未在字符串硬编码（动态拼接）**。
+  - 加载机制实证（2026-08-19）：libtersafe **不自行 insmod**——全串检索 `finit_module`/`init_module`/`request_module`/`insmod` **均 0 命中**，且**无硬编码 /dev/ 节点**。真正 insmod 由更上层（Java/独立 loader）完成，**当前版本未触发**。
+  - 协议：ioctl + magic（`MagicCodeWrong`）+ 签名（`TSS_SDK_SIGDATA`/`tss_recv_sec_signature`）+ `time_magic`。
+  - **服务端签名下发才加载**（`TssSDKOnRecvSignature`）。
+- **实测结论（2026-08-19，两份 lsmod 抓包）**：大号/小号/全新进程/设备重启后，**adt.s3.t 均不加载**。tp2_watch3.sh（1800s×1s 监控，grep `tp2|adt|tss|tprt`）**零命中**；`lsmod_full_now.txt` 663 模块集合大号 vs 小号 **100% 一致**。设备上内核态与"检测"相关的仅有 `kernelsu`（你的 root 方案，被 TuringFD 检测但已规避）与 `apr_dlkm`（本工具驱动，ACE 无内核端故读不到）。当前 CF 版本在 root/KernelSU 设备上**纯用户态检测**。
 
 ### 3.3 libgamemaster.so hook 引擎（QPP）
 
@@ -77,6 +80,18 @@
 - `start_node_detect`：VPN/代理节点检测
 
 **局限**：只查**进程内模块与 hook**——内核驱动 + 独立进程 + 零注入 = 天然规避。
+
+### 3.4 TPRT 运行时自保护（libtprt.so，2.1MB，ARM64）—— 2026-08-19 静态逆向
+
+- **定位**：TPRT = TssSDK 的**运行时（Runtime）**，是 ACE 的"反篡改层"。导出两张表：
+  - `g_tprt_pfn_array` @0x2040d0，376B = **47 项函数指针**（TPRT 内部处理函数/替换后入口，全落在 libtprt .text 内）。
+  - `g_tprt_ori_array` @0x205e70，120B = **15 项，静态全零**，运行时 inline hook 后填入被替换函数的原始入口（基线）。
+- **控制流混淆**：JNI_OnLoad（0x87014，1056B）为**控制流平坦化**——`cmp w8,...; csel x9,...; ldr x9,[x24,x9]; br x9` 跳表分发器（跳表基址 0x1da080），手工完整还原成本高；属反静态分析保护。
+- **inline hook 自保护**：字符串实锤 `mprotect`/`mmap`/`munmap`/`dlsym`/`dlopen`——运行时经 dlsym 解析目标、mprotect 改 .text 权限、写入 trampoline 做 inline hook；`g_tprt_ori_array` 保存被替换函数原始入口作基线。
+- **完整性自校验**：`memcmp` + **`CrcEr`**（格式 `f:%s s=%d:v=%d`，strings line 3933）+ **`wild scan`**（通配符内存扫描，line 4359，上下文 `insufficient lookahead / no future / more < 2`）——回读自身代码页/关键资源做 CRC 与字节比对，异常记 `CrcEr`（行为/签名扫描，非外部读取检测）。
+- **内核通信桥**：`TssSDKIoctl` / `TssSDKIoctlOld`（line 3399-3402）——向 TP2 内核模块 `adt.s3.t` 发 ioctl 的入口；模块当前不加载 → 走 `Old` 回退（与 3.2 结论一致）。
+- **线程/进程监控**：`fork` / `pthread_create`（自检/watchdog 线程）；`connect` / `socket`（自身通信或 C2 检测）。
+- **关键缺失（威胁判定核心）**：**全串检索 `ptrace`=0、`process_vm`=0、`pread64`/`pwrite64`=0、`read`/`write`/裸 `open`=0**。TPRT **不 hook 任何读取路径系统调用，也无内核组件**。
 
 ## 四、采集数据全景（上报服务端）
 
@@ -128,6 +143,10 @@ TP2 通用采集字段（资料交叉验证）：Language/cpu_model/simulator_na
 | GPU/帧缓冲侧信道 | ✅ | 不改帧率/GPU |
 | 内核模块列表（black_module） | ✅ 伪装 | apr_dlkm 厂商风格名 + 288KB 正常大小 |
 | /dev 节点扫描 | ✅ 伪装 | /proc/aqmem（隐藏 + fd 伪装） |
+| TPRT inline hook 自保护 | ✅ 天然规避 | 只 hook CF 进程内 libc，我们的读取走内核驱动，不经过 CF 用户态 libc |
+| TPRT 完整性自校验（CRC / wild scan） | ✅ | 只读不改 CF 内存，基线无变化；我们读游戏数据页、不碰 TPRT 自身页 |
+| TPRT 读取路径 hook（ptrace / process_vm_readv） | ✅ 不存在 | 全串检索 0 命中，TPRT 无此能力，无内核组件 |
+| ACE 内核检测模块（adt.s3.t） | ✅ 未激活 | 当前版本 lsmod 零命中不加载；无内核态组件观测我们的驱动；即使未来激活，读取已无痕化且 TPRT 不 hook 读取路径 |
 
 **设备端已部署形态**：apr_dlkm（288KB 厂商大小）+ dspbridge（进程伪装）+ /proc/aqmem 节点 + 无痕 xarray 读取 + 零注入。
 
@@ -141,25 +160,120 @@ libtersafe.so:
   adt.s3.t 路径 @0x495860（fopen 函数 fcn.0016a814，加载链 fcn.00168dbc）
   /proc/%d/task/%d/status @0x5de750
   libc.so @0x496bbc    linker64 @0x5dc440
-  tp2_sdk_ioctl @0x29f0   tss_get_report_data @0x2aa3
+  tp2_sdk_ioctl @0xdb094（4184B，ioctl 桥）  tp2_sdk_init @0xdc54c  tp2_sdk_init_ex @0xdc914
+  tss_get_report_data @0x2aa3
 libgamemaster.so:
   is_hook_stable @0x32d50   is_hook_module @0x31abc
   ProtectFD @0x1e658         start_node_detect @0x403a4
 libtprt.so:
-  g_tprt_ori_array @0x155b  TssSDKIoctl @0x17f3c0
+  g_tprt_pfn_array @0x2040d0 (376B/47项)  g_tprt_ori_array @0x205e70 (120B/15项,静态零)
+  JNI_OnLoad @0x87014 (控制流平坦化)  TssSDKIoctl @0x17f3c0  TssSDKIoctlOld @0x17f400
+  CrcEr 字符串 @0x1a7cfa  wild scan 字符串 @0x1b0de7
+libil2cpp.so（运行时锚点，均为文件 vaddr = 运行时 so基址 + 偏移，2026-08-19 实测）:
+  CodeRegistration       @0xc3b09a0  （静态明文，运行时完整可读）
+  MetadataRegistration   @0xba4b510  （静态/运行时均全 0 —— 腾讯清零，真数据走 CodeRegistration 链）
+  metadataRegistrations  @0xc37cde8  （指针数组 → 0xc32b028 魔改紧凑结构）
+  导出 API（il2cpp_init @0x2662aec 等）静态为垃圾字节、运行时解密为正常指令
 ```
+
+### 7.1 libil2cpp.so 运行时结构链与字段偏移（2026-08-19 实测）
+
+**腾讯加固策略：函数指针不加密（运行时必需），类型布局数据加密/清零（防逆向）**。静态提取字段偏移不可行，运行时数据按需解密。
+
+**运行时解密行为**：
+- 导出 API 区（il2cpp_init@0x2662aec 等）文件里是垃圾字节（`90 53 0f 86`），**运行时是正常指令**（`stp x29, x30, [sp, #-0x10]!` 标准序言）→ 腾讯按需解密，静态反汇编导出 API 无意义
+- `.rodata` 类型相关数据静态为密文（`0x50505050`/`0xafaf5448` 重复模式），运行时解密为明文（如 0x9931900 → 0x7141336900）
+
+**CodeRegistration（v24.4 布局，运行时 0x7143db59a0 实测）**—— 全部明文：
+```
++0x00  methodPointersCount=368369,  methodPointers=.text 函数地址数组
++0x10  reversePInvokeWrapperCount=2751, +0x18 wrappers
++0x20  genericMethodPointersCount=81946
++0x30  genericAdjustorThunks/invokerPointersCount=18628
++0x40  unresolvedVirtualCallCount=69757
++0x50  interopDataCount=2583
++0x60  windowsRuntimeFactoryCount=1155
++0x70  codeGenModulesCount(魔改=82724, 疑字节数), codeGenModules→0x7143c8e708
++0x80  metadataRegistrationCount(魔改=20956), metadataRegistrations→0x7143d81de8
++0x90  metadataUsagesCount=121655, metadataUsages
+```
+（开头 16 字节 methodPointers 是 v24.4 特有，Il2CppDumper AutoPlusInit 会 `codeRegistration -= 16`）
+
+**MetadataRegistration 魔改紧凑结构（腾讯替换标准 128B 结构）**：
+```
+metadataRegistrations → 0x7143d81de8（指针数组，20956 个）
+  → 元素 0x7143d30028 = {u64=1, u64=ptr}×8（每字段一个 {count=1, ptr}）
+  → ptr 指向数据表 0x71442fed18（8 个数据指针，差 8B）
+  → 数据表元素：
+      [0]=0x7141336900 genericClasses?   [1]=0x7141336a20 genericInsts?
+      [2]=0x7141336a40                   [3]=0x7141336a60 types?
+      [4]=0x7141336c50 methodSpecs?      [5]=0x7141336d30 fieldOffsets?
+      [6]=0x7141336e00 typeDefSizes?     [7]=0x7141336f60 metadataUsages?
+```
+
+**卡点：`{tag, X}` 紧凑编码未破译**。fieldOffsets 数据（0x7141336d30）是 16 字节记录流：
+```
+{tag=21(0x15), X=0x00070000}, {21, 0x07400000}, {21, 0x07400002}, {21, 0x07800056},
+{21, 0x00070003}, {21, 0x00070001}, ...  (tag=21 块, X 高16位多为 0x0007)
+{tag=14(0x0E), X=0x000A0000}, {14, 0x000A4000}, ...                    (tag=14 块, X 高16位=0x000A)
+```
+- tag 在块边界变化（21→14），X = `(高16 << 16) | 低16`
+- **已排除**：低 16 位≠字段名索引（查字符串表 0x606/0x1010/0x5180 无对应字段名，0x5180='DeriveMAC' 方法名）；高 16 位≠typedef（7=IConvertible/10=SerializableAttribute 均 0 字段接口/属性类，classes.tsv 与 dump.cs 一致）
+- **结论：`{tag,X}` 是腾讯加密的另一套紧凑存储，非运行时的真实字段偏移来源**
+
+### 7.2 破译成功：fieldOffsets 走标准结构（2026-08-19，定制 dump 完成）
+
+**突破口：反汇编 `il2cpp_class_get_fields` 跳板链**（导出 API 运行时已解密）：
+```
+il2cpp_class_get_fields (导出 0x2662c58) → b 0x2643c64 (真实实现)
+  实现: ldr x9, [klass, #0x68]    ← Il2CppClass.fields (FieldInfo 数组)
+        ldrh w10, [klass, #0xf8]  ← 字段数
+  类初始化 0x2643cd8 → 字段构造循环:
+    偏移计算: bl 0x264380c (从 typeDefinition 指针反推 typedef 索引, 104B 记录) → bl 0x26437f4:
+      adrp x8, #0x71443ea000; ldr x8, [x8, #0xfd0]  ← 全局 0x71443eafd0 = 0x7143db5a10
+      ldr x8, [x8, #0x58]                           ← fieldOffsets 指针数组
+      ldr x8, [x8, w0, sxtw #3]                     ← fieldOffsets[typedefIdx]
+      ldr w0, [x8, w1, sxtw #2]                     ← [typedefIdx][fieldIdx] = 字段偏移
+```
+
+**完整链路（运行时，实测地址）**：
+```
+0x71443eafd0 (.bss 全局) → 0x7143db5a10 (= CodeRegistration+0x70 处魔改结构)
+  → +0x58: fieldOffsets 数组 = 0x714433bc90 (40559 个指针, 按 typedef 索引)
+  → [typedefIdx]: 偏移数组指针 (0x7141978070 ~ 0x7141b3f278, 数据区 ~1.9MB)
+  → [typedefIdx][fieldIdx]: int32 字段偏移 (实例字段=实际偏移; 静态/const=0 或 -1)
+```
+
+**验证（铁律命中）**：
+- UnityEngine.Object(1870): m_CachedPtr@0x10 ✓, OffsetOfInstanceID@0(const) ✓
+- WNEngine.Decal.ProjectorDecal: size@0x18, volumeHeight@0x1c, volumeStartOffset@0x20 ✓
+- WNEngine.CarryWeapon: m_WeaponID@0x18, m_Owner@0x50, Attachments@0x58...（完美 il2cpp 布局）✓
+- FieldInfo 结构确认: {name@0, type@8, parent@0x10, offset@0x18, token@0x1c} = 0x28 字节
+
+**定制 dump 工具链**（`gg/tools/`，单一事实源）：
+1. `cf_parse_foffsets.py` — 解析 gg_read_bytes 结果文件 → fieldoffsets.json（typedef→偏移数组指针）
+2. `cf_merge_offsets_data.py` — 按地址拼接偏移数组数据区段 → cf_offsets_full.bin（**坑：段地址非 0x10000 对齐时须按地址写入，勿顺序 append**）
+3. `cf_build_runtime_offsets.py` — metadata 字段名 + 运行时偏移数组合并 → cf_runtime_offsets.tsv（302515 字段，99.9% 覆盖）
+
+**产物**：`ai_workspace/samples/cf_re/cf_runtime_offsets.tsv`（typedef|class|field|field_idx|offset）
+**注**：CF 魔改后 UnityEngine.Transform/Component 无实例字段（引擎字段被剥离，m_Parent 等在 WNEngine 游戏类），非解析 bug。
 
 ## 八、待验证项（解封后）
 
-- [ ] TP2 内核模块在正常账号+对局中是否加载（监控脚本 `/data/local/tmp/tp2_watch3.sh` 已留）
+- [x] TP2 内核模块在正常账号+对局中是否加载（监控脚本 `/data/local/tmp/tp2_watch3.sh` 已留）——**实测未加载**：1800s 监控零命中 + `lsmod_full_now.txt` 663 模块无 adt/tp2/tss/tprt；当前版本纯用户态
+- [x] TPRT 自保护机制（3.4）：确认 inline hook + CRC/wild scan 自校验，**无读取路径 hook、无内核组件** → 驱动天然规避（静态已实锤，待解封后动态确认 `wild scan` 是否扫描游戏内存区域）
+- [x] gg 只读通道受控读（2026-08-19）：system_server 读 libcameraopt ELF 头 `7f454c46` 完整返回，apr_dlkm ioctl 直读可用；driver_state:5 误报（agentd 按旧名 rwProcMem_module 查 ko）不影响读取
+- [x] CF 运行时 libil2cpp.so 解密行为（2026-08-19）：导出 API 按需解密，CodeRegistration 明文可读
+- [x] **CF 字段偏移运行时提取（2026-08-19）：302515 字段偏移到手**（cf_runtime_offsets.tsv，7.2 节）
 - [ ] 无痕 xarray 读取对懒加载页的实际效果
 - [ ] TEE 套件（TEESimulator/tricky_store）对新版本 ACE 的适配
 - [ ] /system/bin/su 的路径迁移（KernelSU manager 改 su 路径）
 
 ## 九、关联文件
 
-- so 样本：`ai_workspace/temp/gg_hillclimb/cf_re/so/`（libturinggame/libt ersafe/libtprt/libgamemaster 等）
+- so 样本：`ai_workspace/samples/cf_re/so/`（libturinggame/libt ersafe/libtprt/libgamemaster 等）
 - 字符串表：`tgpa_strings.txt` / `gm_strings.txt` / `turing_strings.txt`
+- 运行时攻坚：libil2cpp.so 211MB + meta_dump_v5.fixed.bin 在 `ai_workspace/samples/cf_re/`；Il2CppDumper v6.7.46 在 `C:\Users\AprYT\Downloads\Il2CppDumper\`；header 手术脚本 `ai_workspace/scripts/cf_build_std_header.py`，运行时结构分析脚本 `cf_disasm_il2cpp_init.py`/`cf_find_fieldoffsets.py`/`cf_scan_fieldoffsets.py`
 - 参考资料：cnblogs TP2 分析 / CSDN ACE 逆向对比 / CF 官方处罚规则
 
 ---
@@ -243,3 +357,9 @@ libCrashSight.so  libMSDKUnityAdapter.so
 
 - CFM 处罚规则：https://cfm.qq.com/webplat/info/news_version3/17544/21851/21852/21854/m19873/201707/613233.shtml
 - CF 端游封号规则：https://cf.qq.com/act/a20090409forceout/f_rule.htm
+
+---
+
+## 十一、三角洲行动手游 ACE（已拆分独立文档）
+
+三角洲手游的 ACE 集成深度、威胁判定、坐标加密机制、无痕读取+解密方案，已拆分至独立文档 **`gg/docs/三角洲行动手游ACE分析.md`**（同源同构腾讯 ACE、无内核模块、坐标 shellcode 加密、rwproc33 无痕解密等全部内容）。本节不重复，避免与 CF 本文档混放。
