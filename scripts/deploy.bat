@@ -1,7 +1,7 @@
 @echo off
 rem deploy.bat - 自动部署
 
-set AGENTD=build\agentd\gg-agentd-test
+set AGENTD=build\agentd\gg-agentd
 
 echo [1/4] 检查agentd...
 if not exist "%AGENTD%" (

@@ -1,7 +1,9 @@
 @echo off
-rem run_tests.bat - local unit tests (version family + wire protocol + ELF symbols)
+rem run_tests.bat - local unit tests (version family + wire protocol + ELF symbols + search + watch)
+rem NOTE: ASCII-only on purpose. cmd parses .bat in the ANSI codepage (GBK here);
+rem       UTF-8 Chinese comments would swallow the ^ line-continuations and break the script.
 setlocal
-set ROOT=%~dp0..\..
+set "ROOT=%~dp0..\.."
 if not exist "%ROOT%\build\pc" mkdir "%ROOT%\build\pc"
 
 gcc -O2 -Wall -I"%ROOT%" -o "%ROOT%\build\pc\test_version.exe" ^
@@ -31,7 +33,7 @@ if exist "%ROOT%\build\native\libKernelGg.so" (
 if errorlevel 1 ( echo [FAIL] test_elfsym & exit /b 1 )
 
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
-  -o "%ROOT%\build\pc\test_search.exe" "%ROOT%\tests\unit\test_search.c" "%ROOT%\agentd\search.c"
+  -o "%ROOT%\build\pc\test_search.exe" "%ROOT%\tests\unit\test_search.c" "%ROOT%\agentd\search.c" -lpthread
 if errorlevel 1 ( echo [FAIL] test_search build & exit /b 1 )
 echo === test_search ===
 "%ROOT%\build\pc\test_search.exe"
@@ -39,12 +41,12 @@ if errorlevel 1 ( echo [FAIL] test_search & exit /b 1 )
 
 rem AoB cross-block/fault-page: search_aob carry buffer
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
-  -o "%ROOT%\build\pc\test_aob.exe" "%ROOT%\tests\unit\test_aob.c" "%ROOT%\agentd\search.c"
+  -o "%ROOT%\build\pc\test_aob.exe" "%ROOT%\tests\unit\test_aob.c" "%ROOT%\agentd\search.c" -lpthread
 if errorlevel 1 ( echo [FAIL] test_aob build & exit /b 1 )
 
-rem 多 region 并行分片: search_exact 在多个 region 下线程合并正确
-gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" -lpthread ^
-  -o "%ROOT%\build\pc\test_parallel.exe" "%ROOT%\tests\unit\test_parallel.c" "%ROOT%\agentd\search.c"
+rem multi-region parallel sharding: search_exact thread merge correctness
+gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
+  -o "%ROOT%\build\pc\test_parallel.exe" "%ROOT%\tests\unit\test_parallel.c" "%ROOT%\agentd\search.c" -lpthread
 if errorlevel 1 ( echo [FAIL] test_parallel build & exit /b 1 )
 echo === test_parallel ===
 "%ROOT%\build\pc\test_parallel.exe"
@@ -53,16 +55,16 @@ echo === test_aob ===
 "%ROOT%\build\pc\test_aob.exe"
 if errorlevel 1 ( echo [FAIL] test_aob & exit /b 1 )
 
-rem T2 maps 解析护栏：process_maps 抽取的 parse_maps_line 纯函数（单一事实源），
-rem 覆盖文件映射/匿名(path 置空)/特殊段/带空格路径/畸形行；防搜索 region 过滤回归。
-gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -lpthread ^
-  -o "%ROOT%\build\pc\test_process_maps.exe" "%ROOT%\tests\unit\test_process_maps.c" "%ROOT%\agentd\process.c"
+rem T2 maps parsing guardrail: parse_maps_line pure function (single source of truth),
+rem covers file maps / anonymous (path blanked) / special segs / paths with spaces / malformed lines.
+gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" ^
+  -o "%ROOT%\build\pc\test_process_maps.exe" "%ROOT%\tests\unit\test_process_maps.c" "%ROOT%\agentd\process.c" -lpthread
 if errorlevel 1 ( echo [FAIL] test_process_maps build & exit /b 1 )
 echo === test_process_maps ===
 "%ROOT%\build\pc\test_process_maps.exe"
 if errorlevel 1 ( echo [FAIL] test_process_maps & exit /b 1 )
 
-rem S1 注入防护护栏：共享 agentd/shell_util.h 的 shell_split_argv/shell_argv_allowed
+rem S1 injection guardrail: shell_split_argv / shell_argv_allowed shared with agentd/shell_util.h
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" ^
   -o "%ROOT%\build\pc\test_shell_security.exe" "%ROOT%\tests\unit\test_shell_security.c"
 if errorlevel 1 ( echo [FAIL] test_shell_security build & exit /b 1 )
@@ -70,8 +72,8 @@ echo === test_shell_security ===
 "%ROOT%\build\pc\test_shell_security.exe"
 if errorlevel 1 ( echo [FAIL] test_shell_security & exit /b 1 )
 
-rem T3 freeze 注册表护栏：freeze_add（新增/同地址更新/超长/满额 256 拒绝）
-rem /remove/clear/count 纯列表逻辑；防冻结值功能回归。
+rem T3 freeze registry guardrail: add (new / same-addr update / oversize / full-256 reject)
+rem / remove / clear / count pure list logic; protects the freeze-value feature.
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
   -o "%ROOT%\build\pc\test_freeze.exe" "%ROOT%\tests\unit\test_freeze.c" "%ROOT%\agentd\freeze.c" -lpthread
 if errorlevel 1 ( echo [FAIL] test_freeze build & exit /b 1 )
@@ -79,8 +81,8 @@ echo === test_freeze ===
 "%ROOT%\build\pc\test_freeze.exe"
 if errorlevel 1 ( echo [FAIL] test_freeze & exit /b 1 )
 
-rem C5 降级状态机护栏：单次请求失败不永久降级 KO 驱动（误杀修复），
-rem 仅连续失败达阈值才降级；守护 native/hook/ko_downgrade.h 逻辑。
+rem C5 downgrade state machine guardrail: single failure must not permanently downgrade
+rem the KO driver (false-kill fix); only consecutive failures past the threshold downgrade.
 gcc -O2 -Wall -I"%ROOT%\native\hook" ^
   -o "%ROOT%\build\pc\test_ko_downgrade.exe" "%ROOT%\tests\unit\test_ko_downgrade.c"
 if errorlevel 1 ( echo [FAIL] test_ko_downgrade build & exit /b 1 )
@@ -88,9 +90,9 @@ echo === test_ko_downgrade ===
 "%ROOT%\build\pc\test_ko_downgrade.exe"
 if errorlevel 1 ( echo [FAIL] test_ko_downgrade & exit /b 1 )
 
-rem T6 watch 去重游标护栏：rwproc 路径 rwproc_hit_consumed[] 只上报新增命中、
-rem cap 截断剩余补齐、多 bp 独立游标；ptrace 路径 cap 截断剩余保留（修复）。
-rem 依赖 posix_stub（MinGW 缺 sys/ptrace.h/sys/uio.h/sys/wait.h/signal.h）。
+rem T6 watch dedup cursor guardrail: rwproc path rwproc_hit_consumed[] reports only new hits,
+rem cap-truncated remainder refilled, per-bp independent cursors; ptrace path keeps remainder (fix).
+rem Needs posix_stub (MinGW lacks sys/ptrace.h sys/uio.h sys/wait.h signal.h).
 gcc -O2 -Wall -I"%ROOT%\tests\unit\posix_stub" -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
   -o "%ROOT%\build\pc\test_watch.exe" "%ROOT%\tests\unit\test_watch.c" "%ROOT%\agentd\watch.c" -lpthread
 if errorlevel 1 ( echo [FAIL] test_watch build & exit /b 1 )
@@ -98,26 +100,29 @@ echo === test_watch ===
 "%ROOT%\build\pc\test_watch.exe"
 if errorlevel 1 ( echo [FAIL] test_watch & exit /b 1 )
 
-rem POSIX 分支语法护栏：本机走 _WIN32，无法编译真实 wire.cpp 的 POSIX 超时分支；
-rem 用极简 stub 头对 X1 超时逻辑副本做 -fsyntax-only，防止 POSIX 代码语法回归。
+rem POSIX branch syntax guardrail: local build takes _WIN32, real wire.cpp POSIX timeout branches
+rem cannot compile here; use a minimal stub header to -fsyntax-only an X1 timeout logic copy.
 g++ -std=c++17 -fsyntax-only -Wall -I"%ROOT%\tests\unit\posix_stub" ^
   "%ROOT%\tests\unit\test_wire_posix_syntax.cpp"
 if errorlevel 1 ( echo [FAIL] test_wire_posix_syntax & exit /b 1 )
 
-rem 分发一致性护栏：schema.cpp(43工具权威清单) ↔ session.cpp(call_tool 分发) 自动交叉校验
-rem 防「新增/重命名工具漏改一处导致调用即 unknown」或「孤儿分支/拼写漂移」。零编译零风险。
+rem dispatch consistency guardrail: schema.cpp (43-tool authoritative list) cross-checked
+rem against session.cpp (call_tool dispatch) to catch "new/renamed tool wired in only one place".
 set "PYEXE="
 where python >nul 2>nul && set "PYEXE=python"
 if not defined PYEXE ( set "PYEXE=C:\Users\AprYT\.workbuddy\binaries\python\versions\3.13.12\python.exe" )
+rem UTF-8 mode: python output must not die on non-GBK chars under cmd ANSI codepage
+  set "PYTHONUTF8=1"
+  set "PYTHONIOENCODING=utf-8"
 if exist "%PYEXE%" (
-  echo === dispatch consistency (schema vs session) ===
+  echo === dispatch consistency: schema vs session ===
   "%PYEXE%" "%ROOT%\tests\unit\check_dispatch_consistency.py" "%ROOT%"
   if errorlevel 1 ( echo [FAIL] dispatch consistency & exit /b 1 )
-  echo === kernel-only guardrail (driver.c 不落用户态) ===
+  echo === kernel-only guardrail: driver.c stays kernel-side ===
   "%PYEXE%" "%ROOT%\tests\unit\check_kernel_only.py" "%ROOT%"
   if errorlevel 1 ( echo [FAIL] kernel-only guardrail & exit /b 1 )
 ) else (
-  echo [WARN] python 不可用，跳过检查类护栏
+  echo [WARN] python unavailable, skipping structural guardrails
 )
 
 echo [OK] all unit tests passed

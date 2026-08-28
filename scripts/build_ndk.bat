@@ -24,9 +24,10 @@ if not exist "%CAPSTONE%\libcapstone.a" (
 )
 
 echo [1/3] gg-agentd (with optimizations) ...
-call "%CC%" -O3 -flto -Wall -I"%ROOT%" -I"%CAPSTONE%\include" -o "%ROOT%\build\agentd\gg-agentd-optimized" ^
+call "%CC%" -O3 -flto -Wall -I"%ROOT%" -I"%CAPSTONE%\include" -o "%ROOT%\build\agentd\gg-agentd" ^
   "%ROOT%\agentd\main.c" ^
   "%ROOT%\agentd\process.c" ^
+  "%ROOT%\agentd\driver.c" ^
   "%ROOT%\agentd\search.c" ^
   "%ROOT%\agentd\freeze.c" ^
   "%ROOT%\agentd\watch.c" ^
@@ -35,7 +36,6 @@ call "%CC%" -O3 -flto -Wall -I"%ROOT%" -I"%CAPSTONE%\include" -o "%ROOT%\build\a
   "%ROOT%\agentd\loader.c" ^
   "%ROOT%\agentd\version.c" ^
   "%ROOT%\agentd\perf_simple.c" ^
-    "%ROOT%\agentd\shell_util.c" ^
   "%ROOT%\third_party\cJSON.c" ^
   "%CAPSTONE%\libcapstone.a" -pie
 if errorlevel 1 ( echo [FAIL] agentd & exit /b 1 )
