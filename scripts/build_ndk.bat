@@ -13,6 +13,7 @@ set BIN=%NDK%\toolchains\llvm\prebuilt\windows-x86_64\bin
 set CC=%BIN%\aarch64-linux-android28-clang.cmd
 set OUT=%ROOT%\build\native
 if not exist "%OUT%" mkdir "%OUT%"
+if not exist "%ROOT%\build\agentd" mkdir "%ROOT%\build\agentd"
 
 if not exist "%CC%" (
   echo [FAIL] NDK clang not found at %CC%

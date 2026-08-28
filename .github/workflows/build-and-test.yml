@@ -20,7 +20,7 @@ jobs:
           g++ -std=c++17 -O2 -Wall -Wextra -I third_party -I shared -I server \
             server/main.cpp server/mcp/protocol.cpp server/mcp/schema.cpp server/session.cpp \
             server/ida_client.cpp server/annotations.cpp server/device/wire.cpp \
-            third_party/cJSON.cpp -o build/pc/gg-ghost-mcp -lpthread
+            -o build/pc/gg-ghost-mcp -lpthread
           ls -lh build/pc/gg-ghost-mcp
 
       - name: Upload artifacts

@@ -37,6 +37,12 @@ static bool wsa_init() {
 #else
 using sock_t = int;
 #define GG_CLOSE_SOCK(s) ::close(s)
+#ifndef INVALID_SOCKET
+#define INVALID_SOCKET (-1)
+#endif
+#ifndef SOCKET_ERROR
+#define SOCKET_ERROR (-1)
+#endif
 static bool wsa_init() { return true; }
 #endif
 
