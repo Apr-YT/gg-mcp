@@ -101,9 +101,23 @@ int AgentClient::ensure_connected_locked() {
             return 0;
         }
         if (attempt == 0) {
-            std::string cmd = cfg_.adb + " forward tcp:" + std::to_string(cfg_.agent_port) +
+            // 注入防御: adb 路径与 serial 拼入 popen 命令行，白名单校验。
+            // adb 含空格时须带引号；serial 只放行安全字符集（拦截 ; & | 等元字符）。
+            auto adb_safe = [](const std::string& s) {
+                return !s.empty() && s.find_first_of(";&|`$<>()\"'\\") == std::string::npos;
+            };
+            auto serial_safe = [](const std::string& s) {
+                for (char ch : s)
+                    if (!(isalnum((unsigned char)ch) || ch == '.' || ch == '-' || ch == ':' || ch == '_'))
+                        return false;
+                return !s.empty();
+            };
+            std::string adb_bin = cfg_.adb;
+            if (!adb_safe(adb_bin)) { last_error = "adb path rejected (unsafe chars): " + adb_bin; return GGERR_NO_DEVICE; }
+            if (!serial_safe(cfg_.serial)) { last_error = "serial rejected (unsafe chars): " + cfg_.serial; return GGERR_NO_DEVICE; }
+            std::string cmd = adb_bin + " forward tcp:" + std::to_string(cfg_.agent_port) +
                               " tcp:" + std::to_string(cfg_.agent_port);
-            if (!cfg_.serial.empty()) cmd = cfg_.adb + " -s " + cfg_.serial +
+            if (!cfg_.serial.empty()) cmd = adb_bin + " -s " + cfg_.serial +
                                            " forward tcp:" + std::to_string(cfg_.agent_port) +
                                            " tcp:" + std::to_string(cfg_.agent_port);
             run_cmd(cmd);

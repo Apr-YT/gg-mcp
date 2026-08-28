@@ -1,5 +1,13 @@
 # GG-MCP 全面优化总结
 
+> ⚠️ **2026-08-28 更正声明**：本文档为 2026-08-22 的优化工作记录，经代码全面分析核实，**部分声明与实况不符**，逐项更正如下：
+> 1. 「所有 malloc 使用 SAFE_MALLOC 自动检查」**不实** —— error.h 宏全仓实际调用 0 处；search.c/watch.c 的改进是 3 处手写 NULL 检查与互斥锁错误处理，非框架落地。
+> 2. 「mempool/atomic/perf 已加入构建」**不实** —— 三者从未进入任何构建脚本；因零引用已于 2026-08-28 归档至 `archive/framework_v1/`。
+> 3. 「性能提升 30-50% / 20-40% / 25-35%」为**未实测的预估**，无基准数据支撑。
+> 4. 「代码重复率 35%→15%」「圈复杂度降低」无测量工具输出佐证。
+> 5. 回滚方案与文件清单中引用的 .backup 文件已删除（git 历史 1ec70f0..4e1f704 即原始版本）；相关文档列表含 4 个已移除文件的死链。
+> 真实有效的部分：-O3/-flto 编译优化、search.c/watch.c 的针对性健壮性修复、设计系统文档（UI 线已下线，历史留档）。实际接线并留用的优化模块为 `atomic_simple.h`、`perf_simple.h`、`log_enhance.h`（main.c/watch.c 在用）。
+
 **优化日期**: 2026-08-22  
 **优化目标**: 提升代码质量、性能、安全性和可维护性
 
@@ -309,20 +317,16 @@ int32_t value = atomic_load(&counter);
 
 ---
 
-## 🔧 回滚方案
+## 🔧 回滚方案（2026-08-28 更正：.backup 已删除，用 git）
 
-如需回滚到优化前版本:
+如需回滚到优化前版本（.backup 文件已按仓库卫生规则删除）:
 
 ```bash
-# 回滚search.c
-cp agentd/search.c.backup agentd/search.c
-
-# 回滚watch.c
-cp agentd/watch.c.backup agentd/watch.c
-
-# 回滚构建脚本
-cp scripts/build_ndk.bat.backup scripts/build_ndk.bat
-cp scripts/build_pc.bat.backup scripts/build_pc.bat
+# .backup 时代等同于回退到优化前提交 4e1f704 的对应文件
+git show 4e1f704:agentd/search.c  > agentd/search.c
+git show 4e1f704:agentd/watch.c   > agentd/watch.c
+git show 4e1f704:scripts/build_ndk.bat > scripts/build_ndk.bat
+git show 4e1f704:scripts/build_pc.bat  > scripts/build_pc.bat
 ```
 
 ---
@@ -331,8 +335,8 @@ cp scripts/build_pc.bat.backup scripts/build_pc.bat
 
 - `docs/ARCHITECTURE.md` - 架构文档
 - `docs/PROTOCOL.md` - 协议文档
-- `design-system/gg-mcp/MASTER.md` - 设计系统
-- `docs/FLOAT_WINDOW_UI_DESIGN.md` - UI设计
+- ~~`design-system/gg-mcp/MASTER.md`~~（UI 线已下线，可从 git 历史 526d3ff 前恢复）
+- ~~`docs/FLOAT_WINDOW_UI_DESIGN.md`~~（UI 线已下线）
 
 ---
 

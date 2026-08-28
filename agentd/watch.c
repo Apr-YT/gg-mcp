@@ -16,7 +16,6 @@
 #include "process.h"
 #include "../shared/wire_protocol.h"
 
-#include "atomic_simple.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>

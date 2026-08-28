@@ -78,6 +78,13 @@ int version_match_family(const char *version, const char *pattern) {
 }
 
 int version_from_package(const char *pkg, char **out) {
+    /* 注入防御: pkg 拼入 popen 命令行。来源虽是本机 readdir 的目录名，
+     * 但共享存储下第三方应用可创建任意名称目录 —— 必须白名单校验，
+     * 只放行 Android 包名的合法字符集，杜绝 ; | $() 等元字符进入 shell。 */
+    if (!pkg || !*pkg) return -1;
+    for (const char *v = pkg; *v; v++) {
+        if (!(isalnum((unsigned char)*v) || *v == '.' || *v == '_')) return -1;
+    }
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
              "dumpsys package %s 2>/dev/null | grep -m1 'versionName='", pkg);

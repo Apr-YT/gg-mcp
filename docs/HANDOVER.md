@@ -22,14 +22,14 @@ AI agent(PC) ──MCP(stdin / HTTP)──▶ gg-mcp-server (C++17, PC)
                                        │ adb forward tcp:19100
                                        ▼
                           gg-agentd (C, 设备端 NDK arm64, root)
-                              ├─ QX 驱动: 发现隐藏进程 → mknod /dev/ggqx → ioctl 0x800/0x801/0x802/0x803
-                              ├─ hook 型 KO / dev 型 KO（备用后端）
-                              ├─ 降级链: 驱动 → process_vm_readv → /proc/pid/mem
-                              └─ GG 核心对接: lib5_stub(ELF桩) + libKernelGg.so(hook syscall 270)
+                              ├─ 驱动四后端: QX(隐藏进程发现+ioctl) / rwproc33(开源,硬件断点) / hook 型 KO / dev 型 KO
+                              ├─ 降级链: 驱动 → process_vm_readv → /proc/pid/mem（ko_downgrade 状态机防误杀）
+                              ├─ GG 核心对接: lib5_stub(ELF桩) + libKernelGg.so(hook syscall 270)
+                              └─ 进程伪装: dspbridge 改名 + cmdline/环境区清空
 ```
 
 - **wire 协议**：20 字节二进制头 `{magic,ver,cmd,seq,flags,payload_len}` + JSON 负载（`{"p":{}}`/`{"r":{}}`/`{"e":{code,message}}`），定义在 `shared/wire_protocol.h`（PC/设备唯一事实源）
-- **43 个 MCP 工具**：进程5/搜索7/读写8/分析7/内核3/系统3/监视反汇编5/标注5
+- **MCP 工具 45 个**（2026-08-28 实测校验 schema↔dispatch 一致；交接时为 43，后新增 gg_touch/gg_swipe 触摸与 ghost 命令）：进程5/搜索7/读写8/分析7/内核3/系统3/监视反汇编5/标注5+触摸
 
 ## 3. ✅ 已完成并真机验证（2026-08-16）
 
