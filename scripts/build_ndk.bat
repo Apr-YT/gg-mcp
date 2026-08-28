@@ -28,6 +28,7 @@ echo [1/3] gg-agentd (with optimizations) ...
 call "%CC%" -O3 -flto -Wall -I"%ROOT%" -I"%CAPSTONE%\include" -o "%ROOT%\build\agentd\gg-agentd" ^
   "%ROOT%\agentd\main.c" ^
   "%ROOT%\agentd\cmd_shell.c" ^
+  "%ROOT%\agentd\cmd_view.c" ^
   "%ROOT%\agentd\process.c" ^
   "%ROOT%\agentd\driver.c" ^
   "%ROOT%\agentd\search.c" ^
