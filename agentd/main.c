@@ -18,6 +18,7 @@
 #include "version.h"
 #include "watch.h"
 #include "shell_util.h"   // 安全 shell 纯逻辑 helper（与单元测试共享单一事实源）
+#include "engine_internal.h"  // 拆分过渡层：引擎单例/帧API 跨文件共享声明
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -42,21 +43,10 @@
 
 /* ---------------- 会话状态 ---------------- */
 
-typedef struct gg_engine {
-    gg_driver_t  drv;
-    gg_freeze_t  freeze;
-    pid_t        session_pid;      /* -1 = 未附加 */
-    char         session_name[256];
-    gg_results_t results;
-    size_t       result_cap;
-    int          safe_mode;        /* 只读会话 */
-    int          shell_enabled;
-    pthread_mutex_t mtx;           /* 串行化所有 handler */
-    FILE        *logf;
-} gg_engine_t;
-
-static gg_engine_t g_eng;
-static gg_watch_t  g_watch;   /* 硬件断点监视（CE 式"什么访问了这个地址"） */
+/* gg_engine_t 定义与 g_eng/g_watch 声明已上移 engine_internal.h（拆分过渡层），
+ * main.c 保留唯一定义所有权。 */
+gg_engine_t g_eng;
+gg_watch_t  g_watch;   /* 硬件断点监视（CE 式"什么访问了这个地址"） */
 
 /* 最近一次响应存档（send_ok/send_err 写入，dispatch 的 cmd_end 事件使用）。
  * X3: 改为线程局部——每连接线程独立，快速通道（PING/KERNEL_STATUS 等无锁
@@ -78,7 +68,7 @@ void log_msg(const char *fmt, ...) {
 
 /* ---------------- 帧收发 ---------------- */
 
-static int read_full(int fd, void *buf, size_t len) {
+int read_full(int fd, void *buf, size_t len) {
     size_t off = 0;
     while (off < len) {
         ssize_t n = recv(fd, (char *)buf + off, len - off, 0);
@@ -89,7 +79,7 @@ static int read_full(int fd, void *buf, size_t len) {
     return 0;
 }
 
-static int send_full(int fd, const void *buf, size_t len) {
+int send_full(int fd, const void *buf, size_t len) {
     size_t off = 0;
     while (off < len) {
         ssize_t n = send(fd, (const char *)buf + off, len - off, 0);
@@ -104,7 +94,7 @@ static int send_full(int fd, const void *buf, size_t len) {
     return 0;
 }
 
-static int send_frame(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
+int send_frame(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
                       char *payload, size_t plen) {
     gg_wire_header_t h;
     h.magic = GGWM_MAGIC;
@@ -124,7 +114,7 @@ static int send_frame(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
     return 0;
 }
 
-static void send_ok(int fd, uint16_t cmd, uint32_t seq, cJSON *res) {
+void send_ok(int fd, uint16_t cmd, uint32_t seq, cJSON *res) {
     char *s = cJSON_PrintUnformatted(res);
     g_last_resp_ok = 1;
     g_last_resp_set = 1;
@@ -133,7 +123,7 @@ static void send_ok(int fd, uint16_t cmd, uint32_t seq, cJSON *res) {
     free(s);
 }
 
-static void send_err(int fd, uint16_t cmd, uint32_t seq, int code, const char *msg) {
+void send_err(int fd, uint16_t cmd, uint32_t seq, int code, const char *msg) {
     cJSON *root = cJSON_CreateObject();
     cJSON *e = cJSON_CreateObject();
     cJSON_AddNumberToObject(e, "code", code);
@@ -1757,64 +1747,6 @@ static void h_core_versions(int fd, uint32_t seq, cJSON *p) {
 /* ---------------- 安全 shell（白名单 argv 直执行, 不经 sh, 防注入） ---------------- */
 /* shell_split_argv / shell_argv_allowed 见 shell_util.h（与单元测试共享单一事实源）。 */
 
-/* fork+execvp 直执行 argv（走 PATH）, capture stdout 到 out(outsz)。
- * 子进程仅调用 async-signal-safe 函数 (dup2/close/execvp), 多线程 fork 安全。
- * 返回 0 成功, -1 失败; 成功时 *rc = 退出码。 */
-static int shell_execvp(char **argv, char *out, size_t outsz, int *rc) {
-    int fds[2];
-    if (pipe(fds) != 0) return -1;
-    pid_t pid = fork();
-    if (pid < 0) { close(fds[0]); close(fds[1]); return -1; }
-    if (pid == 0) {
-        dup2(fds[1], STDOUT_FILENO);
-        if (fds[1] != STDOUT_FILENO) close(fds[1]);
-        close(fds[0]);
-        execvp(argv[0], argv);
-        _exit(127);   /* exec 失败 */
-    }
-    close(fds[1]);
-    size_t got = 0;
-    ssize_t n;
-    while (got < outsz - 1 && (n = read(fds[0], out + got, outsz - 1 - got)) > 0) {
-        got += (size_t)n;
-    }
-    out[got] = 0;
-    close(fds[0]);
-    int status = 0;
-    if (waitpid(pid, &status, 0) == pid && WIFEXITED(status)) *rc = WEXITSTATUS(status);
-    else *rc = -1;
-    return 0;
-}
-
-static void h_shell(int fd, uint32_t seq, cJSON *p) {
-    if (!g_eng.shell_enabled) { send_err(fd, GGCMD_SHELL, seq, GGERR_SHELL_DISABLED, "shell disabled by config"); return; }
-    if (g_eng.safe_mode) { send_err(fd, GGCMD_SHELL, seq, GGERR_SAFE_MODE, "safe mode: shell denied"); return; }
-    const char *cmd = cJSON_GetObjectItem(p, "cmd") ? cJSON_GetObjectItem(p, "cmd")->valuestring : NULL;
-    if (!cmd || !*cmd) { send_err(fd, GGCMD_SHELL, seq, GGERR_BAD_REQUEST, "cmd required"); return; }
-
-    char buf[4096];
-    if (strlen(cmd) >= sizeof(buf)) { send_err(fd, GGCMD_SHELL, seq, GGERR_BAD_REQUEST, "cmd too long"); return; }
-    strncpy(buf, cmd, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = 0;
-
-    char *argv[64];
-    int argc = shell_split_argv(buf, argv, 64);
-    if (argc <= 0) { send_err(fd, GGCMD_SHELL, seq, GGERR_BAD_REQUEST, "empty command"); return; }
-    if (!shell_argv_allowed(argv[0])) { send_err(fd, GGCMD_SHELL, seq, GGERR_BAD_REQUEST, "command not in whitelist"); return; }
-
-    char out[8192];
-    int rc = 0;
-    if (shell_execvp(argv, out, sizeof(out), &rc) != 0) {
-        send_err(fd, GGCMD_SHELL, seq, GGERR_INTERNAL, "exec failed");
-        return;
-    }
-    cJSON *r = cJSON_CreateObject();
-    cJSON_AddStringToObject(r, "output", out);
-    cJSON_AddNumberToObject(r, "rc", rc);
-    send_ok(fd, GGCMD_SHELL, seq, r);
-    cJSON_Delete(r);
-}
-
 static void h_device_info(int fd, uint32_t seq, cJSON *p) {
     cJSON *r = cJSON_CreateObject();
     /* X3: 快速通道无锁执行, state 原子读（attach/self_test 锁内写） */
@@ -1827,6 +1759,9 @@ static void h_device_info(int fd, uint32_t seq, cJSON *p) {
     send_ok(fd, GGCMD_DEVICE_INFO, seq, r);
     cJSON_Delete(r);
 }
+
+/* cmd_shell.c（拆分外迁） */
+void h_shell(int fd, uint32_t seq, cJSON *p);
 
 /* ---------------- 分发 ---------------- */
 
