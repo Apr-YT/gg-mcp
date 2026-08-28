@@ -17,6 +17,8 @@
 #include "search.h"
 #include "version.h"
 #include "watch.h"
+#include "log_enhance.h"
+#include "perf_simple.h"
 #include "shell_util.h"   // 安全 shell 纯逻辑 helper（与单元测试共享单一事实源）
 
 #include <arpa/inet.h>
