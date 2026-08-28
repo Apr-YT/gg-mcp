@@ -11,7 +11,7 @@
   cd scripts && deploy.bat
 
 使用:
-  build\pc\gg-mcp-server.exe --config configs\gg-gghost.json
+  build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json
 
 ## 项目结构
 - agentd/ - Android端agentd

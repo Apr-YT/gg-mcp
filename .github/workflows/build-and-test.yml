@@ -2,27 +2,102 @@ name: GG-MCP Build and Test
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ master, main, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ master, main ]
+  workflow_dispatch:
 
 jobs:
+  # Job 1: PC server compile check (Linux, mirrors build_pc.bat without -march=native)
   build-pc:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      
+      - uses: actions/checkout@v4
+
       - name: Build PC server
         run: |
           mkdir -p build/pc
-          g++ -std=c++17 -O3 -flto -Wall -I third_party -I shared -I server \
+          g++ -std=c++17 -O2 -Wall -Wextra -I third_party -I shared -I server \
             server/main.cpp server/mcp/protocol.cpp server/mcp/schema.cpp server/session.cpp \
             server/ida_client.cpp server/annotations.cpp server/device/wire.cpp \
-            third_party/cJSON.cpp -o build/pc/gg-mcp-server -lpthread
-          ls -lh build/pc/gg-mcp-server
-      
+            third_party/cJSON.cpp -o build/pc/gg-ghost-mcp -lpthread
+          ls -lh build/pc/gg-ghost-mcp
+
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: gg-mcp-server-linux
-          path: build/pc/gg-mcp-server
+          name: gg-ghost-mcp-linux
+          path: build/pc/gg-ghost-mcp
+
+  # Job 2: unit tests on Windows (MinGW), mirrors tests/unit/run_tests.bat
+  unit-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MinGW (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          update: false
+          install: mingw-w64-x86_64-gcc
+          msystem: MINGW64
+          release: false
+
+      - name: Add MinGW to PATH
+        shell: pwsh
+        run: |
+          echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run unit tests
+        shell: cmd
+        run: tests\unit\run_tests.bat
+
+  # Job 3: agentd cross-compile check (NDK r27d), mirrors scripts/build_ndk.bat
+  build-agentd:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Set up Android NDK r27d
+        shell: pwsh
+        run: |
+          $url = "https://dl.google.com/android/repository/android-ndk-r27d-windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile ndk.zip
+          Expand-Archive -Path ndk.zip -DestinationPath .
+          $wd = (Get-Location).Path
+          "NDK_DIR=$wd\android-ndk-r27d" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build Capstone 5.0.1 for aarch64 (static)
+        shell: cmd
+        run: |
+          git clone --depth 1 --branch 5.0.1 https://github.com/capstone-engine/capstone.git capstone-src
+          cd capstone-src
+          cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_TOOLCHAIN_FILE=%NDK_DIR%\build\cmake\android.toolchain.cmake ^
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 ^
+            -DCAPSTONE_BUILD_TESTS=OFF -DCAPSTONE_BUILD_CSTOOL=OFF
+          cmake --build build --config Release
+          mkdir ..\capstone-prebuilt
+          copy build\libcapstone.a ..\capstone-prebuilt\libcapstone.a
+          xcopy /E /I include ..\capstone-prebuilt\include
+
+      - name: Build agentd + native (mirror build_ndk.bat)
+        shell: cmd
+        run: scripts\build_ndk.bat %NDK_DIR% %CD%\capstone-prebuilt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gg-agentd-android
+          path: |
+            build/agentd/gg-agentd
+            build/native/libKernelGg.so
+            build/native/lib5_stub
