@@ -44,14 +44,14 @@ python tests\unit\check_kernel_only.py
 设备：Redmi myron（serial `134d2f8`，KernelSU root，内核 6.12.69，SELinux Permissive）。
 adb 在 `D:\Kiln\ADB\adb.exe`。服务/窗口排查：`dumpsys window windows | grep ggmcp`；崩溃：`logcat -s AndroidRuntime:E`。
 
-## 已知债（优化路线，2026-08-28 评审）
+## 已知债（2026-08-28 评审，同日 P0/P1 已清，剩余如下）
 
-1. **CI 摆设**：`.github/workflows/build-and-test.yml` 只编译 PC server 且 checkout/artifact 还是 v3 → 需升 v4 + 加 unit test job + NDK 构建 job
-2. **main.c 巨型文件**（102KB / ~70 函数）：按域拆 cmd_search / cmd_mem / cmd_proc / dispatch，拆前先跑 check_dispatch_consistency.py 留基线
-3. **lint.bat 伪实现**：换 clang-format + cppcheck
-4. **双套模块待收敛**：atomic.h vs atomic_simple.h、perf vs perf_simple（当前 main.c、watch.c 用 simple 版）
-5. wire 协议 1MiB 上限无分片；XOR seed 固定 0xA5；serial 硬编码在 config
-6. docs/ 工程与逆向研究混放待分目录
+1. **main.c 巨型文件**（102KB / ~70 函数）：按域拆 cmd_search / cmd_mem / cmd_proc / dispatch，拆前先跑 check_dispatch_consistency.py 留基线
+2. wire 协议 1MiB 上限无分片；XOR seed 固定 0xA5；serial 硬编码在 config
+3. docs/ 工程与逆向研究混放待分目录
+4. archive/framework_v1/ 里的全量版框架（perf/atomic/error/mempool/conn_pool/io_batch）未接线，后续要么启用要么删除
+
+已清（2026-08-28）：CI 三 job 重写（v4 + Windows 单测 + NDK 构建）；lint.bat 重写落地；双套模块收敛（simple 版留用，全量版入 archive）；run_tests.bat 修复（ASCII/链接顺序/编码）并全绿；build_ndk 补 driver.c + 删 shell_util.c 幽灵引用；deploy.bat 产物对齐。
 
 详细评审见 `docs/OPTIMIZATION_SUMMARY.md`（08-22 优化记录）。
 
