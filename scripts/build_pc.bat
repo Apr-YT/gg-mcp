@@ -5,7 +5,7 @@ set ROOT=%~dp0..
 set OUT=%ROOT%\build\pc
 if not exist "%OUT%" mkdir "%OUT%"
 
-g++ -std=c++17 -O2 -Wall -Wextra ^
+g++ -std=c++17 -O3 -flto -march=native -Wall -Wextra ^
   -I "%ROOT%\third_party" -I "%ROOT%\shared" -I "%ROOT%\server" ^
   "%ROOT%\server\main.cpp" ^
   "%ROOT%\server\mcp\protocol.cpp" ^

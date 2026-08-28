@@ -3,7 +3,7 @@
   "http_port": 8788,
   "adb": "adb",
   "serial": "134d2f8",
-  "agent_port": 19100,
+  "agent_port": 34127,
   "safe_mode": false,
   "shell_enabled": false,
   "result_cap": 100000,

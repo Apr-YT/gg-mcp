@@ -140,7 +140,13 @@ int main(int argc, char** argv) {
     std::string config_path = "configs/ggmcp.json";
     ServerConfig cfg;
 
-    // 先读配置文件，命令行参数随后覆盖（参数优先）
+    // 第一遍：仅解析 --config，确定实际配置文件路径
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--config" && i + 1 < argc) { config_path = argv[++i]; break; }
+    }
+
+    // 读配置文件，命令行参数随后覆盖（参数优先）
     if (load_config(config_path, &cfg)) {
         std::cerr << "[GG-GHOST-MCP] loaded config: " << config_path << "\n";
     } else {
@@ -148,9 +154,10 @@ int main(int argc, char** argv) {
                   << " (using defaults)\n";
     }
 
+    // 第二遍：应用其余命令行覆盖（跳过已处理的 --config）
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
-        if (a == "--config" && i + 1 < argc) config_path = argv[++i];
+        if (a == "--config" && i + 1 < argc) { ++i; continue; }
         else if (a == "--transport" && i + 1 < argc) cfg.transport = argv[++i];
         else if (a == "--port" && i + 1 < argc) cfg.http_port = atoi(argv[++i]);
         else if (a == "--http-host" && i + 1 < argc) cfg.http_host = argv[++i];

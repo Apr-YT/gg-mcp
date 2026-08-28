@@ -1,0 +1,28 @@
+name: GG-MCP Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-pc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Build PC server
+        run: |
+          mkdir -p build/pc
+          g++ -std=c++17 -O3 -flto -Wall -I third_party -I shared -I server \
+            server/main.cpp server/mcp/protocol.cpp server/mcp/schema.cpp server/session.cpp \
+            server/ida_client.cpp server/annotations.cpp server/device/wire.cpp \
+            third_party/cJSON.cpp -o build/pc/gg-mcp-server -lpthread
+          ls -lh build/pc/gg-mcp-server
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: gg-mcp-server-linux
+          path: build/pc/gg-mcp-server
