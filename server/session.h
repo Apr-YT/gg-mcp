@@ -12,15 +12,6 @@ namespace gg {
 
 using json = nlohmann::json;
 
-struct IdaConfig {
-    bool enabled = false;
-    std::string mcp_url;            // IDA Pro MCP 基址，如 http://127.0.0.1:8000
-    std::string mcp_path = "/mcp";  // MCP 端点路径
-    std::string tool_name = "decompile_function";  // 工具名（按所接 MCP 服务器）
-    std::string arg_name = "address";              // 工具参数名（传模块内偏移 hex）
-    int timeout_ms = 3000;
-};
-
 struct ServerConfig {
     std::string transport = "stdio";   // stdio | http
     int http_port = 8788;
@@ -36,7 +27,6 @@ struct ServerConfig {
     size_t result_cap = 100000;
     std::string annotations_file = "annotations.json";   // AI 标注库持久化路径
     bool print_events = false;      // 订阅 agentd 事件流并在 stderr 打印（悬浮窗监控调试）
-    IdaConfig ida;                                      // IDA Pro MCP 联动（默认关闭）
 };
 
 class Session {
@@ -66,7 +56,6 @@ public:
         int device_call(uint16_t cmd, const json& params, json* out) {
             return s->device_call(cmd, params, out);
         }
-        json ida_resolve(const std::string& off) { return s->ida_resolve(off); }
         void relay_annotate(const std::string& op, const json& ann) {
             s->relay_annotate(op, ann);
         }
@@ -84,10 +73,6 @@ private:
     static int norm_type(const json& t);       // "dword"→3 等；缺省 dword
     static int norm_region(const json& r);     // "anonymous"→1 等；缺省 anonymous
     static int norm_op(const json& o);         // "increased"→1 等；缺省 changed
-
-    // gg_resolve_symbol 的 IDA 联动：把模块内偏移发给 IDA MCP 取函数名/伪代码。
-    // 未配置时返回 {"configured":false,...} 提示；配置但调用失败时 fail-soft。
-    json ida_resolve(const std::string& offset_hex);
 
     // 向 agentd 中继事件（标注变更 → 手机悬浮窗实时显示）。best-effort，失败忽略。
     void relay_annotate(const std::string& op, const json& ann);

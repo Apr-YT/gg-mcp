@@ -11,7 +11,6 @@ g++ -std=c++17 -O3 -flto -march=native -Wall -Wextra ^
   "%ROOT%\server\mcp\protocol.cpp" ^
   "%ROOT%\server\mcp\schema.cpp" ^
   "%ROOT%\server\session.cpp" ^
-  "%ROOT%\server\ida_client.cpp" ^
   "%ROOT%\server\annotations.cpp" ^
   "%ROOT%\server\device\wire.cpp" ^
   -o "%OUT%\gg-ghost-mcp.exe" -lws2_32

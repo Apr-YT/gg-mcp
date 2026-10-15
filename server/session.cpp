@@ -1,4 +1,4 @@
-// session.cpp — 43 个 MCP 工具实现（薄代理 → gg-agentd）
+// session.cpp — 45 个 MCP 工具实现（薄代理 → gg-agentd）
 //
 // M1 表驱动重构（2026-08-18）：call_tool 的分发从 if (name == ...) 链
 // 改为 kTools[] 表（{name, fn, write_op}）。参数映射逐行搬运，零行为变化：
@@ -6,8 +6,6 @@
 //   - gg_read_bytes 与 gg_hex_dump 合并分支拆为两个表项、共用同一 handler
 //   - 分发一致性护栏（tests/unit/check_dispatch_consistency.py）已升级支持表驱动解析
 #include "session.h"
-
-#include "ida_client.h"
 
 #include <cctype>
 #include <cstdint>
@@ -117,30 +115,6 @@ json Session::local_status() {
         out["kernel"] = ks;
     } else {
         out["kernel"] = {{"state_str", "unavailable"}, {"error", client_.last_error}};
-    }
-    return out;
-}
-
-json Session::ida_resolve(const std::string& offset_hex) {
-    if (!cfg_.ida.enabled) {
-        return {
-            {"configured", false},
-            {"hint", "set configs/ggmcp.json \"ida\":{\"enabled\":true,\"mcp_url\":\"http://127.0.0.1:8000\"}"},
-        };
-    }
-    json call = ida_call(cfg_.ida.mcp_url, cfg_.ida.mcp_path,
-                         cfg_.ida.tool_name, cfg_.ida.arg_name, offset_hex,
-                         cfg_.ida.timeout_ms);
-    json out;
-    out["configured"] = true;
-    out["mcp_url"] = cfg_.ida.mcp_url;
-    out["tool"] = cfg_.ida.tool_name;
-    if (call.value("ok", false)) {
-        std::string text = ida_extract_text(call["result"]);
-        if (!text.empty()) out["result_text"] = text;
-        out["raw"] = call["result"];
-    } else {
-        out["error"] = call.value("error", "ida mcp unavailable");
     }
     return out;
 }
@@ -350,14 +324,6 @@ json tool_resolve_symbol(Session::CallCtx& c, const json& a) {
     json out;
     int rc = c.device_call(GGCMD_RESOLVE_SYMBOL, c.params, &out);
     if (rc != 0) return c.fail(rc, c.last_error());
-    // IDA 联动：本地静态解析完成后，把模块内偏移发给 IDA MCP 取函数名/伪代码
-    std::string off = out.value("offset_in_module", "");
-    if (!off.empty()) {
-        out["ida"] = c.ida_resolve(off);
-    } else {
-        out["ida"] = {{"configured", c.cfg().ida.enabled},
-                      {"hint", "addr not in a file-backed module (anonymous region)"}};
-    }
     return c.ok(out);
 }
 

@@ -1,5 +1,5 @@
 /*
- * wire_protocol.h — gg-agentd ↔ gg-mcp-server 通信协议定义（唯一事实源）
+ * wire_protocol.h — gg-agentd ↔ gg-ghost-mcp 通信协议定义（唯一事实源）
  *
  * 帧格式：20 字节二进制头 + JSON 负载
  *   头:  { u32 magic; u16 ver; u16 cmd; u32 seq; u32 flags; u32 payload_len }
@@ -83,7 +83,7 @@ enum gg_cmd {
     GGCMD_WATCH,                /* 硬件断点监视（CE 式"什么访问了这个地址"） */
     GGCMD_DISASSEMBLE,          /* 反汇编目标进程内存（Capstone ARM64） */
     GGCMD_VIEW_MEMORY,          /* 结构化查看内存（int32/float32/pointer 元素列表，AI 理解结构体） */
-    GGCMD_RESOLVE_SYMBOL,       /* 地址→模块/偏移/最近导出符号（本地静态解析，IDA 联动由 PC 端合并） */
+    GGCMD_RESOLVE_SYMBOL,       /* 地址→模块/偏移/最近导出符号（本地静态解析，ELF .dynsym） */
     GGCMD_POINTER_CHAIN,        /* 多级指针追踪（逐级解引用到基址，标注模块偏移） */
     GGCMD_SUBSCRIBE_EVENTS,     /* 订阅异步事件流（手机悬浮窗等展示端；未订阅不收 GGWF_EVENT 帧） */
     GGCMD_UNSUBSCRIBE_EVENTS,   /* 取消订阅 */

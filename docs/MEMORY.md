@@ -29,7 +29,7 @@
 - 设备序列号：134d2f8；测试游戏：登山赛车 com.fingersoft.hillclimb.noncmcc（进程常变，需现查）
 - **QX 驱动**（/data/kagtim、/data/mxjvvm）：随重启消失（隐藏进程自删），需用户手动重新拉起；
   当前内存通道已由 rwproc33 接管，**QX 不需要**（除非要它的硬件断点，但无密钥 ENOSPC）
-- MCP 服务器：`build\pc\gg-mcp-server.exe --config configs\ggmcp.json --transport http --port 8788`
+- MCP 服务器：`build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json --transport http --port 8788`
   （注意：旧实例会锁 exe 无法覆盖；后台任务退出即停，重启后需 adb forward 恢复）
 
 ### 1.3 构建 VM（Linux Mint 22.3）
@@ -129,6 +129,9 @@ python scripts\patch_ko_versions.py build\devmod\all build\ko\X.ko
 ```
 
 ## 6. 会话历史速记（2026-08-16）
+> 注（2026-10-15）：以下为当时的事实记录，保持原样。其中 **IDA 联动已于 2026-10-15 整体移除**
+> （`server/ida_client.*`、`tests/unit/test_ida_client.cpp` 已删除；`gg_resolve_symbol` 现为纯本地静态解析，
+> 响应不再含 `ida` 字段）。旧实现可从 git 历史恢复。
 - 本会话交付：gg_view_memory / gg_resolve_symbol(+IDA 预留) / gg_pointer_chain / rwproc33 后端全链路
 - 关键文件：agentd/{driver.c,main.c,watch.c,elfsym.c}, server/{ida_client.*,session.cpp}, docs/RWPROC33_ADAPTER.md
 - 新工具脚本：scripts/{patch_ko_versions.py, extract_kernel.py, patch_module_layout_crc.py}

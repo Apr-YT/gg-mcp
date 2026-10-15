@@ -5,7 +5,7 @@
 ## 快速开始
 
 构建:
-  cd scripts && build_all.bat
+  cd scripts && build_all.bat                  :: 仅 PC: build_all.bat -Target pc
 
 部署:
   cd scripts && deploy.bat
@@ -13,14 +13,22 @@
 使用:
   build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json
 
+> 产物名是 `gg-ghost-mcp.exe`（提交 b953bc5 起统一命名，旧文档里的
+> `gg-mcp-server.exe` 已不存在）；配置文件名是 `configs\gg-ghost.json`。
+> 本机若未装 NDK，`build_all.bat` 走到 Android 阶段会明确失败——用
+> `-Target pc` 只建 PC 端。
+
 ## 项目结构
 - agentd/ - Android端agentd
 - server/ - PC端MCP服务
 - native/ - 内核模块
-- tests/ - 测试
+- shared/ - wire 协议唯一事实源 (wire_protocol.h)
+- tests/  - unit / integration / regression
+- scripts/- 构建、部署、测试、基准
 
 ## CI/CD
-GitHub Actions 自动构建。
+GitHub Actions 自动构建（`.github/workflows/build-and-test.yml`），三个 job：
+PC 编译检查、Windows 单元测试 + 结构护栏、NDK 交叉编译。
 
 ## 优化模块
 - log_enhance.h - 日志增强
@@ -30,38 +38,39 @@ GitHub Actions 自动构建。
 
 ## 测试
 
-单元测试:
+单元测试 + 结构护栏（PC 上可全跑，推荐先跑这个）:
 ```powershell
-cd tests/unit
-for %%t in (test_*.exe) do "%%t.exe"
+tests\unit\run_tests.bat
 ```
+> 产物在 `build\pc\`（**不是** `tests\unit\`）。找不到 python 时脚本会直接失败，
+> 因为两道结构护栏不允许静默跳过；确需跳过请显式 `set GG_SKIP_GUARDRAILS=1`。
 
-集成测试:
+集成测试（需已 root 设备 + NDK + adb）:
 ```powershell
-cd tests/integration
-.\run_itest.ps1
-```
-
-性能基准:
-```powershell
-cd scripts
-.\benchmark.bat
+tests\integration\run_itest.ps1
 ```
 
 全部测试:
 ```powershell
-cd scripts
-.\test_all.bat
+scripts\test_all.bat
 ```
+> 集成阶段缺 NDK/设备时、基准阶段（仓内无基准源码）时会打印明确的 WARN/SKIP，
+> 不再假装通过。
+
+性能基准:
+```powershell
+scripts\benchmark.bat
+```
+> ⚠️ 仓内目前**没有**基准测试源码（`tests\benchmark\memory_read.c` 不存在），
+> 该脚本会明确报错退出。要跑基准请先补源码。
 
 
 ## 代码质量
 
 代码检查:
 ```powershell
-cd scripts
-.\lint.bat
+scripts\lint.bat
 ```
 
 重构指南:
-详见 `docs/CODE_RECODE_REFACTOR.md`
+详见 `docs/CODE_REFACTOR.md`

@@ -1,7 +1,7 @@
 # verify.ps1 — 连上后的一键端到端验证（对 PC 端 MCP 服务器发 HTTP 请求）
 # 用法:
 #   powershell -ExecutionPolicy Bypass -File scripts\verify.ps1 [-Url http://127.0.0.1:8788/mcp]
-#   （先启动 gg-mcp-server --transport http --port 8788）
+#   （先启动 gg-ghost-mcp --transport http --port 8788）
 param([string]$Url = "http://127.0.0.1:8788/mcp")
 
 $ErrorActionPreference = "Stop"

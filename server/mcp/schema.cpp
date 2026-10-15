@@ -196,10 +196,8 @@ static const std::vector<ToolDef>& build() {
              },
              json{"addr"}),
         tool("gg_resolve_symbol",
-             "地址静态解析 + IDA Pro MCP 联动（预留接口）：先本地解析地址所属模块/"
-             "加载基址/模块内偏移，并在 ELF .dynsym 中找最近导出符号（无 IDA 也能拿函数名）；"
-             "若 configs/ggmcp.json 配置了 ida.mcp_url，再把模块内偏移发给 IDA Pro MCP "
-             "取函数名/反编译伪代码（纯运行时 + 纯静态结合）。",
+             "地址静态解析：解析目标地址所属模块 / 模块加载基址 / 模块内偏移，"
+             "并在 ELF .dynsym 中查找最近的导出符号，得到函数名（纯本地解析，不依赖外部工具）。",
              json{
                  {"addr", prop("string", "目标地址（十六进制 0x...）")},
              },

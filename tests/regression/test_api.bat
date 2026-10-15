@@ -1,27 +1,51 @@
 @echo off
-rem test_api.bat - API回归测试
+rem test_api.bat - API regression test (HTTP transport)
+rem NOTE: ASCII-only on purpose (cmd parses .bat in the ANSI codepage).
+rem
+rem 2026-10-15 fix: this script used build\pc\gg-mcp-server.exe (renamed to
+rem gg-ghost-mcp.exe in commit b953bc5) and configs\gg-gghost.json (typo -- the
+rem real file is configs\gg-ghost.json), so the server never started. It also
+rem used cwd-relative paths, so it only worked when run from the repo root.
+rem Paths are now rooted at %ROOT% and the health probe hits /healthz.
+setlocal
+set "ROOT=%~dp0..\.."
+set "EXE=%ROOT%\build\pc\gg-ghost-mcp.exe"
+set "CFG=%ROOT%\configs\gg-ghost.json"
 
-echo === GG-MCP API回归测试 ===
+echo === GG-MCP API regression test ===
 echo.
 
-echo 测试1: 启动服务
-start /B build\pc\gg-mcp-server.exe --config configs\gg-gghost.json
-timeout /t 3 /nobreak >nul
-
-echo.
-echo 测试2: HTTP健康检查
-curl -s http://127.0.0.1:8788/tools/list
-if errorlevel 1 (
-    echo [FAIL] HTTP服务未响应
-    taskkill /F /IM gg-mcp-server.exe 2>nul
+if not exist "%EXE%" (
+    echo [FAIL] %EXE% not found - run scripts\build_pc.bat first
     exit /b 1
 )
-echo [OK] HTTP服务正常
+if not exist "%CFG%" (
+    echo [FAIL] %CFG% not found
+    exit /b 1
+)
+
+echo [1/3] starting server...
+start "gg-ghost-mcp" /B "%EXE%" --config "%CFG%" --transport http --port 8788
+rem NOTE: fully-qualified timeout - a bare `timeout` is shadowed by Git-Bash/MSYS
+rem coreutils' GNU timeout, which rejects /t and silently skips the wait.
+"%SystemRoot%\System32\timeout.exe" /t 3 /nobreak >nul
 
 echo.
-echo 测试3: 清理
-taskkill /F /IM gg-mcp-server.exe 2>nul
+echo [2/3] HTTP health check...
+curl -s -f http://127.0.0.1:8788/healthz >nul
+if errorlevel 1 (
+    echo [FAIL] HTTP server not responding
+    taskkill /F /IM gg-ghost-mcp.exe >nul 2>nul
+    exit /b 1
+)
+echo [OK] HTTP server responding
+
+echo.
+echo [3/3] cleanup...
+taskkill /F /IM gg-ghost-mcp.exe >nul 2>nul
 echo [OK]
 
 echo.
-echo === 回归测试完成 ===
+echo === regression test done ===
+endlocal
+exit /b 0

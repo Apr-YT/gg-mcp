@@ -15,7 +15,8 @@ if not exist "%PROXY%" (
 echo 启动HTTP代理服务...
 start "GG-MCP Proxy" "%PROXY%"
 
-timeout /t 2 /nobreak >nul
+rem NOTE: fully-qualified - a bare `timeout` is shadowed by Git-Bash/MSYS coreutils.
+"%SystemRoot%\System32\timeout.exe" /t 2 /nobreak >nul
 
 echo 打开浏览器...
 start http://127.0.0.1:8789

@@ -59,14 +59,6 @@ static bool load_config(const std::string& path, ServerConfig* cfg) {
         cfg->gg_version_pattern = j["gg"].value("version_pattern", cfg->gg_version_pattern);
         cfg->gg_strict = j["gg"].value("strict", cfg->gg_strict);
     }
-    if (j.contains("ida")) {
-        cfg->ida.enabled = j["ida"].value("enabled", cfg->ida.enabled);
-        cfg->ida.mcp_url = j["ida"].value("mcp_url", cfg->ida.mcp_url);
-        cfg->ida.mcp_path = j["ida"].value("mcp_path", cfg->ida.mcp_path);
-        cfg->ida.tool_name = j["ida"].value("tool_name", cfg->ida.tool_name);
-        cfg->ida.arg_name = j["ida"].value("arg_name", cfg->ida.arg_name);
-        cfg->ida.timeout_ms = j["ida"].value("timeout_ms", cfg->ida.timeout_ms);
-    }
     return true;
 }
 

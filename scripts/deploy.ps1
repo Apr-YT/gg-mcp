@@ -127,5 +127,5 @@ if (-not $ready) { Write-Host "  警告: 未检测到就绪标记，仍请检查
 Write-Host ""
 Write-Host "== 部署完成 ==" -ForegroundColor Green
 Write-Host "启动 PC 端 MCP 服务器:"
-Write-Host "  build\pc\gg-mcp-server.exe --config configs\ggmcp.json --transport http --port 8788"
+Write-Host "  build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json --transport http --port 8788"
 Write-Host "然后调 gg_kernel_status 验证: hook 型期望 state=ko-hook / dev 型期望 state=kernel-driver"

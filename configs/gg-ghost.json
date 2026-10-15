@@ -19,13 +19,5 @@
     "strict": true,
     "dev_path": "",
     "qx_key": ""
-  },
-  "ida": {
-    "enabled": true,
-    "mcp_url": "http://127.0.0.1:13337",
-    "mcp_path": "/mcp",
-    "tool_name": "decompile_function",
-    "arg_name": "address",
-    "timeout_ms": 3000
   }
 }

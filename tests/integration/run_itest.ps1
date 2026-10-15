@@ -1,9 +1,20 @@
 # run_itest.ps1 — 设备端集成测试（需已 root 设备 + adb）
 # 编译 itest → push → 以 root 运行 → 收集结果
 $ErrorActionPreference = "Stop"
-$Root = Split-Path $PSScriptRoot -Parent
+# 2026-10-15 fix: $PSScriptRoot = <repo>\tests\integration, so a single -Parent
+# yields <repo>\tests and every "$Root\agentd\..." path missed by one level
+# (it looked for <repo>\tests\tests\integration\itest.c). Go up two levels.
+$Root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $Adb = "adb"
+if (-not (Get-Command $Adb -ErrorAction SilentlyContinue)) {
+    # adb is on PATH on the dev box, but fall back to the known install dir
+    $AdbFallback = "D:\Kiln\platform-tools\adb.exe"
+    if (Test-Path $AdbFallback) { $Adb = $AdbFallback }
+    else { throw "adb 未找到（PATH 与 $AdbFallback 均不可用）" }
+}
 $DevDir = "/data/local/tmp/ggmcp"
+$BuildNative = Join-Path $Root "build\native"
+if (-not (Test-Path $BuildNative)) { New-Item -ItemType Directory -Force -Path $BuildNative | Out-Null }
 
 # 1) NDK 编译
 $cc = "D:\Kiln\android-ndk-r27d-windows\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android28-clang.cmd"

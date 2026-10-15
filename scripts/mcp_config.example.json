@@ -1,10 +1,11 @@
 {
-  "说明": "把本文件内容按你的 MCP 客户端格式配置。stdio 模式需先 build_pc.bat 构建。",
+  "说明": "把本文件内容按你的 MCP 客户端格式配置。stdio 模式需先跑 scripts\\build_pc.bat。请把 D:\\Kiln\\gg-mcp 换成你的实际仓库路径。",
+  "命名注意": "产物是 build/pc/gg-ghost-mcp.exe（提交 b953bc5 起命名统一，旧的 gg-mcp-server.exe 已不存在）；配置文件是 configs/gg-ghost.json（configs/ggmcp.json 不存在）。",
   "claude_desktop_config": {
     "mcpServers": {
       "gg-mcp": {
-        "command": "D:\\project\\workbuddy\\工具\\gg\\build\\pc\\gg-mcp-server.exe",
-        "args": ["--config", "D:\\project\\workbuddy\\工具\\gg\\configs\\ggmcp.json", "--transport", "stdio"]
+        "command": "D:\\Kiln\\gg-mcp\\build\\pc\\gg-ghost-mcp.exe",
+        "args": ["--config", "D:\\Kiln\\gg-mcp\\configs\\gg-ghost.json", "--transport", "stdio"]
       }
     }
   },
@@ -12,8 +13,8 @@
     "mcpServers": {
       "gg-mcp": {
         "type": "stdio",
-        "command": "D:/project/workbuddy/工具/gg/build/pc/gg-mcp-server.exe",
-        "args": ["--config", "D:/project/workbuddy/工具/gg/configs/ggmcp.json", "--transport", "stdio"]
+        "command": "D:/Kiln/gg-mcp/build/pc/gg-ghost-mcp.exe",
+        "args": ["--config", "D:/Kiln/gg-mcp/configs/gg-ghost.json", "--transport", "stdio"]
       }
     }
   },

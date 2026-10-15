@@ -1,5 +1,14 @@
 # HANDOVER.md — 项目交接文档（GG-MCP · 内核级 GameGuardian MCP 服务）
 
+> ⚠️ **2026-10-15 更新 —— 下面正文是 08-16 的历史记录，其中的路径与命名已过时，勿直接照抄：**
+> - 仓库路径：`D:\project\workbuddy\工具\gg` → **`D:\Kiln\gg-mcp`**（GitHub `Apr-YT/gg-mcp`）
+> - PC 产物：`gg-mcp-server.exe` → **`gg-ghost-mcp.exe`**（提交 b953bc5「命名统一」）
+> - 配置文件：`configs/ggmcp.json` → **`configs/gg-ghost.json`**（前者全仓已不存在）
+> - adb：`D:\Kiln\ADB\adb.exe` → **`D:\Kiln\platform-tools\adb.exe`**（已入 PATH）
+> - MinGW：14.2 → **16.2.0**；**NDK / capstone 本机未安装**（agentd 无法本地编译，需先补）
+> - 对外工具数 43 → **45**；wire 命令数 36 → **41**
+> 现状一律以 `AGENTS.md` 为准。
+
 > 交接时间：2026-08-16
 > 项目路径：`D:\project\workbuddy\工具\gg`
 > 设备：Redmi myron（25102RKBEC）序列号 `134d2f8`，KernelSU root，内核 `6.12.69-android16-6`，SELinux Permissive

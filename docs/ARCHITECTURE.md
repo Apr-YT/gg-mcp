@@ -4,7 +4,7 @@
 
 | 组件 | 位置 | 语言 | 职责 |
 |---|---|---|---|
-| `gg-mcp-server` | PC（Windows） | C++17 | MCP 协议面（stdio/HTTP）、43 个工具、会话、adb forward 管理 |
+| `gg-ghost-mcp` | PC（Windows） | C++17 | MCP 协议面（stdio/HTTP）、45 个工具、会话、adb forward 管理 |
 | `gg-agentd` | 设备（root） | C（NDK arm64） | **KO 驱动加载与通道**、进程/maps、搜索/冻结引擎、GG 核心加载编排 |
 | `libKernelGg.so` | 设备（GG 进程内） | C（NDK） | LD_PRELOAD hook：拦截 syscall 270/271 → KO 驱动（或直通内核 hook） |
 | `lib5_stub` | 设备（GG 私有目录） | C（NDK 静态 PIE） | 替换 GG 的 lib5.so，保持合法 ELF 身份，设 LD_PRELOAD 后 exec 原库 |
@@ -12,7 +12,7 @@
 ## 2. 通信链路
 
 ```
-AI agent ──MCP(JSON-RPC)──▶ gg-mcp-server ──wire 二进制帧──▶ adb forward ──▶ gg-agentd
+AI agent ──MCP(JSON-RPC)──▶ gg-ghost-mcp ──wire 二进制帧──▶ adb forward ──▶ gg-agentd
                                                                               │ driver_read/write
                                                                               ▼
                                                           KO 内核驱动（insmod 加载）

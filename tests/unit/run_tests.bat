@@ -106,24 +106,79 @@ g++ -std=c++17 -fsyntax-only -Wall -I"%ROOT%\tests\unit\posix_stub" ^
   "%ROOT%\tests\unit\test_wire_posix_syntax.cpp"
 if errorlevel 1 ( echo [FAIL] test_wire_posix_syntax & exit /b 1 )
 
-rem dispatch consistency guardrail: schema.cpp (43-tool authoritative list) cross-checked
+rem dispatch consistency guardrail: schema.cpp (45-tool authoritative list) cross-checked
 rem against session.cpp (call_tool dispatch) to catch "new/renamed tool wired in only one place".
+rem
+rem python probe (2026-10-15 fix -- both guardrails below used to be DEAD CODE):
+rem   old code:  where python >nul 2>nul && set "PYEXE=python"
+rem              if exist "%PYEXE%" ( ...run... ) else ( echo [WARN] skipping )
+rem   `if exist` resolves a FILE relative to the cwd -- it does NOT do a PATH lookup.
+rem   So with PYEXE=python the [WARN] branch always won and BOTH structural guardrails
+rem   were silently skipped on every machine (local and CI), reporting a false green.
+rem   Now: probe to a FULL PATH, require a real python 3, and FAIL loudly if none is
+rem   found instead of passing silently. Override with GG_SKIP_GUARDRAILS=1 if needed.
 set "PYEXE="
-where python >nul 2>nul && set "PYEXE=python"
-if not defined PYEXE ( set "PYEXE=C:\Users\AprYT\.workbuddy\binaries\python\versions\3.13.12\python.exe" )
-rem UTF-8 mode: python output must not die on non-GBK chars under cmd ANSI codepage
-  set "PYTHONUTF8=1"
-  set "PYTHONIOENCODING=utf-8"
-if exist "%PYEXE%" (
-  echo === dispatch consistency: schema vs session ===
-  "%PYEXE%" "%ROOT%\tests\unit\check_dispatch_consistency.py" "%ROOT%"
-  if errorlevel 1 ( echo [FAIL] dispatch consistency & exit /b 1 )
-  echo === kernel-only guardrail: driver.c stays kernel-side ===
-  "%PYEXE%" "%ROOT%\tests\unit\check_kernel_only.py" "%ROOT%"
-  if errorlevel 1 ( echo [FAIL] kernel-only guardrail & exit /b 1 )
-) else (
-  echo [WARN] python unavailable, skipping structural guardrails
+call :probe_py python
+if not defined PYEXE call :probe_py python3
+if not defined PYEXE call :probe_py py
+if not defined PYEXE if defined GG_PYTHON call :probe_py "%GG_PYTHON%"
+if not defined PYEXE (
+  for /d %%d in ("%LOCALAPPDATA%\Programs\Python\Python3*") do if not defined PYEXE call :probe_py "%%d\python.exe"
 )
+if not defined PYEXE (
+  for /d %%d in ("%USERPROFILE%\.workbuddy\binaries\python\versions\*") do if not defined PYEXE call :probe_py "%%d\python.exe"
+)
+if not defined PYEXE (
+  for /d %%d in ("%ProgramFiles%\Python3*") do if not defined PYEXE call :probe_py "%%d\python.exe"
+)
+
+rem UTF-8 mode: python output must not die on non-GBK chars under cmd ANSI codepage
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+
+rem NOTE: branch with `goto`, not an if/else-if/else chain -- an unescaped ')'
+rem       inside a parenthesised block silently truncates the block in cmd.
+if defined PYEXE goto :gg_run_guardrails
+if defined GG_SKIP_GUARDRAILS goto :gg_skip_guardrails
+goto :gg_no_guardrails
+
+:gg_run_guardrails
+echo === dispatch consistency: schema vs session ===
+"%PYEXE%" "%ROOT%\tests\unit\check_dispatch_consistency.py" "%ROOT%"
+if errorlevel 1 ( echo [FAIL] dispatch consistency & exit /b 1 )
+echo === kernel-only guardrail: driver.c stays kernel-side ===
+"%PYEXE%" "%ROOT%\tests\unit\check_kernel_only.py" "%ROOT%"
+if errorlevel 1 ( echo [FAIL] kernel-only guardrail & exit /b 1 )
+goto :gg_guardrails_done
+
+:gg_skip_guardrails
+echo [WARN] python not found - structural guardrails SKIPPED because GG_SKIP_GUARDRAILS is set
+goto :gg_guardrails_done
+
+:gg_no_guardrails
+echo [FAIL] python 3 not found: structural guardrails cannot run.
+echo        They catch "tool declared but not dispatched" and
+echo        "user-level fallback crept back into driver.c" - do not merge blind.
+echo        Fix: install Python 3, or set GG_PYTHON to the full path of python.exe,
+echo        or set GG_SKIP_GUARDRAILS=1 to accept the skip explicitly.
+exit /b 1
+
+:gg_guardrails_done
 
 echo [OK] all unit tests passed
 endlocal
+exit /b 0
+
+:probe_py
+rem %~1 = command name (PATH lookup) or full path. Accept only python 3; sets PYEXE.
+set "CAND="
+if "%~1"=="" exit /b 0
+if exist "%~1" (
+  set "CAND=%~1"
+) else (
+  for /f "delims=" %%p in ('where "%~1" 2^>nul') do if not defined CAND set "CAND=%%p"
+)
+if not defined CAND exit /b 0
+"%CAND%" -c "import sys;sys.exit(0 if sys.version_info[0]==3 else 1)" >nul 2>nul
+if not errorlevel 1 set "PYEXE=%CAND%"
+exit /b 0

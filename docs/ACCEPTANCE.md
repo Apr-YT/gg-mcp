@@ -6,7 +6,7 @@
 
 | 产物 | 状态 | 验证方式 |
 |---|---|---|
-| `build/pc/gg-mcp-server.exe` (1.2MB) | ✅ | MinGW g++ 编译通过；stdio/HTTP 双传输冒烟测试通过 |
+| `build/pc/gg-ghost-mcp.exe` (~1.4MB) | ✅ | MinGW g++ 16.2 编译通过；stdio/HTTP 双传输冒烟测试通过 |
 | `build/agentd/gg-agentd` (arm64, 83KB) | ✅ | NDK clang 编译通过；ELF Type=DYN (PIE) |
 | `build/native/libKernelGg.so` (7.5KB) | ✅ | NDK 编译通过；导出 GLOBAL `syscall` 符号 |
 | `build/native/lib5_stub` (静态 PIE) | ✅ | NDK `-static-pie` 编译通过；无 INTERP 段 |
@@ -14,11 +14,11 @@
 ## 2. MCP 服务器（本机已验证 ✅）
 
 - [x] `initialize` 握手：protocolVersion 2024-11-05、capabilities.tools、serverInfo
-- [x] `tools/list`：43 个工具全部注册（进程5/搜索7/读写8/分析7/内核3/系统3/监视反汇编5/标注5）
+- [x] `tools/list`：45 个工具全部注册（进程5/搜索7/读写8/分析7/内核3/系统3/监视反汇编5/标注5）
 - [x] stdio 传输：换行分隔 JSON 请求/响应
 - [x] HTTP 传输：`POST /mcp` + `/healthz`
 - [x] 错误路径：无设备时 `gg_device_info` 返回 `isError:true, code=2 (NO_DEVICE)` 与清晰提示
-- [x] 配置加载：configs/ggmcp.json + 命令行参数覆盖（参数优先）
+- [x] 配置加载：configs/gg-ghost.json + 命令行参数覆盖（参数优先）
 
 ## 3. 单测（本机已验证 ✅）
 
@@ -56,7 +56,7 @@ rem 4) 设备端引擎集成测试
 powershell -ExecutionPolicy Bypass -File tests\integration\run_itest.ps1
 
 rem 5) 启动 PC MCP 服务器（HTTP）
-build\pc\gg-mcp-server.exe --config configs\ggmcp.json --transport http --port 8788
+build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json --transport http --port 8788
 rem   然后 curl POST /mcp 调 gg_kernel_status 验证:
 rem     hook 型 → state=ko-hook   /   dev 型 → state=kernel-driver
 ```

@@ -24,7 +24,7 @@ input core → evdev → InputReader → InputDispatcher → 应用
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ PC 侧                                                       │
-│  AI agent ──MCP──▶ gg-mcp-server (HTTP :8788)               │
+│  AI agent ──MCP──▶ gg-ghost-mcp (HTTP :8788)                │
 │                     gg_ghost_tap / gg_ghost_swipe           │
 │                          │  wire 协议 (20B 帧头 + JSON)     │
 └──────────────────────────┼──────────────────────────────────┘
@@ -183,7 +183,7 @@ aarch64-linux-android28-clang -O2 -Wall -I%ROOT% -I%CAPSTONE%\include -o gg-ghos
 ```bat
 g++ -std=c++17 -O2 -Wall -Wextra ^
   server\main.cpp server\mcp\protocol.cpp server\mcp\schema.cpp server\session.cpp ^
-  server\ida_client.cpp server\annotations.cpp server\device\wire.cpp ^
+  server\annotations.cpp server\device\wire.cpp ^
   -o gg-ghost-mcp.exe -lws2_32
 ```
 
@@ -344,8 +344,8 @@ adb shell /data/local/tmp/gg-ghost-touch tap 2035 918 150
 # 内核触摸（走 gg-ghost 虚拟设备）
 adb shell /data/local/tmp/gg-ghost-touch -p /proc/<MEM_KEY>/<MEM_KEY> kerneltap 2035 918 150
 
-# gg-mcp-server 启动
-cd D:\project\workbuddy\工具\gg && build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json --transport http --port 8788
+# gg-ghost-mcp 启动
+cd D:\Kiln\gg-mcp && build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json --transport http --port 8788
 
 # Python 脚本（GG Lua 等价物）
 python gg\tools\ggghost.py read libgame+0x702ED4

@@ -28,7 +28,8 @@ adb shell su -c "cd /data/local/tmp/ggmcp && ./gg-agentd --driver rwproc --port 
 
 echo.
 echo [4/4] 验证...
-timeout /t 3 /nobreak >nul
+rem NOTE: fully-qualified - a bare `timeout` is shadowed by Git-Bash/MSYS coreutils.
+"%SystemRoot%\System32\timeout.exe" /t 3 /nobreak >nul
 adb shell ps -A | findstr gg-agentd
 echo.
 echo === 完成 ===
