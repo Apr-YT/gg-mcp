@@ -1,6 +1,7 @@
 // wire.h — PC↔设备通信：二进制帧编解码 + AgentClient
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -12,6 +13,19 @@
 namespace gg {
 
 using json = nlohmann::json;
+
+// 单次调用的失败语义。GGERR_NO_DEVICE 把「连不上 / 发不出去 / 等不到响应 /
+// 收到烂帧」四件事压成了一个码，上层无法判断重放是否安全，因此这里分开记录。
+// 仅用于 PC 端内部判定与日志，不改变对外公开的 GGERR_* 数值。
+enum class CallOutcome {
+    Ok = 0,
+    ConnectFailed,    // 连接未建立，请求一个字节都没发出去 —— 重放无副作用
+    SendFailed,       // 发送中途失败，远端可能已收到完整请求
+    ResponseTimeout,  // 请求已完整发出，截止时间内没有拿到匹配响应
+    OutcomeUnknown,   // 读中途断连/对端 RST，无法判断远端是否执行
+    ProtocolError,    // 收到非法帧（magic/ver/长度），连接状态已不可信
+    RemoteError,      // 远端明确返回失败码
+};
 
 // 与 gg-agentd 的单连接客户端（含 adb forward 管理）
 class AgentClient {
@@ -32,15 +46,20 @@ public:
     void close();
 
     // 发请求并等待响应。返回 0 成功（out 为 {"r":...}）；负值为 GGERR_*。
+    // 失败时 last_outcome 给出细分语义：只有 ConnectFailed 允许上层安全重放。
     int call(uint16_t cmd, const json& params, json* out);
 
     std::string last_error;
+    CallOutcome last_outcome = CallOutcome::Ok;
 
 private:
+    using Clock = std::chrono::steady_clock;
+
     int ensure_connected_locked();   // 前提: mtx_ 已持有
     int tcp_connect();               // 单次 TCP 连接（不跑 adb）
-    int read_frame(int fd, gg_wire_header_t* h, std::string* payload);
-    int write_frame(int fd, uint16_t cmd, uint32_t seq, const std::string& payload);
+    // 返回值：0 成功；-1 IO 错误/对端关闭；-2 截止时间到期；-3 协议帧非法
+    int read_frame(int fd, gg_wire_header_t* h, std::string* payload, Clock::time_point deadline);
+    int write_frame(int fd, uint16_t cmd, uint32_t seq, const std::string& payload, Clock::time_point deadline);
 
     Config cfg_;
     int fd_ = -1;

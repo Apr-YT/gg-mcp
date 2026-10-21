@@ -53,6 +53,43 @@ static inline bool gg_is_eintr() { return WSAGetLastError() == WSAEINTR; }
 static inline bool gg_is_eintr() { return errno == EINTR; }
 #endif
 
+// socket 侧超时判定（与 EINTR 分开，否则全部会被当成断连）
+#ifdef _WIN32
+static inline bool gg_is_sock_timeout() {
+    int e = WSAGetLastError();
+    return e == WSAETIMEDOUT || e == WSAEWOULDBLOCK;
+}
+#else
+static inline bool gg_is_sock_timeout() {
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT;
+}
+#endif
+
+// 把单次阻塞操作的等待上限压到「离整体截止时间还剩多少毫秒」。
+// 这样即使对端持续吐无用帧，单个请求也不会超过 io_timeout_ms 的预算。
+static void gg_set_sock_timeout(int fd, int ms) {
+    if (ms < 1) ms = 1;
+#ifdef _WIN32
+    DWORD v = static_cast<DWORD>(ms);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&v), sizeof(v));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&v), sizeof(v));
+#else
+    struct timeval tv{};
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+// 剩余毫秒（<=0 表示整体截止时间已到）
+static int gg_remain_ms(std::chrono::steady_clock::time_point deadline) {
+    auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) return 0;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+    return ms > 0x7fffffffLL ? 0x7fffffff : static_cast<int>(ms);
+}
+
 // ---- 日志级别（O1）：默认 INFO(2)，GG_LOG_LEVEL 环境变量可调 ----
 // 0=ERROR 1=WARN 2=INFO 3=DEBUG；高频 hex dump 默认不打印，DEBUG 模式才全量
 static int g_gg_log_level = 2;
@@ -102,7 +139,8 @@ int AgentClient::ensure_connected_locked() {
                 // 订阅事件流（手机悬浮窗同款）；事件帧由 call() 读取时跳过并打印
                 json req{{GG_J_REQ, json::object()}};
                 std::string pl = req.dump();
-                write_frame(fd_, GGCMD_SUBSCRIBE_EVENTS, ++seq_, pl);
+                write_frame(fd_, GGCMD_SUBSCRIBE_EVENTS, ++seq_, pl,
+                            Clock::now() + std::chrono::milliseconds(cfg_.io_timeout_ms));
             }
             return 0;
         }
@@ -233,7 +271,13 @@ void AgentClient::close() {
     if (fd_ >= 0) { GG_CLOSE_SOCK(static_cast<sock_t>(fd_)); fd_ = -1; }
 }
 
-int AgentClient::write_frame(int fd, uint16_t cmd, uint32_t seq, const std::string& payload) {
+int AgentClient::write_frame(int fd, uint16_t cmd, uint32_t seq, const std::string& payload, Clock::time_point deadline) {
+    // 发送端也要守住同一个负载上限，否则超长负载会被静默截断成 32 位长度，
+    // 对端按截断后的长度解析必然错位。
+    if (payload.size() > GGWM_MAX_PAYLOAD) {
+        GG_LOG(1, "[wire] payload too large to send: %zu > %u\n", payload.size(), (unsigned)GGWM_MAX_PAYLOAD);
+        return -4;
+    }
     gg_wire_header_t h{};
     h.magic = GGWM_MAGIC;
     h.ver = GGWM_VERSION;
@@ -252,9 +296,13 @@ int AgentClient::write_frame(int fd, uint16_t cmd, uint32_t seq, const std::stri
     size_t off = 0;
     const char* p = reinterpret_cast<const char*>(&h);
     while (off < sizeof(h)) {
+        int wait = gg_remain_ms(deadline);
+        if (wait <= 0) return -2;
+        gg_set_sock_timeout(fd, wait);
         int n = ::send(fd, p + off, static_cast<int>(sizeof(h) - off), 0);
         if (n > 0) { off += static_cast<size_t>(n); continue; }
         if (n < 0 && gg_is_eintr()) continue;   // 信号中断重试
+        if (n < 0 && gg_is_sock_timeout()) return -2;
         return -1;
     }
     {
@@ -265,31 +313,46 @@ int AgentClient::write_frame(int fd, uint16_t cmd, uint32_t seq, const std::stri
     }
     off = 0;
     while (off < enc.size()) {
+        int wait = gg_remain_ms(deadline);
+        if (wait <= 0) return -2;
+        gg_set_sock_timeout(fd, wait);
         int n = ::send(fd, enc.data() + off, static_cast<int>(enc.size() - off), 0);
         if (n > 0) { off += static_cast<size_t>(n); continue; }
         if (n < 0 && gg_is_eintr()) continue;
+        if (n < 0 && gg_is_sock_timeout()) return -2;
         return -1;
     }
     return 0;
 }
 
-int AgentClient::read_frame(int fd, gg_wire_header_t* h, std::string* payload) {
+// 返回：0 成功；-1 对端关闭或 IO 错误；-2 整体截止时间到期；-3 帧头非法
+int AgentClient::read_frame(int fd, gg_wire_header_t* h, std::string* payload, Clock::time_point deadline) {
     size_t off = 0;
     char* p = reinterpret_cast<char*>(h);
     while (off < sizeof(gg_wire_header_t)) {
+        int wait = gg_remain_ms(deadline);
+        if (wait <= 0) return -2;
+        gg_set_sock_timeout(fd, wait);
         int n = ::recv(fd, p + off, static_cast<int>(sizeof(gg_wire_header_t) - off), 0);
         if (n > 0) { off += static_cast<size_t>(n); continue; }
-        if (n < 0 && gg_is_eintr()) continue;
+        if (n == 0) return -1;                 // 对端有序关闭
+        if (gg_is_eintr()) continue;
+        if (gg_is_sock_timeout()) return -2;
         return -1;
     }
-    if (h->magic != GGWM_MAGIC || h->ver != GGWM_VERSION) return -1;
-    if (h->payload_len > GGWM_MAX_PAYLOAD) return -1;
+    if (h->magic != GGWM_MAGIC || h->ver != GGWM_VERSION || h->payload_len > GGWM_MAX_PAYLOAD)
+        return -3;
     payload->resize(h->payload_len);
     off = 0;
     while (off < payload->size()) {
+        int wait = gg_remain_ms(deadline);
+        if (wait <= 0) return -2;
+        gg_set_sock_timeout(fd, wait);
         int n = ::recv(fd, payload->data() + off, static_cast<int>(payload->size() - off), 0);
         if (n > 0) { off += static_cast<size_t>(n); continue; }
-        if (n < 0 && gg_is_eintr()) continue;
+        if (n == 0) return -1;
+        if (gg_is_eintr()) continue;
+        if (gg_is_sock_timeout()) return -2;
         return -1;
     }
     /* 响应负载解密（agentd 统一置 GGWF_ENC; 兼容未加密的旧 agentd） */
@@ -302,25 +365,44 @@ int AgentClient::read_frame(int fd, gg_wire_header_t* h, std::string* payload) {
 
 int AgentClient::call(uint16_t cmd, const json& params, json* out) {
     std::lock_guard<std::mutex> lk(mtx_);
+    last_outcome = CallOutcome::Ok;
+
+    // 整体截止时间：io_timeout_ms 是整个请求的预算（建连 + 发送 + 收完响应），
+    // 不是单次 recv/send 的上限。否则对端持续吐杂散帧或每次只给几个字节，
+    // 就能把一次调用拖到远超预期。
+    const Clock::time_point deadline = Clock::now() + std::chrono::milliseconds(cfg_.io_timeout_ms);
+
     if (fd_ < 0) {
-        if (ensure_connected_locked() != 0) return GGERR_NO_DEVICE;
+        if (ensure_connected_locked() != 0) {
+            last_outcome = CallOutcome::ConnectFailed;
+            return GGERR_NO_DEVICE;
+        }
     }
     json req;
     req[GG_J_REQ] = params;
     std::string payload = req.dump();
 
     uint32_t seq = ++seq_;
-    if (write_frame(fd_, cmd, seq, payload) < 0) {
+    int wr = write_frame(fd_, cmd, seq, payload, deadline);
+    if (wr != 0) {
         GG_CLOSE_SOCK(static_cast<sock_t>(fd_));
         fd_ = -1;
-        last_error = "write to agentd failed (device offline?)";
+        if (wr == -4) {
+            last_outcome = CallOutcome::SendFailed;
+            last_error = "request payload exceeds wire frame limit";
+            return GGERR_BAD_REQUEST;
+        }
+        // 帧可能只发出一部分：远端是否已收到无法判断，语义归为「不可安全重放」。
+        last_outcome = CallOutcome::SendFailed;
+        last_error = (wr == -2) ? "send to agentd timed out" : "write to agentd failed (device offline?)";
         return GGERR_NO_DEVICE;
     }
     gg_wire_header_t h{};
     std::string resp;
     for (;;) {
-        if (read_frame(fd_, &h, &resp) < 0) {
-            GG_LOG(1, "[wire] read_frame failed: fd=%d err=%d t=%lldms\n", fd_,
+        int rr = read_frame(fd_, &h, &resp, deadline);
+        if (rr < 0) {
+            GG_LOG(1, "[wire] read_frame failed: fd=%d rc=%d err=%d t=%lldms\n", fd_, rr,
 #ifdef _WIN32
                     (int)WSAGetLastError()
 #else
@@ -330,7 +412,19 @@ int AgentClient::call(uint16_t cmd, const json& params, json* out) {
                           std::chrono::steady_clock::now().time_since_epoch()).count());
             GG_CLOSE_SOCK(static_cast<sock_t>(fd_));
             fd_ = -1;
-            last_error = "read from agentd failed (device offline?)";
+            if (rr == -3) {
+                last_outcome = CallOutcome::ProtocolError;
+                last_error = "malformed frame from agentd (magic/ver/len)";
+                return GGERR_INTERNAL;
+            }
+            if (rr == -2) {
+                last_outcome = CallOutcome::ResponseTimeout;
+                last_error = "no matching response within request deadline";
+                return GGERR_TIMEOUT;
+            }
+            // 请求已完整发出，读中途断连：远端是否执行过无从判断。
+            last_outcome = CallOutcome::OutcomeUnknown;
+            last_error = "connection lost while awaiting response";
             return GGERR_NO_DEVICE;
         }
         if (h.flags & GGWF_EVENT) {
@@ -347,6 +441,7 @@ int AgentClient::call(uint16_t cmd, const json& params, json* out) {
         break;
     }
     if (h.flags & GGWF_ERR) {
+        last_outcome = CallOutcome::RemoteError;
         try {
             json e = json::parse(resp);
             int code = GGERR_INTERNAL;
@@ -370,6 +465,7 @@ int AgentClient::call(uint16_t cmd, const json& params, json* out) {
         *out = j;
         return 0;
     } catch (...) {
+        last_outcome = CallOutcome::ProtocolError;
         last_error = "bad response from agentd";
         return GGERR_INTERNAL;
     }

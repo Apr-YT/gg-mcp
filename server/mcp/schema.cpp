@@ -106,13 +106,14 @@ static const std::vector<ToolDef>& build() {
              json{"addr"}),
         tool("gg_read_bytes",
              "读取指定地址的原始字节（hex）。save_to 指定时为落盘模式："
-             "server 自动分段读取（agentd 单段 64KB 上限），原始二进制写入本地文件，"
-             "返回 {saved,size,segments,skipped}，不占对话带宽（适合大段 dump）",
+             "server 自动分段读取（agentd 单段 64KB 上限），原始二进制写入 export_dir 下的文件，"
+             "返回 {saved,size,read_ok,segments,complete}，不占对话带宽（适合大段 dump）。"
+             "读取失败的区间会被补 0 保长度对齐，此时 complete=false 并给出 missing 区间，不得当作完整数据使用",
              json{
                  {"addr", prop("string", "目标地址")},
-                 {"len", prop("integer", "字节数（默认 64；hex 模式上限 65536，save_to 模式无上限自动分段）")},
+                 {"len", prop("integer", "字节数（默认 64；hex 模式上限 65536，save_to 模式自动分段，受 max_save_bytes 约束）")},
                  {"force", prop("integer", "强制读取模式：0=默认，1=强制读取受限页")},
-                 {"save_to", prop("string", "落盘路径（可选）：原始二进制写本地文件，不再返回 hex")},
+                 {"save_to", prop("string", "落盘相对路径（可选）：只能写到配置的 export_dir 内，拒绝绝对路径、盘符与 `..`；不再返回 hex")},
              },
              json{"addr"}),
         tool("gg_hex_dump",
