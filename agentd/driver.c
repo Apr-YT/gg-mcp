@@ -69,242 +69,6 @@ static void set_err(gg_driver_t *d, const char *msg) {
     snprintf(d->last_error, sizeof(d->last_error), "%s", msg ? msg : "");
 }
 
-/* ---------- 降级: process_vm_readv（hook 型 KO 的主通道） ---------- */
-static ssize_t vm_read(pid_t pid, void *buf, size_t len, uint64_t addr) {
-#if defined(__linux__) || defined(__ANDROID__)
-    struct iovec local = { .iov_base = buf, .iov_len = len };
-    struct iovec remote = { .iov_base = (void *)(uintptr_t)addr, .iov_len = len };
-    return process_vm_readv(pid, &local, 1, &remote, 1, 0);
-#else
-    (void)pid; (void)buf; (void)len; (void)addr;
-    errno = ENOSYS;
-    return -1;
-#endif
-}
-
-static ssize_t vm_write(pid_t pid, const void *buf, size_t len, uint64_t addr) {
-#if defined(__linux__) || defined(__ANDROID__)
-    struct iovec local = { .iov_base = (void *)buf, .iov_len = len };
-    struct iovec remote = { .iov_base = (void *)(uintptr_t)addr, .iov_len = len };
-    return process_vm_writev(pid, &local, 1, &remote, 1, 0);
-#else
-    (void)pid; (void)buf; (void)len; (void)addr;
-    errno = ENOSYS;
-    return -1;
-#endif
-}
-
-/* ---------- 降级: /proc/<pid>/mem ---------- */
-static ssize_t mem_io(pid_t pid, void *buf, size_t len, uint64_t addr, int write_mode) {
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/mem", (int)pid);
-    int fd = open(path, write_mode ? O_RDWR : O_RDONLY);
-    if (fd < 0) return -1;
-    ssize_t r = write_mode ? pwrite(fd, buf, len, (off_t)addr)
-                           : pread(fd, buf, len, (off_t)addr);
-    int saved = errno;
-    close(fd);
-    errno = saved;
-    return r;
-}
-
-/* ---------- dev 型后端 ---------- */
-static int dev_open(gg_driver_t *d) {
-    if (d->dev_path[0] == 0) { set_err(d, "dev path empty"); return -1; }
-    int fd = open(d->dev_path, O_RDWR);
-    if (fd < 0) {
-        snprintf(d->last_error, sizeof(d->last_error),
-                 "open %s failed: %s", d->dev_path, strerror(errno));
-        return -1;
-    }
-    d->dev_fd = fd;
-    return 0;
-}
-
-static ssize_t dev_io(gg_driver_t *d, int reqcode, pid_t pid,
-                      uint64_t addr, void *buf, size_t len) {
-    if (d->dev_fd < 0 && dev_open(d) < 0) return -1;
-    ko_ioctl_req_t req;
-    memset(&req, 0, sizeof(req));
-    req.pid  = (uint32_t)pid;
-    req.addr = addr;
-    req.buf  = (uint64_t)(uintptr_t)buf;
-    req.size = (uint64_t)len;
-    /* 内核内存 ioctl 可能被信号打断返回 -EINTR（驱动内部 wait 被打断）。
-     * 有界重试，避免误判为通道故障。 */
-    errno = 0;
-    long r;
-    int tries = 0;
-    do {
-        r = ioctl(d->dev_fd, reqcode, &req);
-    } while (r < 0 && errno == EINTR && ++tries < 3);
-    return (ssize_t)r;
-}
-
-/* ---------- qx 型后端（Aloha 开源 QX9-10） ---------- */
-
-static int qx_io(gg_driver_t *d, int op, pid_t pid, uint64_t addr, void *buf, size_t len) {
-    if (d->dev_fd < 0) return -1;
-    qx_copy_memory_t cm;
-    cm.pid = pid;
-    cm.addr = (uintptr_t)addr;
-    cm.buffer = buf;
-    cm.size = len;
-    errno = 0;
-    int r;
-    int tries = 0;
-    do {
-        r = ioctl(d->dev_fd, op, &cm);
-    } while (r < 0 && errno == EINTR && ++tries < 3);
-    return r;
-}
-
-/* 发现 QX 隐藏驱动进程: /proc/<pid>/exe -> /data/<6位小写>（已删除）。
- * 返回 pid；-1 未发现。 */
-int qx_find_hidden_pid(void) {
-    DIR *dp = opendir("/proc");
-    if (!dp) return -1;
-    struct dirent *de;
-    int found = -1;
-    while ((de = readdir(dp)) != NULL && found < 0) {
-        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
-        char exe[64];
-        snprintf(exe, sizeof(exe), "/proc/%s/exe", de->d_name);
-        char link[256];
-        ssize_t n = readlink(exe, link, sizeof(link) - 1);
-        if (n <= 0) continue;
-        link[n] = 0;
-        /* 部分内核 readlink 会把 " (deleted)" 拼进目标路径, 剥离后再匹配 */
-        char *del = strstr(link, " (deleted)");
-        if (del) *del = 0;
-        /* 形如 /data/abcxyz 且目标已删除（access 失败） */
-        if (strncmp(link, "/data/", 6) != 0) continue;
-        if (strlen(link) != 12) continue;          /* "/data/" + 6 字符 */
-        int ok = 1;
-        for (int i = 6; i < 12; i++) {
-            if (link[i] < 'a' || link[i] > 'z') { ok = 0; break; }
-        }
-        if (!ok) continue;
-        if (access(link, F_OK) == 0) continue;      /* 目标还存在 → 不是 deleted */
-        found = atoi(de->d_name);
-    }
-    closedir(dp);
-    return found;
-}
-
-int qx_attach(gg_driver_t *d) {
-    /* 1) 发现隐藏驱动进程 */
-    int pid = qx_find_hidden_pid();
-    if (pid < 0) {
-        set_err(d, "QX driver not found (no /data/[a-z]{6} deleted exe process)");
-        return -GGERR_NOT_FOUND;
-    }
-    /* 2) 从 /proc/<pid>/fd/3 取主次设备号 */
-    char fdpath[64];
-    snprintf(fdpath, sizeof(fdpath), "/proc/%d/fd/3", pid);
-    struct stat st;
-    if (stat(fdpath, &st) != 0 || !S_ISCHR(st.st_mode)) {
-        snprintf(d->last_error, sizeof(d->last_error),
-                 "stat %s failed (fd 3 not char device?)", fdpath);
-        return -GGERR_NOT_FOUND;
-    }
-    unsigned maj = major(st.st_rdev);
-    unsigned min = minor(st.st_rdev);
-
-    /* 3) 重建节点（路径自选, 主次号一致即可） */
-    snprintf(d->dev_path, sizeof(d->dev_path), "/dev/ggqx");
-    unlink(d->dev_path);
-    if (mknod(d->dev_path, S_IFCHR | 0666, makedev(maj, min)) != 0) {
-        snprintf(d->last_error, sizeof(d->last_error),
-                 "mknod %s c %u %u failed: %s", d->dev_path, maj, min, strerror(errno));
-        return -GGERR_PERM;
-    }
-    chmod(d->dev_path, 0666);
-
-    /* 4) open */
-    d->dev_fd = open(d->dev_path, O_RDWR);
-    if (d->dev_fd < 0) {
-        snprintf(d->last_error, sizeof(d->last_error),
-                 "open %s failed: %s", d->dev_path, strerror(errno));
-        return -GGERR_PERM;
-    }
-
-    /* 5) init_key 认证（可选） */
-    if (d->qx_have_key) {
-        char key[QX_KEY_MAX];
-        memset(key, 0, sizeof(key));
-        strncpy(key, d->qx_key, sizeof(key) - 1);
-        if (ioctl(d->dev_fd, QX_OP_INIT_KEY, key) != 0) {
-            snprintf(d->last_error, sizeof(d->last_error),
-                     "QX init_key (0x800) failed: %s", strerror(errno));
-            return -GGERR_PERM;
-        }
-    }
-
-    snprintf(d->ko_module, sizeof(d->ko_module), "qx");
-    snprintf(d->ko_version, sizeof(d->ko_version), "qx9-10");
-    snprintf(d->ko_file, sizeof(d->ko_file),
-             "attached via %s (maj %u min %u, pid %d)", d->dev_path, maj, min, pid);
-    d->ko_loaded = 1;
-    return 0;
-}
-
-int driver_module_base(gg_driver_t *d, pid_t pid, const char *name, uint64_t *base) {
-    if (d->ko_type != KO_TYPE_QX || d->dev_fd < 0) return -1;
-    qx_module_base_t mb;
-    char namebuf[0x100];
-    memset(namebuf, 0, sizeof(namebuf));
-    strncpy(namebuf, name, sizeof(namebuf) - 1);
-    mb.pid = pid;
-    mb.name = namebuf;
-    mb.base = 0;
-    if (ioctl(d->dev_fd, QX_OP_MODULE_BASE, &mb) != 0) return -1;
-    *base = mb.base;
-    return 0;
-}
-
-/* ---------- QX 硬件断点（0x807-0x811, qx-对接.h Paradise 家族） ---------- */
-
-int qx_hwbp_add(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int len) {
-    if (d->ko_type != KO_TYPE_QX || d->dev_fd < 0) return -1;
-    qx_hw_bp_info_t bp;
-    memset(&bp, 0, sizeof(bp));
-    bp.pid = pid;
-    bp.addr = addr;
-    bp.type = type;
-    bp.len = len;
-    errno = 0;
-    return ioctl(d->dev_fd, QX_OP_HWBP_ADD, &bp);
-}
-
-int qx_hwbp_get_hits(gg_driver_t *d, pid_t pid, uint64_t addr,
-                     qx_hwbp_hit_item_t *out, int cap, int *real) {
-    if (d->ko_type != KO_TYPE_QX || d->dev_fd < 0) return -1;
-    qx_hwbp_hit_args_t args;
-    memset(&args, 0, sizeof(args));
-    args.pid = pid;
-    args.addr = addr;
-    args.out_buf = out;
-    args.out_len = cap * (int)sizeof(qx_hwbp_hit_item_t);
-    args.real_count = 0;
-    errno = 0;
-    int rc = ioctl(d->dev_fd, QX_OP_HWBP_GET_HITS, &args);
-    if (real) *real = args.real_count;
-    return rc;
-}
-
-/* enable/disable/clear 的参数布局 qx-对接.h 未明示; 常见实现为 pid。
- * 先传 &pid, 失败再试 NULL。 */
-static int qx_hwbp_simple(gg_driver_t *d, pid_t pid, int op) {
-    if (d->ko_type != KO_TYPE_QX || d->dev_fd < 0) return -1;
-    errno = 0;
-    if (ioctl(d->dev_fd, op, &pid) == 0) return 0;
-    return ioctl(d->dev_fd, op, NULL);
-}
-
-int qx_hwbp_enable(gg_driver_t *d, pid_t pid)  { return qx_hwbp_simple(d, pid, QX_OP_HWBP_ENABLE); }
-int qx_hwbp_disable(gg_driver_t *d, pid_t pid) { return qx_hwbp_simple(d, pid, QX_OP_HWBP_DISABLE); }
-int qx_hwbp_clear(gg_driver_t *d, pid_t pid)   { return qx_hwbp_simple(d, pid, QX_OP_HWBP_CLEAR); }
 
 /* ---------- rwproc33 型后端（abcz316/rwProcMem33, proc read 33B 头协议） ----------
  * 协议（见 docs/engineering/RWPROC33_ADAPTER.md + 上游源码）:
@@ -432,9 +196,8 @@ static int rwproc_init_device_info(gg_driver_t *d, int fd) {
 }
 
 int driver_init_rwproc(gg_driver_t *d, const char *mem_key, const char *bp_key) {
-    int rc = driver_init(d, "rwproc", NULL, 0, 0);
-    if (rc != 0) return rc;
-    d->ko_type = KO_TYPE_RWPROC;
+    memset(d, 0, sizeof(*d));
+    d->state = ST_UNAVAILABLE;
     d->rwproc_mem_fd = -1;
     d->rwproc_bp_fd = -1;
     d->rwproc_handle = 0;
@@ -445,7 +208,6 @@ int driver_init_rwproc(gg_driver_t *d, const char *mem_key, const char *bp_key) 
 }
 
 int rwproc_attach(gg_driver_t *d) {
-    if (d->ko_type != KO_TYPE_RWPROC) return -1;
     /* 1) 打开内存模块节点 */
     d->rwproc_mem_fd = rwproc_open_node(d, d->rwproc_mem_key);
     if (d->rwproc_mem_fd < 0) return -GGERR_NOT_FOUND;
@@ -484,7 +246,7 @@ int rwproc_attach(gg_driver_t *d) {
 }
 
 int rwproc_open_process(gg_driver_t *d, pid_t pid, uint64_t *handle) {
-    if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_mem_fd < 0) return -1;
+    if (d->rwproc_mem_fd < 0) return -1;
     /* 换 pid: 关旧开新 */
     if (d->rwproc_handle && d->rwproc_pid != pid) {
         rwproc_call(d, d->rwproc_mem_fd, RWPROC_CMD_CLOSE_PROCESS,
@@ -514,7 +276,7 @@ int rwproc_open_process(gg_driver_t *d, pid_t pid, uint64_t *handle) {
 }
 
 int rwproc_close_process(gg_driver_t *d, uint64_t handle) {
-    if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_mem_fd < 0 || !handle) return -1;
+    if (d->rwproc_mem_fd < 0 || !handle) return -1;
     rwproc_call(d, d->rwproc_mem_fd, RWPROC_CMD_CLOSE_PROCESS, handle, 0, 0, NULL, 0);
     if (d->rwproc_handle == handle) { d->rwproc_handle = 0; d->rwproc_pid = -1; }
     return 0;
@@ -546,7 +308,7 @@ static ssize_t rwproc_write_mem(gg_driver_t *d, pid_t pid, uint64_t addr,
 /* 仅 rwproc33 型后端支持。display 坐标由驱动内 disp→raw 换算并注入 input 子系统。 */
 
 int driver_touch_tap(gg_driver_t *d, uint32_t x, uint32_t y, uint32_t hold_ms) {
-    if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_mem_fd < 0) {
+    if (d->rwproc_mem_fd < 0) {
         set_err(d, "aq-dsp: need rwproc33 driver");
         return -1;
     }
@@ -564,7 +326,7 @@ int driver_touch_tap(gg_driver_t *d, uint32_t x, uint32_t y, uint32_t hold_ms) {
 
 int driver_touch_swipe(gg_driver_t *d, uint32_t x1, uint32_t y1,
                        uint32_t x2, uint32_t y2, uint32_t ms) {
-    if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_mem_fd < 0) {
+    if (d->rwproc_mem_fd < 0) {
         set_err(d, "aq-dsp: need rwproc33 driver");
         return -1;
     }
@@ -584,7 +346,7 @@ int driver_touch_swipe(gg_driver_t *d, uint32_t x1, uint32_t y1,
 
 int rwproc_hwbp_start(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int len,
                       uint64_t *bp_id) {
-    if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_bp_fd < 0) return -1;
+    if (d->rwproc_bp_fd < 0) return -1;
     if (type <= 0) type = HW_BP_TYPE_W;
     if (len <= 0) len = 4;
     uint64_t handle = 0;
@@ -621,7 +383,7 @@ int rwproc_hwbp_start(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int le
 
 int rwproc_hwbp_get_hits(gg_driver_t *d, uint64_t bp_id,
                          rwproc_hwbp_hit_item_t *out, int cap, int *real) {
-    if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_bp_fd < 0) return -1;
+    if (d->rwproc_bp_fd < 0) return -1;
     if (real) *real = 0;
     /* 命中数（模块返回 {hit_total_count, hit_item_arr_count} 到数据区） */
     ssize_t r = rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_GET_HWBP_HIT_COUNT,
@@ -645,7 +407,7 @@ int rwproc_hwbp_get_hits(gg_driver_t *d, uint64_t bp_id,
 }
 
 int rwproc_hwbp_stop(gg_driver_t *d, uint64_t bp_id) {
-    if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_bp_fd < 0) return -1;
+    if (d->rwproc_bp_fd < 0) return -1;
     rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_UNINST_PROCESS_HWBP, bp_id, 0, 0, NULL, 0);
     return 0;
 }
@@ -655,7 +417,7 @@ int rwproc_hwbp_stop(gg_driver_t *d, uint64_t bp_id) {
  * 不依赖用户态枚举线程, 新线程/线程数超上限由驱动兜底（上限 GG_HWBP_MAX_ALL=256）。 */
 int rwproc_hwbp_start_all(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int len,
                           uint64_t *ids, int cap, int *count) {
-    if (d->ko_type != KO_TYPE_RWPROC || d->rwproc_bp_fd < 0) return -1;
+    if (d->rwproc_bp_fd < 0) return -1;
     if (type <= 0) type = HW_BP_TYPE_W;
     if (len <= 0) len = 4;
     if (count) *count = 0;
@@ -697,233 +459,7 @@ int rwproc_hwbp_start_all(gg_driver_t *d, pid_t pid, uint64_t addr, int type, in
 
 /* ---------- KO 加载 ---------- */
 
-/* fork+execl 直接执行，不经 shell。
- * 旧实现是 system("insmod '%s'")，path 来自 ko/ 目录的文件名，
- * 文件名只要含一个单引号就能闭合引号注入命令 —— 而 agentd 是 root 进程。
- * 单引号转义只能缓解，根治办法是不经过 shell。
- * 子进程只调用 async-signal-safe 函数（open/dup2/close/execl/_exit）。 */
-static int run_exec1(const char *bin, const char *arg) {
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
-        }
-        execl(bin, bin, arg, (char *)NULL);
-        _exit(127);   /* exec 失败：insmod 不在该路径 */
-    }
-    int status = 0;
-    if (waitpid(pid, &status, 0) != pid) return -1;
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    return -1;
-}
-
-static int ko_insmod(const char *path) {
-    if (run_exec1("insmod", path) == 0) return 0;
-    /* 部分设备 insmod 不在 PATH：尝试 /system/bin/insmod */
-    return run_exec1("/system/bin/insmod", path);
-}
-
-static int ko_in_modules(const char *modname) {
-    if (!modname || !*modname) return 0;
-    FILE *f = fopen("/proc/modules", "r");
-    if (!f) return 0;
-    char line[512];
-    size_t ml = strlen(modname);
-    int found = 0;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, modname, ml) != 0) continue;
-        /* 必须校验名字边界：/proc/modules 每行是 "<name> <size> <refcnt> ..."。
-         * 只比较前缀会把 "gg" 误判成 "gg2"/"ggx" 已加载，进而跳过 insmod，
-         * 后续 open 节点失败，报出来的却是"节点不存在"这种南辕北辙的错误。 */
-        char next = line[ml];
-        if (next == ' ' || next == '\t' || next == '\n' || next == '\0') { found = 1; break; }
-    }
-    fclose(f);
-    return found;
-}
-
-/* 根据 /proc/misc 建 dev 节点: misc 主设备号 10, 次设备号从 /proc/misc 查 */
-static int ko_mknod_misc(const char *name) {
-    FILE *f = fopen("/proc/misc", "r");
-    if (!f) return -1;
-    char line[256];
-    int minor = -1;
-    while (fgets(line, sizeof(line), f)) {
-        int m;
-        char n[128];
-        if (sscanf(line, "%d %127s", &m, n) == 2 && strcmp(n, name) == 0) { minor = m; break; }
-    }
-    fclose(f);
-    if (minor < 0) return -1;
-    char path[160];
-    snprintf(path, sizeof(path), "/dev/%s", name);
-    unlink(path);
-    if (mknod(path, S_IFCHR | 0666, makedev(10, minor)) < 0) return -1;
-    chmod(path, 0666);
-    return 0;
-}
-
-int ko_load(gg_driver_t *d, const char *dir, const char *file,
-            const char *pattern, int strict) {
-    char path[1024];
-    char chosen[512] = "";
-    char chosen_ver[64] = "";
-
-    if (file && *file) {
-        snprintf(path, sizeof(path), "%s/%s", dir, file);
-        if (access(path, R_OK) != 0) {
-            snprintf(d->last_error, sizeof(d->last_error), "ko file not found: %s", path);
-            return -GGERR_NOT_FOUND;
-        }
-        snprintf(chosen, sizeof(chosen), "%s", file);
-        version_from_ko_name(file, chosen_ver, sizeof(chosen_ver));
-    } else {
-        /* 自动选择：目录内第一个族匹配的 .ko */
-        DIR *dp = opendir(dir);
-        if (!dp) {
-            snprintf(d->last_error, sizeof(d->last_error), "ko dir not found: %s", dir);
-            return -GGERR_NOT_FOUND;
-        }
-        struct dirent *de;
-        int best = -1;   /* 0=找到, 1=找到但族不符 */
-        while ((de = readdir(dp)) != NULL) {
-            size_t l = strlen(de->d_name);
-            if (l < 4 || strcmp(de->d_name + l - 3, ".ko") != 0) continue;
-            char ver[64] = "";
-            version_from_ko_name(de->d_name, ver, sizeof(ver));
-            int match = 1;
-            if (pattern && *pattern && ver[0]) {
-                int m = version_match_family(ver, pattern);
-                if (m < 0) match = 1;      /* 版本不可解析 → 放行 */
-                else match = m;
-            }
-            if (match) {
-                snprintf(chosen, sizeof(chosen), "%s", de->d_name);
-                snprintf(chosen_ver, sizeof(chosen_ver), "%s", ver);
-                best = 0;
-                break;
-            } else if (best < 0) {
-                best = 1;   /* 记录存在族外文件 */
-                snprintf(chosen, sizeof(chosen), "%s", de->d_name);
-                snprintf(chosen_ver, sizeof(chosen_ver), "%s", ver);
-            }
-        }
-        closedir(dp);
-        if (chosen[0] == 0) {
-            set_err(d, "no .ko file found in ko dir");
-            return -GGERR_NOT_FOUND;
-        }
-        if (best == 1 && strict) {
-            snprintf(d->last_error, sizeof(d->last_error),
-                     "no .ko matches version family '%s' (found %s v%s); strict mode",
-                     pattern ? pattern : "", chosen, chosen_ver);
-            return -GGERR_VERSION_MISMATCH;
-        }
-        snprintf(path, sizeof(path), "%s/%s", dir, chosen);
-    }
-
-    /* SELinux: 多数社区 KO 需要 permissive。临时放行（仅加载期），
-     * 加载 + dev 节点打开完成后立即恢复 enforcing —— 长期 permissive
-     * 是 ACE 类反作弊的最高优先级检测点（setenforce 0 秒暴露）。 */
-    int se_was_enforcing = 0;
-    {
-        FILE *ef = fopen("/sys/fs/selinux/enforce", "r");
-        if (ef) {
-            char buf[8] = {0};
-            if (fgets(buf, sizeof(buf), ef)) se_was_enforcing = (atoi(buf) == 1);
-            fclose(ef);
-        }
-    }
-    if (se_was_enforcing) run_exec1("setenforce", "0");   /* 同样不走 shell */
-
-    int rc = 0;
-    /* 已加载则跳过 insmod */
-    char modname[256];
-    snprintf(modname, sizeof(modname), "%s", chosen);
-    char *dot = strstr(modname, ".ko");
-    if (dot) *dot = 0;
-    d->ko_loaded = ko_in_modules(modname);
-
-    if (!d->ko_loaded) {
-        if (ko_insmod(path) != 0) {
-            snprintf(d->last_error, sizeof(d->last_error),
-                     "insmod %s failed (kernel version mismatch? SELinux? perms?)", path);
-            rc = -GGERR_PERM;
-            goto out;
-        }
-        d->ko_loaded = ko_in_modules(modname);
-        if (!d->ko_loaded) {
-            set_err(d, "insmod succeeded but module not in /proc/modules");
-            rc = -GGERR_INTERNAL;
-            goto out;
-        }
-    }
-
-    snprintf(d->ko_module, sizeof(d->ko_module), "%s", modname);
-    snprintf(d->ko_file, sizeof(d->ko_file), "%s", path);
-    snprintf(d->ko_version, sizeof(d->ko_version), "%s", chosen_ver);
-
-    /* dev 型: 建节点并打开 */
-    if (d->ko_type == KO_TYPE_DEV) {
-        if (d->dev_path[0] == 0) {
-            /* 未显式指定 → 尝试 misc 设备名 = 模块名 */
-            snprintf(d->dev_path, sizeof(d->dev_path), "/dev/%s", modname);
-        }
-        if (access(d->dev_path, F_OK) != 0) {
-            ko_mknod_misc(modname);
-        }
-        if (dev_open(d) < 0) {
-            rc = -GGERR_INTERNAL;   /* last_error 已置 */
-            goto out;
-        }
-    }
-out:
-    /* 恢复 SELinux enforcing（无论成败） */
-    if (se_was_enforcing) run_exec1("setenforce", "1");
-    return rc;
-}
-
 /* ---------- 对外接口 ---------- */
-
-int driver_init(gg_driver_t *d, const char *type,
-                const char *dev_path, int ioctl_read, int ioctl_write) {
-    memset(d, 0, sizeof(*d));
-    d->dev_fd = -1;
-    d->ioctl_read  = ioctl_read  ? ioctl_read  : 0x7e1a;
-    d->ioctl_write = ioctl_write ? ioctl_write : 0x7e1b;
-    d->state = ST_UNAVAILABLE;
-
-    if (type && strcmp(type, "dev") == 0) {
-        d->ko_type = KO_TYPE_DEV;
-        if (dev_path) snprintf(d->dev_path, sizeof(d->dev_path), "%s", dev_path);
-    } else if (type && strcmp(type, "qx") == 0) {
-        d->ko_type = KO_TYPE_QX;
-        d->ioctl_read  = QX_OP_READ_MEM;
-        d->ioctl_write = QX_OP_WRITE_MEM;
-    } else if (type && strcmp(type, "rwproc") == 0) {
-        d->ko_type = KO_TYPE_RWPROC;
-        d->rwproc_mem_fd = -1;
-        d->rwproc_bp_fd = -1;
-        d->rwproc_pid = -1;
-    } else {
-        d->ko_type = KO_TYPE_HOOK;   /* 默认 hook 型 */
-    }
-    return 0;
-}
-
-int driver_init_qx(gg_driver_t *d, const char *key) {
-    int rc = driver_init(d, "qx", NULL, 0, 0);
-    if (rc != 0) return rc;
-    if (key && *key) {
-        memset(d->qx_key, 0, sizeof(d->qx_key));
-        strncpy(d->qx_key, key, sizeof(d->qx_key) - 1);
-        d->qx_have_key = 1;
-    }
-    return 0;
-}
 
 int driver_self_test(gg_driver_t *d) {
     static volatile uint32_t s_magic = 0x12345678u;
@@ -936,7 +472,7 @@ int driver_self_test(gg_driver_t *d) {
     d->ko_loaded = 0;
 
     /* rwproc33 型: 打开自身进程句柄 + 读回环 */
-    if (d->ko_type == KO_TYPE_RWPROC && d->rwproc_mem_fd >= 0) {
+    if (d->rwproc_mem_fd >= 0) {
         uint64_t h = 0;
         if (rwproc_open_process(d, self, &h) == 0) {
             ssize_t r = rwproc_read_mem(d, self, (uint64_t)(uintptr_t)&s_magic,
@@ -950,56 +486,6 @@ int driver_self_test(gg_driver_t *d) {
         set_err(d, "rwproc self-test read failed");
     }
 
-    /* qx / dev 型: ioctl 回环 */
-    if ((d->ko_type == KO_TYPE_QX || d->ko_type == KO_TYPE_DEV) && d->dev_fd >= 0) {
-        ssize_t r;
-        if (d->ko_type == KO_TYPE_QX) {
-            r = qx_io(d, QX_OP_READ_MEM, self,
-                      (uint64_t)(uintptr_t)&s_magic, &back, sizeof(back));
-            if (r == 0) {
-                d->state = ST_DRIVER;
-                d->ko_loaded = 1;
-                return 1;
-            }
-        } else {
-            r = dev_io(d, d->ioctl_read, self,
-                       (uint64_t)(uintptr_t)&s_magic, &back, sizeof(back));
-            if (r == (ssize_t)sizeof(back) && back == 0x12345678u) {
-                d->state = ST_DRIVER;
-                d->ko_loaded = 1;
-                return 1;
-            }
-            /* 写通道回环 */
-            ssize_t w = dev_io(d, d->ioctl_write, self,
-                               (uint64_t)(uintptr_t)&s_magic, (void *)&s_magic, sizeof(s_magic));
-            ssize_t r2 = dev_io(d, d->ioctl_read, self,
-                                (uint64_t)(uintptr_t)&s_magic, &back, sizeof(back));
-            if (w == (ssize_t)sizeof(s_magic) && r2 == (ssize_t)sizeof(back) &&
-                back == 0x12345678u) {
-                d->state = ST_DRIVER;
-                d->ko_loaded = 1;
-                return 1;
-            }
-        }
-    }
-
-    /* hook 型: process_vm_readv 是内核 hook 的主通道, /proc/pid/mem 为内核兜底。
-     * 其它专用驱动型（dev/qx/rwproc）不在此兜底——KO 自检失败即如实报不可用,
-     * 不被裸 process_vm_readv 假阳性掩盖（用户态通道）。 */
-    if (d->ko_type == KO_TYPE_HOOK) {
-        ssize_t rv = vm_read(self, &back, sizeof(back), (uint64_t)(uintptr_t)&s_magic);
-        if (rv == (ssize_t)sizeof(back) && back == 0x12345678u) {
-            d->state = ST_KO_HOOK;
-            d->ko_loaded = 1;
-            return 1;
-        }
-        ssize_t rm = mem_io(self, &back, sizeof(back), (uint64_t)(uintptr_t)&s_magic, 0);
-        if (rm == (ssize_t)sizeof(back) && back == 0x12345678u) {
-            d->state = ST_PROC_MEM;
-            d->ko_loaded = 1;
-            return 0;
-        }
-    }
     set_err(d, "all channels unavailable (not root? KO not loaded?)");
     d->state = ST_UNAVAILABLE;
     return -1;
@@ -1010,7 +496,7 @@ ssize_t driver_read(gg_driver_t *d, pid_t pid, uint64_t addr, void *buf, size_t 
      * 驱动 ioctl/节点读失败 → 直接报错返回, 绝不留落到用户态
      * (裸 process_vm_readv / /proc/pid/mem), 避免语义不一致/可被检测的越界读取。
      * 调用方（搜索引擎等）已按实际返回字节数处理部分读。 */
-    if (d->ko_type == KO_TYPE_RWPROC) {
+    {
         if (d->rwproc_mem_fd < 0) {
             set_err(d, "rwproc node not open (attach failed?)");
             return -1;
@@ -1019,50 +505,11 @@ ssize_t driver_read(gg_driver_t *d, pid_t pid, uint64_t addr, void *buf, size_t 
         if (r >= 0) { atomic_fetch_add_explicit(&d->stat_reads, 1, memory_order_relaxed); return r; }
         return -1;   /* last_error 已由 rwproc_call 置好 */
     }
-    if (d->ko_type == KO_TYPE_QX) {
-        if (d->dev_fd < 0) {
-            set_err(d, "qx dev node not open (attach failed?)");
-            return -1;
-        }
-        if (qx_io(d, QX_OP_READ_MEM, pid, addr, buf, len) == 0) {
-            atomic_fetch_add_explicit(&d->stat_reads, 1, memory_order_relaxed);
-            return (ssize_t)len;
-        }
-        snprintf(d->last_error, sizeof(d->last_error),
-                 "qx read ioctl failed: %s", strerror(errno));
-        return -1;
-    }
-    if (d->ko_type == KO_TYPE_DEV) {
-        ssize_t r = dev_io(d, d->ioctl_read, pid, addr, buf, len);
-        if (r >= 0) { atomic_fetch_add_explicit(&d->stat_reads, 1, memory_order_relaxed); return r; }
-        if (d->last_error[0] == 0)
-            snprintf(d->last_error, sizeof(d->last_error),
-                     "dev read ioctl failed: %s", strerror(errno));
-        return -1;
-    }
-
-    /* ---- hook 型 KO: 内核 hook process_vm_readv, /proc/pid/mem 为内核兜底 ----
-     * 这两条都是内核通道（hook 接管 process_vm_readv）, 保留降级。 */
-    atomic_fetch_add_explicit(&d->stat_fallbacks, 1, memory_order_relaxed);
-    ssize_t r = vm_read(pid, buf, len, addr);
-    if (r >= 0) {
-        if (d->state != ST_DRIVER && d->state != ST_KO_HOOK) d->state = ST_PROC_VM;
-        return r;
-    }
-    r = mem_io(pid, buf, len, addr, 0);
-    if (r >= 0) {
-        if (d->state != ST_DRIVER && d->state != ST_KO_HOOK) d->state = ST_PROC_MEM;
-        return r;
-    }
-    snprintf(d->last_error, sizeof(d->last_error),
-             "read failed pid=%d addr=0x%llx len=%zu: %s",
-             pid, (unsigned long long)addr, len, strerror(errno));
-    return -1;
 }
 
 ssize_t driver_write(gg_driver_t *d, pid_t pid, uint64_t addr, const void *buf, size_t len) {
     /* 专用 KO 驱动: 内核通信唯一通道, 失败即报错, 不落用户态（同 driver_read） */
-    if (d->ko_type == KO_TYPE_RWPROC) {
+    {
         if (d->rwproc_mem_fd < 0) {
             set_err(d, "rwproc node not open (attach failed?)");
             return -1;
@@ -1071,48 +518,10 @@ ssize_t driver_write(gg_driver_t *d, pid_t pid, uint64_t addr, const void *buf, 
         if (r >= 0) { atomic_fetch_add_explicit(&d->stat_writes, 1, memory_order_relaxed); return r; }
         return -1;
     }
-    if (d->ko_type == KO_TYPE_QX) {
-        if (d->dev_fd < 0) {
-            set_err(d, "qx dev node not open (attach failed?)");
-            return -1;
-        }
-        if (qx_io(d, QX_OP_WRITE_MEM, pid, addr, (void *)buf, len) == 0) {
-            atomic_fetch_add_explicit(&d->stat_writes, 1, memory_order_relaxed);
-            return (ssize_t)len;
-        }
-        snprintf(d->last_error, sizeof(d->last_error),
-                 "qx write ioctl failed: %s", strerror(errno));
-        return -1;
-    }
-    if (d->ko_type == KO_TYPE_DEV) {
-        ssize_t r = dev_io(d, d->ioctl_write, pid, addr, (void *)buf, len);
-        if (r >= 0) { atomic_fetch_add_explicit(&d->stat_writes, 1, memory_order_relaxed); return r; }
-        if (d->last_error[0] == 0)
-            snprintf(d->last_error, sizeof(d->last_error),
-                     "dev write ioctl failed: %s", strerror(errno));
-        return -1;
-    }
-
-    /* hook 型 KO: 内核通道降级 */
-    atomic_fetch_add_explicit(&d->stat_fallbacks, 1, memory_order_relaxed);
-    ssize_t r = vm_write(pid, buf, len, addr);
-    if (r >= 0) {
-        if (d->state != ST_DRIVER && d->state != ST_KO_HOOK) d->state = ST_PROC_VM;
-        return r;
-    }
-    r = mem_io(pid, (void *)buf, len, addr, 1);
-    if (r >= 0) {
-        if (d->state != ST_DRIVER && d->state != ST_KO_HOOK) d->state = ST_PROC_MEM;
-        return r;
-    }
-    snprintf(d->last_error, sizeof(d->last_error),
-             "write failed pid=%d addr=0x%llx len=%zu: %s",
-             pid, (unsigned long long)addr, len, strerror(errno));
-    return -1;
 }
 
 void driver_close(gg_driver_t *d) {
-    if (d->ko_type == KO_TYPE_RWPROC) {
+    {
         if (d->rwproc_handle) {
             rwproc_call(d, d->rwproc_mem_fd, RWPROC_CMD_CLOSE_PROCESS,
                         d->rwproc_handle, 0, 0, NULL, 0);
@@ -1122,15 +531,11 @@ void driver_close(gg_driver_t *d) {
         if (d->rwproc_bp_fd >= 0) { close(d->rwproc_bp_fd); d->rwproc_bp_fd = -1; }
         return;
     }
-    if (d->dev_fd >= 0) { close(d->dev_fd); d->dev_fd = -1; }
 }
 
 const char *driver_state_str(int state) {
     switch (state) {
-    case ST_DRIVER:      return "kernel-driver (kernel module)";
-    case ST_KO_HOOK:     return "ko-hook (kernel hooks process_vm_readv)";
-    case ST_PROC_VM:     return "process_vm_readv (degraded)";
-    case ST_PROC_MEM:    return "/proc/pid/mem (degraded)";
-    default:             return "unavailable";
+    case ST_DRIVER:  return "kernel-driver (rwproc33)";
+    default:         return "unavailable";
     }
 }

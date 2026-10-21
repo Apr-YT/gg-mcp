@@ -40,13 +40,6 @@ int rwproc_hwbp_get_hits(gg_driver_t *d, uint64_t bp_id,
     return 0;
 }
 
-int qx_hwbp_get_hits(gg_driver_t *d, pid_t pid, uint64_t addr,
-                     qx_hwbp_hit_item_t *out, int cap, int *real) {
-    (void)d; (void)pid; (void)addr; (void)out; (void)cap; (void)real;
-    errno = EINVAL;              /* QX 路径不测: 恒失败 */
-    return -1;
-}
-
 /* watch_start/watch_stop 引用但测试不走的符号: 恒失败/无操作 */
 int rwproc_hwbp_start_all(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int len,
                           uint64_t *bp_ids, int max_bps, int *nb) {

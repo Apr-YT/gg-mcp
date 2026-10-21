@@ -148,36 +148,11 @@ int watch_start(gg_watch_t *w, gg_driver_t *drv, pid_t pid, uint64_t addr,
     if (type <= 0) type = HW_BP_TYPE_W;
     if (len <= 0) len = 4;
 
-    /* 路径 1: QX 驱动硬件断点（0x807 add + 0x809 enable） */
-    if (drv && drv->ko_type == KO_TYPE_QX && drv->dev_fd >= 0) {
-        errno = 0;
-        if (qx_hwbp_add(drv, pid, addr, type, len) != 0) {
-            snprintf(w->last_error, sizeof(w->last_error),
-                     "qx_hwbp_add(0x807 type=%d len=%d) failed: %s", type, len,
-                     strerror(errno));
-            return -1;
-        }
-        errno = 0;
-        if (qx_hwbp_enable(drv, pid) != 0) {
-            snprintf(w->last_error, sizeof(w->last_error),
-                     "qx_hwbp_enable(0x809) failed: %s", strerror(errno));
-            qx_hwbp_clear(drv, pid);
-            return -1;
-        }
-        w->use_driver = 1;
-        w->drv = drv;
-        w->active = 1;
-        snprintf(w->last_error, sizeof(w->last_error),
-                 "driver hwbp: pid %d addr 0x%llx type=%d len=%d", (int)pid,
-                 (unsigned long long)addr, type, len);
-        return 0;
-    }
-
-    /* 路径 2: rwproc33 驱动硬件断点（hwBreakpointProc_module, perf_event, 无密钥门控）。
+/* 路径 2: rwproc33 驱动硬件断点（hwBreakpointProc_module, perf_event, 无密钥门控）。
      * 驱动 read() 命令分发 + CMD 13 INST_PROCESS_HWBP_ALL: 驱动内 for_each_thread 枚举
      * 进程全部线程各注册一个断点（per-task 断点, 任务切换自动换装, 不受每 CPU WRP 4 槽限）。
      * 一次调用全覆盖, 不依赖用户态枚举线程。 */
-    if (drv && drv->ko_type == KO_TYPE_RWPROC && drv->rwproc_bp_fd >= 0) {
+    if (drv && drv->rwproc_bp_fd >= 0) {
         int nb = 0;
         if (rwproc_hwbp_start_all(drv, pid, addr, type, len,
                                   w->rwproc_bp_ids, GG_RWPROC_MAX_BPS, &nb) != 0) {
@@ -280,14 +255,6 @@ void watch_stop(gg_watch_t *w) {
         w->active = 0;
         w->hit_count = 0;
         w->rwproc_bp_count = 0;
-        return;
-    }
-    if (w->use_driver) {
-        qx_hwbp_clear(w->drv, w->pid);
-        w->use_driver = 0;
-        w->drv = NULL;
-        w->active = 0;
-        w->hit_count = 0;
         return;
     }
     w->stop = 1;
@@ -412,28 +379,6 @@ int watch_poll(gg_watch_t *w, gg_driver_t *drv, gg_watch_hit_t *out, int cap) {
             w->rwproc_hit_consumed[b] = start + (uint64_t)this_bp;
         }
         free(items);
-        return n;
-    }
-    if (w->use_driver) {
-        qx_hwbp_hit_item_t items[64];
-        int real = 0;
-        if (qx_hwbp_get_hits(w->drv, w->pid, w->bp_addr, items, 64, &real) != 0) return 0;
-        if (real > 64) real = 64;
-        int n = real < cap ? real : cap;
-        for (int i = 0; i < n; i++) {
-            out[i].tid = items[i].task_id;
-            out[i].pc = items[i].regs.pc;
-            out[i].addr = items[i].hit_addr;
-            out[i].r0 = items[i].regs.regs[0];
-            out[i].r1 = items[i].regs.regs[1];
-            out[i].r2 = items[i].regs.regs[2];
-            out[i].r3 = items[i].regs.regs[3];
-            out[i].r4 = items[i].regs.regs[4];
-            out[i].fp = items[i].regs.regs[29];
-            out[i].sp = items[i].regs.sp;
-            out[i].lr = items[i].regs.regs[30];
-            enrich_hit(w->drv, w->pid, &out[i]);
-        }
         return n;
     }
     int n = 0;

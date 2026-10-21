@@ -147,11 +147,8 @@ enum gg_region {
 
 /* 会话/引擎状态，供 KERNEL_STATUS / STATUS 使用 */
 enum gg_engine_state {
-    ST_DRIVER = 1,       /* 内核驱动通道可用（dev 型 KO 或 KPM） */
-    ST_PROC_VM = 2,      /* 降级: process_vm_readv */
-    ST_PROC_MEM = 3,     /* 降级: /proc/pid/mem */
-    ST_UNAVAILABLE = 4,
-    ST_KO_HOOK = 5       /* hook 型 KO 生效: 内核已 hook process_vm_readv */
+    ST_DRIVER = 1,       /* 内核驱动通道可用（rwproc33） */
+    ST_UNAVAILABLE = 4   /* 通道不可用；2/3/5 为已删除的降级态，不再产生 */
 };
 
 /* 公共请求/响应字段名（JSON payload 约定） */

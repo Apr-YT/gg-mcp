@@ -4,7 +4,6 @@
  * 协议见 shared/wire_protocol.h（20 字节二进制头 + JSON 负载）。
  *
  * 用法: [--port 34127] [--driver ioctl|supercall|auto]
- *                [--ioctl-read 0x7e1a] [--ioctl-write 0x7e1b]
  *                [--supercall 45] [--log /path/log] [--safe]
  */
 #include "../shared/wire_protocol.h"
@@ -1394,23 +1393,19 @@ static void h_kernel_status(int fd, uint32_t seq, cJSON *p) {
     uint64_t reads  = atomic_load_explicit(&d->stat_reads, memory_order_relaxed);
     uint64_t writes = atomic_load_explicit(&d->stat_writes, memory_order_relaxed);
     uint64_t falls  = atomic_load_explicit(&d->stat_fallbacks, memory_order_relaxed);
-    int ko_type   = __atomic_load_n(&d->ko_type, __ATOMIC_RELAXED);
     int ko_loaded = __atomic_load_n(&d->ko_loaded, __ATOMIC_RELAXED);
-    int qx_key    = __atomic_load_n(&d->qx_have_key, __ATOMIC_RELAXED);
-    int ioctl_r   = __atomic_load_n(&d->ioctl_read, __ATOMIC_RELAXED);
-    int ioctl_w   = __atomic_load_n(&d->ioctl_write, __ATOMIC_RELAXED);
     int frozen    = freeze_count(&g_eng.freeze);
     int safe      = __atomic_load_n(&g_eng.safe_mode, __ATOMIC_RELAXED);
     int shell     = __atomic_load_n(&g_eng.shell_enabled, __ATOMIC_RELAXED);
     int s_pid     = __atomic_load_n(&g_eng.session_pid, __ATOMIC_RELAXED);
-    char err[256], ko_mod[256], ko_file[512], ko_ver[64], dev_p[128], s_name[256];
+    char err[256], ko_mod[256], ko_file[512], ko_ver[64], s_name[256];
 #define SNAP(dst, src) do { \
         strncpy((dst), (src), sizeof(dst) - 1); \
         (dst)[sizeof(dst) - 1] = 0; \
     } while (0)
     SNAP(err, d->last_error);   SNAP(ko_mod, d->ko_module);
     SNAP(ko_file, d->ko_file);  SNAP(ko_ver, d->ko_version);
-    SNAP(dev_p, d->dev_path);   SNAP(s_name, g_eng.session_name);
+    SNAP(s_name, g_eng.session_name);
 #undef SNAP
     int w_active = __atomic_load_n(&g_watch.active, __ATOMIC_RELAXED);
     int w_pid    = __atomic_load_n(&g_watch.pid, __ATOMIC_RELAXED);
@@ -1423,15 +1418,10 @@ static void h_kernel_status(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddNumberToObject(r, "writes", (double)writes);
     cJSON_AddNumberToObject(r, "fallbacks", (double)falls);
     cJSON_AddStringToObject(r, "error", err);
-    cJSON_AddNumberToObject(r, "ko_type", ko_type);
     cJSON_AddBoolToObject(r, "ko_loaded", ko_loaded ? 1 : 0);
     cJSON_AddStringToObject(r, "ko_module", ko_mod);
     cJSON_AddStringToObject(r, "ko_file", ko_file);
     cJSON_AddStringToObject(r, "ko_version", ko_ver);
-    cJSON_AddStringToObject(r, "dev_path", dev_p);
-    cJSON_AddBoolToObject(r, "qx_key_set", qx_key ? 1 : 0);
-    cJSON_AddNumberToObject(r, "ioctl_read", ioctl_r);
-    cJSON_AddNumberToObject(r, "ioctl_write", ioctl_w);
     cJSON_AddNumberToObject(r, "frozen", (double)frozen);
     cJSON_AddBoolToObject(r, "safe_mode", safe ? 1 : 0);
     /* ---- O2 可观测性扩展：只读暴露已有字段, 零行为变化 ----
@@ -1810,13 +1800,11 @@ int main(int argc, char **argv) {
        dtype 等若直接指向 argv[i]，被 memset 后变空串 → strcmp 全失败 →
        误走默认 hook 型（用户态 process_vm_readv，违反内核通道纪律）。
        修复（2026-08-19）：解析时一律 snprintf 到本地 buffer。 */
-    static char dtype_buf[16], ko_dir_buf[256], ko_file_buf[512];
-    static char dev_path_buf[128], qx_key_buf[0x100];
+    static char dtype_buf[16], ko_dir_buf[256];
     static char rwproc_key_buf[128], rwproc_bp_key_buf[128], logpath_buf[256];
     static char ko_pattern_buf[64];
     static char wire_key_buf[65], wire_key_file_buf[256];
-    const char *dtype = dtype_buf, *ko_dir = ko_dir_buf, *ko_file = ko_file_buf;
-    const char *dev_path = dev_path_buf, *qx_key = qx_key_buf;
+    const char *dtype = dtype_buf, *ko_dir = ko_dir_buf;
     const char *rwproc_key = rwproc_key_buf, *rwproc_bp_key = rwproc_bp_key_buf;
     const char *logpath = logpath_buf, *ko_pattern = ko_pattern_buf;
     int port = 34127;            /* 非常见高位端口，避免 19100 等默认值被扫 */
@@ -1824,11 +1812,9 @@ int main(int argc, char **argv) {
     snprintf(ko_dir_buf, sizeof(ko_dir_buf), "%s",
              "/data/adb/vendor_security/ko");  /* 避开 /data/local/tmp（ACE 重点扫描） */
     snprintf(ko_pattern_buf, sizeof(ko_pattern_buf), "%s", "6.12.*");
-    ko_file_buf[0] = dev_path_buf[0] = qx_key_buf[0] = 0;
     rwproc_key_buf[0] = rwproc_bp_key_buf[0] = logpath_buf[0] = 0;
     wire_key_buf[0] = wire_key_file_buf[0] = 0;
     int ko_strict = 1;
-    int ioctl_read = 0x7e1a, ioctl_write = 0x7e1b;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) port = atoi(argv[++i]);
@@ -1836,17 +1822,9 @@ int main(int argc, char **argv) {
             snprintf(dtype_buf, sizeof(dtype_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--ko-dir") == 0 && i + 1 < argc)
             snprintf(ko_dir_buf, sizeof(ko_dir_buf), "%s", argv[++i]);
-        else if (strcmp(argv[i], "--ko-file") == 0 && i + 1 < argc)
-            snprintf(ko_file_buf, sizeof(ko_file_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--ko-pattern") == 0 && i + 1 < argc)
             snprintf(ko_pattern_buf, sizeof(ko_pattern_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--ko-strict") == 0 && i + 1 < argc) ko_strict = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--dev") == 0 && i + 1 < argc)
-            snprintf(dev_path_buf, sizeof(dev_path_buf), "%s", argv[++i]);
-        else if (strcmp(argv[i], "--ioctl-read") == 0 && i + 1 < argc) ioctl_read = (int)strtol(argv[++i], NULL, 0);
-        else if (strcmp(argv[i], "--ioctl-write") == 0 && i + 1 < argc) ioctl_write = (int)strtol(argv[++i], NULL, 0);
-        else if (strcmp(argv[i], "--qx-key") == 0 && i + 1 < argc)
-            snprintf(qx_key_buf, sizeof(qx_key_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--rwproc-key") == 0 && i + 1 < argc)
             snprintf(rwproc_key_buf, sizeof(rwproc_key_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--rwproc-bp-key") == 0 && i + 1 < argc)
@@ -1913,68 +1891,30 @@ int main(int argc, char **argv) {
     log_msg("starting (port=%d driver=%s ko_dir=%s pattern=%s strict=%d safe=%d)",
             port, dtype, ko_dir, ko_pattern, ko_strict, g_eng.safe_mode);
 
-    if (strcmp(dtype, "qx") == 0) {
-        driver_init_qx(&g_eng.drv, qx_key);
-    } else if (strcmp(dtype, "rwproc") == 0) {
-        driver_init_rwproc(&g_eng.drv, rwproc_key, rwproc_bp_key);
-    } else {
-        driver_init(&g_eng.drv, dtype, dev_path, ioctl_read, ioctl_write);
-    }
+    driver_init_rwproc(&g_eng.drv, rwproc_key, rwproc_bp_key);
     freeze_init(&g_eng.freeze, &g_eng.drv);
     results_init(&g_eng.results, g_eng.result_cap);
 
-    /* 加载/对接驱动（qx/rwproc 型为发现+对接；其余为 insmod） */
-    int lrc;
-    if (g_eng.drv.ko_type == KO_TYPE_QX) {
-        lrc = qx_attach(&g_eng.drv);
-        if (lrc != 0) {
-            log_msg("qx_attach failed: %s", g_eng.drv.last_error);
-        } else {
-            log_msg("qx attached: %s", g_eng.drv.ko_file);
-        }
-    } else if (g_eng.drv.ko_type == KO_TYPE_RWPROC) {
-        lrc = rwproc_attach(&g_eng.drv);
-        if (lrc != 0) {
-            log_msg("rwproc_attach failed: %s", g_eng.drv.last_error);
-        } else {
-            log_msg("rwproc attached: %s", g_eng.drv.ko_file);
-        }
+    /* 对接 rwproc33：模块由 install_ko.sh 预先 insmod，这里只做节点发现 + 打开。
+     * 不在 agentd 里 insmod —— 该模块 hide_by_default，重复 insmod 会 EEXIST。 */
+    if (rwproc_attach(&g_eng.drv) != 0) {
+        log_msg("rwproc_attach failed: %s", g_eng.drv.last_error);
     } else {
-        lrc = ko_load(&g_eng.drv, ko_dir, ko_file, ko_pattern, ko_strict);
-        if (lrc != 0) {
-            log_msg("ko_load failed: %s", g_eng.drv.last_error);
-        } else {
-            log_msg("ko loaded: %s (module=%s version=%s type=%s)",
-                    g_eng.drv.ko_file, g_eng.drv.ko_module, g_eng.drv.ko_version,
-                    g_eng.drv.ko_type == KO_TYPE_DEV ? "dev" : "hook");
-        }
+        log_msg("rwproc attached: %s", g_eng.drv.ko_file);
     }
 
     int st = driver_self_test(&g_eng.drv);
     log_msg("driver self-test: %s (%s)",
-            st > 0 ? "channel OK" : (st == 0 ? "degraded" : "UNAVAILABLE"),
+            st > 0 ? "channel OK" : "UNAVAILABLE",
             driver_state_str(g_eng.drv.state));
-    /* hook 型的常见情形：内核里已有 hook（开机脚本或别的途径加载），
-     * 本进程不需要再 insmod，于是上面的 ko_load 必然失败并写下
-     * "no .ko file found in ko dir"。但通道其实可用 —— 这条错误留着会让
-     * gg_kernel_status 一直误报，看起来像驱动没工作。通道自检通过就清掉它。 */
-    if (st > 0 && g_eng.drv.state == ST_KO_HOOK && g_eng.drv.last_error[0]) {
-        log_msg("driver: clearing stale error (channel OK): %s", g_eng.drv.last_error);
-        g_eng.drv.last_error[0] = 0;
-    }
     if (st < 0) {
-        log_msg("WARNING: all memory channels unavailable; attach/search will fail");
+        log_msg("WARNING: rwproc channel unavailable; attach/search will fail");
     }
 
-    /* 同步 GG hook 的驱动协议环境（loader_load 时写入 lib5_hook.conf）。
-     * rwproc33 后端暂不接入 GG 核心 hook（libKernelGg.so 仅支持 dev/qx），
-     * 此时 GG 核心加载回退 process_vm_readv，agentd 自身引擎不受影响。 */
-    {
-        const char *proto = g_eng.drv.ko_type == KO_TYPE_QX ? "qx" :
-                            g_eng.drv.ko_type == KO_TYPE_DEV ? "dev" : "hook";
-        loader_set_hook_env(proto, g_eng.drv.dev_path,
-                            g_eng.drv.qx_have_key ? g_eng.drv.qx_key : NULL);
-    }
+    /* 同步 GG hook 的协议环境（loader_load 时写入 lib5_hook.conf）。
+     * libKernelGg.so 只认 qx/dev 两种 proto，其余值（含 "rwproc"）走直通真实
+     * syscall —— 即 GG 核心用原生 process_vm_readv，靠 root 权限工作。 */
+    loader_set_hook_env("rwproc", NULL, NULL);
 
     int sfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sfd < 0) { perror("socket"); return 1; }

@@ -2,11 +2,14 @@
 """check_kernel_only.py — 内核通信护栏（"只走内核通信，不要用户层面"）
 
 断言 agentd/driver.c 满足约束：
-  1) driver_read / driver_write 中，KO_TYPE_RWPROC / KO_TYPE_QX / KO_TYPE_DEV
-     专用 KO 驱动分支内不得出现 vm_read() / vm_write() / mem_io() 调用
-     （裸 process_vm_readv / /proc/pid/mem 属用户态方法，驱动失败应报错而非降级）。
-  2) driver_self_test 中，vm_read() / mem_io() 调用必须位于 KO_TYPE_HOOK 分支内；
-     其它专用驱动型不得被裸 process_vm_readv 假阳性掩盖为可用。
+  1) driver_read / driver_write 中不得出现 vm_read() / vm_write() / mem_io()
+     （裸 process_vm_readv / /proc/pid/mem 属用户态通道；驱动失败应报错而非降级）
+     且必须实际调用 rwproc_read_mem / rwproc_write_mem。
+  2) driver_self_test 同上，且必须用 rwproc 回环自检。
+
+  背景（2026-10-21）：hook / dev / qx 三型已删除，全仓只剩 rwproc33。
+  旧规则要求「专用驱动分支内不得降级」，现在没有分支了，改成「整个函数不得出现
+  用户态通道」，等价且更强。
 
 用法: python check_kernel_only.py <gg-root>
 退出码: 0=通过, 1=违反, 2=参数/IO 错误
@@ -15,7 +18,7 @@ import re
 import sys
 
 USER_LEVEL_CALLS = ("vm_read(", "vm_write(", "mem_io(")
-DRV_TYPES = ("KO_TYPE_RWPROC", "KO_TYPE_QX", "KO_TYPE_DEV")
+DRV_TYPES = ("KO_TYPE_RWPROC",)
 
 
 def find_func(lines, name):
@@ -74,44 +77,32 @@ def main():
 
     fails = []
 
-    # 1) driver_read / driver_write: 专用驱动分支内不得有用户态调用
-    for fn in ("driver_read", "driver_write"):
+    # 1) driver_read / driver_write: 不得出现用户态通道，且必须走 rwproc
+    for fn, need in (("driver_read", "rwproc_read_mem("),
+                     ("driver_write", "rwproc_write_mem(")):
         span = find_func(lines, fn)
         if not span:
             fails.append(f"{fn}: function body not found")
             continue
         body = lines[span[0]:span[1] + 1]
-        for t in DRV_TYPES:
-            blk = find_if_block(body, 1, r"if\s*\(d->ko_type\s*==\s*" + t)
-            if not blk:
-                fails.append(f"{fn}: {t} branch not found")
-                continue
-            hits = user_calls_in(block_text(body, blk))
-            if hits:
-                fails.append(
-                    f"{fn}/{t}: user-level call(s) inside dedicated KO branch: {sorted(set(hits))}")
+        hits = user_calls_in("".join(body))
+        if hits:
+            fails.append(f"{fn}: user-level memory call(s) present: {sorted(set(hits))}")
+        if need not in "".join(body):
+            fails.append(f"{fn}: must call {need}")
 
-    # 2) driver_self_test: 用户态调用只能在 KO_TYPE_HOOK 块内
+    # 2) driver_self_test: 同样不得出现用户态通道，且必须用 rwproc 回环
     span = find_func(lines, "driver_self_test")
     if not span:
         fails.append("driver_self_test: function body not found")
     else:
         body = lines[span[0]:span[1] + 1]
-        blk = find_if_block(body, 1, r"if\s*\(d->ko_type\s*==\s*KO_TYPE_HOOK")
-        if not blk:
-            fails.append("driver_self_test: KO_TYPE_HOOK branch not found")
-        else:
-            txt = block_text(body, blk)
-            for c in ("vm_read(", "mem_io("):
-                if c not in txt:
-                    fails.append(f"driver_self_test: {c} must be inside KO_TYPE_HOOK branch")
-        for t in DRV_TYPES:
-            blk = find_if_block(body, 1, r"if\s*\(d->ko_type\s*==\s*" + t)
-            if blk:
-                hits = user_calls_in(block_text(body, blk))
-                if hits:
-                    fails.append(
-                        f"driver_self_test/{t}: user-level call inside branch: {sorted(set(hits))}")
+        hits = user_calls_in("".join(body))
+        if hits:
+            fails.append(
+                f"driver_self_test: user-level memory call(s) present: {sorted(set(hits))}")
+        if "rwproc_read_mem(" not in "".join(body):
+            fails.append("driver_self_test: must verify via rwproc_read_mem()")
 
     if fails:
         print("[FAIL] kernel-only guardrail violations:")
