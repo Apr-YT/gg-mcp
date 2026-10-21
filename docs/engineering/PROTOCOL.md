@@ -132,7 +132,7 @@ read(fd, buf, 33 + data_size)   // 头在 buf[0..32], 数据区在 buf[33..]
 x0-x30/sp/pc/pstate**（比 QX 的 r0-r4 丰富）。命中列表累计不清零（上限 1024），
 agentd 侧按已消费数去重。默认 AUTH_KEY 见两模块 `ver_control.h`
 （`e84523d7...` / `dce37716...`，建议编译时改掉），适配实现见
-`docs/RWPROC33_ADAPTER.md`。
+`docs/engineering/RWPROC33_ADAPTER.md`。
 
 ### 2.6 自检标准（gg_kernel_status）
 

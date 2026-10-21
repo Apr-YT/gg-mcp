@@ -111,7 +111,7 @@ wtest 之所以全通，是因为它根本没设 SO_RCVTIMEO（纯阻塞读）�
 | 10 | 同连接第 2 次调用超时 WSAETIMEDOUT(10060) ≈300ms | Windows `setsockopt(SO_RCVTIMEO)` 期望 **DWORD 毫秒值**，代码却传 8 字节 `timeval{300,0}` → 前 4 字节 = 300ms；慢调用（gg_core_versions ~600ms）必超时 | 平台分支：Windows 传 `DWORD io_ms`，POSIX 传 timeval；真机同连接 4 帧全通 |
 | 11 | 64 位进程 attach 误报 "32-bit target not supported" | `process_is_64bit` 只看 **maps 首行**地址宽度；64 位 ART 进程首行常是低地址 dalvik 匿名映射（boot.art @0x02ddc000, 8 位 hex）→ 误判 32 位（登山赛车 arm64 中招） | 改为：优先看 exe 链接（app_process64/32），否则**扫描全部 maps**，任一地址 >8 位 hex 即 64 位 |
 | 12 | `gg_kernel_load_gg` 报 permission denied | loader 直接 `O_TRUNC` 覆盖 **正在被 GG 核心 exec 运行**的 lib5.so → 内核 ETXTBSY ("Text file busy") | `install_file()`：写临时文件后 **rename 覆盖**（rename 运行中可执行文件合法）；loader_restore 同样处理 |
-| 13 | **rwProcMem33 hwBreakpointProc_module：`gg_watch_set` 触发内核静默挂死/看门狗重启** | **命令枚举错位**：模块头枚举从 0 开始（`CMD_OPEN_PROCESS=0`），用户态（agentd `RWBP_CMD_*`/协议）按 1 起始 → 所有命令错位 +1。`gg_watch_set` 发 cmd=1（以为 OPEN）实际触发 CLOSE → `put_pid((struct pid*)pid)` 解引用用户态整数 → 内核数据异常 → 整机挂死（设备 `panic=-1` + 看门狗重启，零内核日志） | 模块枚举显式 `=1` 起始（`CMD_OPEN_PROCESS=1...CMD_HIDE_KERNEL_MODULE=12`）。另做防御性修复：命中回调改 raw_spinlock+预分配缓冲（原 mutex/vmalloc/modify 在 ARM64 调试异常上下文必崩）、命中后清硬件槽 E 位防重入、禁用 MODIFY_HIT_NEXT_MODE/ANTI_PTRACE/hide kprobe。真机全流程验证通过。详见 `docs/RWPROC33_ADAPTER.md §10.4` |
+| 13 | **rwProcMem33 hwBreakpointProc_module：`gg_watch_set` 触发内核静默挂死/看门狗重启** | **命令枚举错位**：模块头枚举从 0 开始（`CMD_OPEN_PROCESS=0`），用户态（agentd `RWBP_CMD_*`/协议）按 1 起始 → 所有命令错位 +1。`gg_watch_set` 发 cmd=1（以为 OPEN）实际触发 CLOSE → `put_pid((struct pid*)pid)` 解引用用户态整数 → 内核数据异常 → 整机挂死（设备 `panic=-1` + 看门狗重启，零内核日志） | 模块枚举显式 `=1` 起始（`CMD_OPEN_PROCESS=1...CMD_HIDE_KERNEL_MODULE=12`）。另做防御性修复：命中回调改 raw_spinlock+预分配缓冲（原 mutex/vmalloc/modify 在 ARM64 调试异常上下文必崩）、命中后清硬件槽 E 位防重入、禁用 MODIFY_HIT_NEXT_MODE/ANTI_PTRACE/hide kprobe。真机全流程验证通过。详见 `docs/engineering/RWPROC33_ADAPTER.md §10.4` |
 | 14 | **`gg_search` 大范围匿名区死循环卡死（250s+ 不返回），agentd 表现"被杀/无响应"** | **rwproc 驱动对无效/只读页返回 0 字节（非负）**，`search_exact` 只处理 `got < 0`：`got==0 → rd=0 → len 不减` → 同一地址无限重读（strace 实测每 50μs 一次 `read(4,"",262177)=0`），持 `g_eng.mtx` 占满 CPU，其他连接全部阻塞，表现类似 agentd 崩溃/被杀（无 tombstone、无 crash 记录，dmesg 只见 init 的 Untracked SIGTERM/SIGKILL） | `search_exact`/`search_range`/`search_refine` 三处 `if (got < 0)` 改 `if (got <= 0)`：空读也推进块（`len-=rd; addr+=rd`），杜绝死循环。真机验证：登山赛车匿名区搜索 9999 → 250s 死循环 → **270ms 返回 count=31**；连续 3 次大搜索 250-350ms 稳定返回；itest/PC 单测全过 |
 | 15 | **`gg_watch_inject`/断点命中 enrich 时 agentd 段错误崩溃（SIGSEGV, tombstone 有记录）** | **use-after-free**：`process_resolve_addr`（process.c）中 `hit_path` 指向 `maps` 数组内部，`free(maps)` 释放后仍 `snprintf(path, pathsz, "%s", hit_path)` → 堆复用后读到垃圾地址 → `__strlen_aarch64` 崩溃（tombstone: `#04 process_resolve_addr+268`）。watchtest 测试碰巧堆内容未破坏所以成功；游戏进程 maps 大、堆复用激进时必崩 | `free(maps)` 前先把 `hit_path` 拷贝到局部缓冲（`hit_path_copy[GG_MOD_NAME_MAX]`）。真机验证：`gg_watch_inject` 对游戏 libgame.so 注入 pc → 不再崩溃，正确解析 `module=libgame.so base=0x7aa1a74000 offset=0xac000`；watchtest 全流程（attach→watch_set→poll→64 命中→module/offset/stack）正常；itest 无回归 |
 
@@ -222,7 +222,7 @@ AI 客户端配置见 `scripts/mcp_config.example.json`（stdio 与 http 两种�
 | `shared/wire_protocol.h` | PC↔设备协议唯一事实源 |
 | `scripts/` | 构建/部署/启动/KO 安装/verify |
 | `tests/` | 单测（PC）+ 设备测试（itest 引擎全链路 / ltest loader / qtest QX 发现 / wtest wire 客户端） |
-| `docs/` | ARCHITECTURE / PROTOCOL（含 QX 协议） / VERSION_MATCHING / ACCEPTANCE |
+| `docs/engineering/` | ARCHITECTURE / PROTOCOL（含 QX 协议） / VERSION_MATCHING / ACCEPTANCE |
 
 ## 9. 合规提醒
 

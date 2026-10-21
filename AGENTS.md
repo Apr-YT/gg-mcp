@@ -16,7 +16,7 @@ tests/     unit（posix_stub 可 PC 跑）/ integration / regression 三层
 scripts/   构建（build_pc.bat / build_ndk.bat / build_all.bat）、部署、测试、基准
 configs/   gg-ghost.json（serial/端口/KO 类型）
 tools/     辅助脚本（cfm_coord_read.py 等）
-docs/      工程文档 + 逆向研究笔记混放（待分目录）
+docs/      engineering/（工程文档）+ research/（逆向研究笔记，仅限本仓），索引见 docs/README.md
 ```
 
 ## 构建与验证
@@ -62,7 +62,8 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
 2. wire 协议：1MiB 上限无分片（`GGWM_MAX_PAYLOAD`）；XOR seed 固定 `0xA5`（`shared/wire_protocol.h`）；serial 硬编码在 config。
    - 实测余量：`gg_get_results` 上限 10000 条 × 约 90B ≈ **900KB**，距 1MiB 仅剩约 12%。
      → **补分片之前不要上调 limit**，否则单帧会被 `read_frame` 直接判非法。
-3. `docs/` 工程文档与逆向研究笔记混放，待分目录（研究笔记仅限本仓，不外发）。
+3. ~~`docs/` 工程文档与逆向研究笔记混放，待分目录~~ —— 2026-10-21 已分为 `docs/engineering/` / `docs/research/`，
+   索引见 `docs/README.md`（研究笔记仅限本仓，不外发）。
 4. `archive/framework_v1/` 全量版框架（perf/atomic/error/mempool/conn_pool/io_batch）未接线，后续要么启用要么删除。
 
 ### 已清（2026-10-15，本机实测）
@@ -86,12 +87,12 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
 CI 三 job 重写（v4 + Windows 单测 + NDK 构建）；lint.bat 重写落地；双套模块收敛（simple 版留用，全量版入 archive）；
 `run_tests.bat` 修复（ASCII/链接顺序/编码）并全绿；`build_ndk` 补 driver.c + 删 shell_util.c 幽灵引用；`deploy.bat` 产物对齐。
 
-详细评审见 `docs/OPTIMIZATION_SUMMARY.md`（08-22 记录，文首有 08-28 更正声明，**该文档部分声明不实，以更正声明为准**）。
+详细评审见 `docs/engineering/OPTIMIZATION_SUMMARY.md`（08-22 记录，文首有 08-28 更正声明，**该文档部分声明不实，以更正声明为准**）。
 
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
-- 敏感研究笔记（ACE/反作弊对抗）只放 docs/，不外发；驱动密钥、QX_KEY 等不入库不入对话
+- 敏感研究笔记（ACE/反作弊对抗）只放 `docs/research/`，不外发；驱动密钥、QX_KEY 等不入库不入对话
 - 设备端改动必须在真机过 itest（scripts/deploy.bat 部署后跑 tests/integration/run_itest.ps1）
 - 特征字符串纪律：agentd 二进制 strings 不得出现 GG-Ghost / gg-touch / GG_KO 等特征（历史提交 88d83cc、21b246d 有验证方法）
 - `.bat` 一律 ASCII-only 注释：cmd 按 ANSI（GBK）解析批处理，UTF-8 中文会吞掉 `^` 续行并破坏脚本
@@ -99,4 +100,4 @@ CI 三 job 重写（v4 + Windows 单测 + NDK 构建）；lint.bat 重写落地�
 ## 历史
 
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
-旧版工作区指令（apk/ggtool 时代）归档在 `docs/AGENTD_HISTORY.md`。
+旧版工作区指令（apk/ggtool 时代）归档在 `docs/engineering/AGENTD_HISTORY.md`。

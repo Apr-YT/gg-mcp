@@ -3,7 +3,7 @@
 """
 cfm_coord_read.py —— 穿越火线手游(CFM, com.tencent.tmgp.cf) 坐标无痕读取器
 
-设计前提（来自 gg/docs/CF-ESP代码框架.md + 坐标加密对抗方法.md）：
+设计前提（来自 docs/research/CF-ESP代码框架.md + 坐标加密对抗方法.md）：
   * CFM = Unity/il2cpp 引擎，坐标值是**明文 Vec3**，存于运行时提取的字段偏移，
     没有 DFM(三角洲/Unreal) 那种 shellcode 值加密 —— 无需 Unicorn 解密。
   * 读取走 gg 内核驱动(rwproc33/apr_dlkm)，经 MCP(http://127.0.0.1:8788/mcp)：

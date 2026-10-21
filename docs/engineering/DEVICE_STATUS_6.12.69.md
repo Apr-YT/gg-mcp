@@ -227,10 +227,10 @@ adb shell 'ls /sys/fs/pstore/ && cat /sys/fs/pstore/dmesg-ramoops-*'
 
 ## 📚 相关文档
 
-- `docs/OPTIMIZATION_SUMMARY.md` - 本次优化总结
-- `docs/RWPROC33_ADAPTER.md` - RWPROC33适配文档
-- `docs/ARCHITECTURE.md` - 架构文档
-- `docs/PROTOCOL.md` - 协议文档
+- `docs/engineering/OPTIMIZATION_SUMMARY.md` - 本次优化总结
+- `docs/engineering/RWPROC33_ADAPTER.md` - RWPROC33适配文档
+- `docs/engineering/ARCHITECTURE.md` - 架构文档
+- `docs/engineering/PROTOCOL.md` - 协议文档
 
 ---
 

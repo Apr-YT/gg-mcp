@@ -362,4 +362,4 @@ libCrashSight.so  libMSDKUnityAdapter.so
 
 ## 十一、三角洲行动手游 ACE（已拆分独立文档）
 
-三角洲手游的 ACE 集成深度、威胁判定、坐标加密机制、无痕读取+解密方案，已拆分至独立文档 **`gg/docs/三角洲行动手游ACE分析.md`**（同源同构腾讯 ACE、无内核模块、坐标 shellcode 加密、rwproc33 无痕解密等全部内容）。本节不重复，避免与 CF 本文档混放。
+三角洲手游的 ACE 集成深度、威胁判定、坐标加密机制、无痕读取+解密方案，已拆分至独立文档 **`docs/research/三角洲行动手游ACE分析.md`**（同源同构腾讯 ACE、无内核模块、坐标 shellcode 加密、rwproc33 无痕解密等全部内容）。本节不重复，避免与 CF 本文档混放。

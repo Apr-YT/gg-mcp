@@ -88,4 +88,4 @@
 
 ---
 
-> 注：工具侧反检测伪装措施（apr_dlkm / aq_* 符号 / dspbridge / ksud→adspd 等）已归入 **gg 项目文档** `gg/docs/GG-GHOST.md` 第十五章「反检测伪装措施清单（对抗 ACE）」，本文不重复。
+> 注：工具侧反检测伪装措施（apr_dlkm / aq_* 符号 / dspbridge / ksud→adspd 等）已归入 **gg 项目文档** `docs/engineering/GG-GHOST.md` 第十五章「反检测伪装措施清单（对抗 ACE）」，本文不重复。
