@@ -51,5 +51,22 @@ if (-not $memKey) { Write-Host "  警告: 未从 start_agentd.sh 读到 RWPROC_M
 $remote = if ($memKey) { "GG_MEM_KEY=$memKey GG_BP_KEY=$bpKey $DevDir/itest" } else { "$DevDir/itest" }
 # adb 会把进度/提示写到 stderr，Stop 模式下会被当致命错误；真正失败由 itest 退出码体现
 $ErrorActionPreference = 'Continue'
-& $Adb shell "su -c '$remote'"
+# 2026-10-21 fix: 这里原来跑完就直接打印「== 完成 ==」并以 0 退出，从不检查 itest 的
+# 退出码 —— itest 里的 FATAL（如 rwproc_attach 打不开节点）会被完全吞掉，
+# test_all.bat 于是把一次失败的集成测试当成通过（假绿）。
+# 双保险：既读 adb 转发的 $LASTEXITCODE，也让远端显式 echo 一次退出码
+# （部分 adb 版本不转发 su -c 的退出状态，单靠前者会漏判）。
+$remoteProbe = "su -c '$remote'; echo __ITEST_RC=`$?"
+$out = & $Adb shell $remoteProbe
+$itestRc = -1
+foreach ($line in $out) {
+    if ($line -match '__ITEST_RC=(\d+)') { $itestRc = [int]$Matches[1] }
+    else { Write-Host $line }
+}
+if ($itestRc -eq -1 -and $LASTEXITCODE -ne 0) { $itestRc = $LASTEXITCODE }
+if ($itestRc -ne 0) {
+    Write-Host "== 失败: itest 退出码 $itestRc ==" -ForegroundColor Red
+    exit 1
+}
 Write-Host "== 完成 ==" -ForegroundColor Green
+exit 0

@@ -26,9 +26,11 @@ if not exist "%CFG%" (
 
 echo [1/3] starting server...
 start "gg-ghost-mcp" /B "%EXE%" --config "%CFG%" --transport http --port 8788
-rem NOTE: fully-qualified timeout - a bare `timeout` is shadowed by Git-Bash/MSYS
-rem coreutils' GNU timeout, which rejects /t and silently skips the wait.
-"%SystemRoot%\System32\timeout.exe" /t 3 /nobreak >nul
+REM 2026-10-21 fix: timeout.exe aborts with "Input redirection is not supported" when
+REM there is no console (start /B + redirected streams), so the intended 3s wait never
+REM happened -- the health check was racing the server start. ping -n is the only
+REM stdin-independent delay available here.
+ping -n 4 127.0.0.1 >nul
 
 echo.
 echo [2/3] HTTP health check...
