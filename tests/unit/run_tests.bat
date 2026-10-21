@@ -113,15 +113,6 @@ echo === test_freeze ===
 "%ROOT%\build\pc\test_freeze.exe"
 if errorlevel 1 ( echo [FAIL] test_freeze & exit /b 1 )
 
-rem C5 downgrade state machine guardrail: single failure must not permanently downgrade
-rem the KO driver (false-kill fix); only consecutive failures past the threshold downgrade.
-gcc -O2 -Wall -I"%ROOT%\native\hook" ^
-  -o "%ROOT%\build\pc\test_ko_downgrade.exe" "%ROOT%\tests\unit\test_ko_downgrade.c"
-if errorlevel 1 ( echo [FAIL] test_ko_downgrade build & exit /b 1 )
-echo === test_ko_downgrade ===
-"%ROOT%\build\pc\test_ko_downgrade.exe"
-if errorlevel 1 ( echo [FAIL] test_ko_downgrade & exit /b 1 )
-
 rem T6 watch dedup cursor guardrail: rwproc path rwproc_hit_consumed[] reports only new hits,
 rem cap-truncated remainder refilled, per-bp independent cursors; ptrace path keeps remainder (fix).
 rem Needs posix_stub (MinGW lacks sys/ptrace.h sys/uio.h sys/wait.h signal.h).
@@ -196,28 +187,6 @@ echo        or set GG_SKIP_GUARDRAILS=1 to accept the skip explicitly.
 exit /b 1
 
 :gg_guardrails_done
-
-rem ---- Linux-only tests ------------------------------------------------------
-rem test_loader.c's install_file uses rename() to overwrite, which only works on
-rem POSIX (Windows rename fails on existing files). Run them inside WSL.
-where wsl >nul 2>nul
-if errorlevel 1 (
-  echo [SKIP] WSL not available - Linux-only unit tests not run
-  goto :gg_wsl_done
-)
-set "WSLROOT="
-for /f "delims=" %%p in ('wsl -d Ubuntu -u root -- wslpath -u "%ROOT%" 2^>nul') do if not defined WSLROOT set "WSLROOT=%%p"
-if not defined WSLROOT (
-  echo [SKIP] WSL distro not usable - Linux-only unit tests not run
-  goto :gg_wsl_done
-)
-wsl -d Ubuntu -u root -- bash "%WSLROOT%/tests/unit/run_tests_wsl.sh"
-if errorlevel 1 (
-  echo [FAIL] Linux-only unit tests failed
-  endlocal
-  exit /b 1
-)
-:gg_wsl_done
 
 echo [OK] all unit tests passed
 endlocal

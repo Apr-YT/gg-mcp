@@ -4,10 +4,8 @@
 
 | 组件 | 位置 | 语言 | 职责 |
 |---|---|---|---|
-| `gg-ghost-mcp` | PC（Windows） | C++17 | MCP 协议面（stdio/HTTP）、45 个工具、会话、adb forward 管理 |
-| `gg-agentd` | 设备（root） | C（NDK arm64） | **KO 驱动加载与通道**、进程/maps、搜索/冻结引擎、GG 核心加载编排 |
-| `libKernelGg.so` | 设备（GG 进程内） | C（NDK） | LD_PRELOAD hook：拦截 syscall 270/271 → KO 驱动（或直通内核 hook） |
-| `lib5_stub` | 设备（GG 私有目录） | C（NDK 静态 PIE） | 替换 GG 的 lib5.so，保持合法 ELF 身份，设 LD_PRELOAD 后 exec 原库 |
+| `gg-ghost-mcp` | PC（Windows） | C++17 | MCP 协议面（stdio/HTTP）、43 个工具、会话、adb forward 管理 |
+| `gg-agentd` | 设备（root） | C（NDK arm64） | **rwproc33 通道对接**、进程/maps、搜索/冻结引擎 |
 
 ## 2. 通信链路
 
@@ -57,28 +55,25 @@ AI agent ──MCP(JSON-RPC)──▶ gg-ghost-mcp ──wire 二进制帧──
 - 冻结：agentd 内循环线程每 100ms 写回锁定值；detach/进程退出自动清理；写失败（ESRCH）自动停条目。
 - 会话：单目标进程（attach/detach）；引擎操作经互斥锁串行化（含静态搜索缓冲）。
 
-## 5. GG 核心加载（外挂圈子方式）
+## 5. GG 核心加载（已删除）
 
-GG 守护链：`GG主程序 → su → lib05.so(守护进程) → exec <ggdir>/lib5.so`
+该链路（`lib5_stub` ELF 桩 + `libKernelGg.so` LD_PRELOAD 拦截 syscall 270/271）
+已于 2026-10-21 整条删除。原因：
 
-```
-<ggdir>/lib5.so          ← 被替换为 lib5_stub（静态 PIE，合法 ELF）
-<ggdir>/lib5.so.orig     ← 原库备份（桩通过 /proc/self/exe 推断路径）
-<ggdir>/libKernelGg.so   ← hook 库
-桩启动: setenv LD_PRELOAD=<ggdir>/libKernelGg.so → execv(lib5.so.orig, argv)
-hook:   syscall(270/271) → 解析 iovec → dev 型 KO: ioctl(/dev, 0x7e1a/0x7e1b)
-                                      → hook 型 KO: 直通真实 syscall（内核已接管）
-```
+- **实测从未成功** —— GG 守护链自检报 `android-daemon err`（见 `ACCEPTANCE.md`）。
+- **它是全仓唯一会改写用户文件的动作** —— 备份并覆盖 GG 的 `lib5.so`，
+  一旦中途失败，用户的 GG 核心可能无法还原。风险与收益不成比例。
+- **主链路不需要它** —— agentd 自带引擎，直接经 rwproc33 通道读写目标进程内存。
 
-关键约束（社区踩坑记录）：
-- 守护进程校验 `lib5.so` 必须是合法 ELF —— 用静态 PIE 桩而非 shell 脚本，否则报 "already run"。
-- LD_PRELOAD 必须先于 lib5.so 加载（RTLD_NEXT 作用域）—— 由桩的 exec 顺序保证。
-- 文件权限：hook/桩 777（社区实践），属主 root 或目标应用。
+对应 MCP 工具 `gg_kernel_load_gg` / `gg_core_versions` 一并删除（对外工具 45 → 43）。
+wire 命令码 28/29 保留占位，避免与已部署的 agentd 错位，调用返回明确错误。
 
 ## 6. 安全与容错
 
-- 降级链：KO → process_vm_readv → /proc/pid/mem；`kernel_status` 标记 state（kernel-driver / ko-hook / degraded）。
-- safe-mode：只读会话（write/freeze/shell/load 本地拒绝 + 设备端双保险）。
+- **失败即报错，不降级**：只剩 rwproc33 一条通道（hook/dev/qx 三型已删除）。通道不可用时
+  `kernel_status` 返回 `state=4 (unavailable)`，读写直接返回错误 —— 既避免语义不一致，
+  也避免可被反作弊检测的越界读取。
+- safe-mode：只读会话（write/set_results/freeze/shell/pause/resume/watch 本地拒绝 + 设备端双保险）。
 - shell 白名单：ps/ls/cat/dumpsys/getprop/id（默认关闭）。
 - adb 断连：工具调用返回 GGERR_NO_DEVICE，自动重连一次。
 - 架构限制：驱动协议 64 位布局，**仅支持 64 位目标进程**（32 位 attach 明确报错）。

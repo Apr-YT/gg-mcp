@@ -76,8 +76,13 @@ enum gg_cmd {
     GGCMD_PAUSE,                /* SIGSTOP */
     GGCMD_RESUME,               /* SIGCONT */
     GGCMD_KERNEL_STATUS,
-    GGCMD_LOAD_GG,              /* 加载 GG 核心（带版本族校验） */
-    GGCMD_CORE_VERSIONS,        /* 列出可加载的 GG 版本族 */
+    /* 28/29 保留占位：GG 核心注入链路（lib5_stub + libKernelGg.so）已于
+     * 2026-10-21 整条删除。枚举值不能回收 —— 删掉会让后续命令码整体前移，
+     * 与已部署的 agentd 错位。调用这两个命令会得到明确的 BAD_REQUEST。
+     * 也不要往里插新命令：C 枚举允许重复值且不报错，插进来自动值会与
+     * 硬编码的 28/29 撞车却查不出来。新命令一律追加在枚举末尾。 */
+    GGCMD_LOAD_GG,              /* 已移除：加载 GG 核心（保留占位，勿复用） */
+    GGCMD_CORE_VERSIONS,        /* 已移除：列出可加载的 GG 版本族（保留占位） */
     GGCMD_SHELL,                /* root shell（白名单，默认关闭） */
     GGCMD_DEVICE_INFO,
     GGCMD_WATCH,                /* 硬件断点监视（CE 式"什么访问了这个地址"） */

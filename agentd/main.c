@@ -11,7 +11,6 @@
 #include "driver.h"
 #include "elfsym.h"
 #include "freeze.h"
-#include "loader.h"
 #include "process.h"
 #include "search.h"
 #include "version.h"
@@ -307,8 +306,9 @@ static const char *cmd_name(uint16_t cmd) {
     case GGCMD_PAUSE:              return "gg_pause";
     case GGCMD_RESUME:             return "gg_resume";
     case GGCMD_KERNEL_STATUS:      return "gg_kernel_status";
-    case GGCMD_LOAD_GG:            return "gg_kernel_load_gg";
-    case GGCMD_CORE_VERSIONS:      return "gg_core_versions";
+    /* 命令码保留（wire ABI 不可回收），实现已删除 */
+    case GGCMD_LOAD_GG:            return "gg_kernel_load_gg (removed)";
+    case GGCMD_CORE_VERSIONS:      return "gg_core_versions (removed)";
     case GGCMD_SHELL:              return "gg_shell";
     case GGCMD_DEVICE_INFO:        return "gg_device_info";
     case GGCMD_WATCH:              return "gg_watch";
@@ -1106,6 +1106,7 @@ static void h_read_bytes(int fd, uint32_t seq, cJSON *p) {
     if (len > GG_SEARCH_CHUNK) len = GG_SEARCH_CHUNK;   /* 单次读上限 256KB（= RWPROC_MAX_IO） */
     uint64_t addr = strtoull(as, NULL, 0);
     uint8_t *buf = malloc(len);
+    if (!buf) { send_err(fd, GGCMD_READ_BYTES, seq, GGERR_INTERNAL, "out of memory"); return; }
     ssize_t got = driver_read(&g_eng.drv, g_eng.session_pid, addr, buf, len);
     cJSON *r = cJSON_CreateObject();
     if (got < 0) {
@@ -1114,10 +1115,18 @@ static void h_read_bytes(int fd, uint32_t seq, cJSON *p) {
         cJSON_AddStringToObject(r, "error", g_eng.drv.last_error);
     } else {
         char *hex = malloc((size_t)got * 2 + 1);
+        if (!hex) { free(buf); send_err(fd, GGCMD_READ_BYTES, seq, GGERR_INTERNAL, "out of memory"); return; }
         for (ssize_t i = 0; i < got; i++) snprintf(hex + i * 2, 3, "%02x", buf[i]);
         cJSON_AddStringToObject(r, "hex", hex);
         cJSON_AddNumberToObject(r, "bytes", (double)got);
         free(hex);
+        /* got==0 不是"读到全零"，而是内核判定该页读不了。rwproc 走 is_force=0
+         * （不翻转 PTE，避免与目标进程活跃页竞争导致内核崩溃），所以**已被回收的
+         * 文件页读不到**。不解释清楚会被当成工具坏了。 */
+        if (got == 0)
+            cJSON_AddStringToObject(r, "note",
+                "read 0 bytes: page not resident (is_force=0 does not flip PTE). "
+                "Try an address in an executing/active mapping, or gg_search_range within a mapped region");
     }
     free(buf);
     send_ok(fd, GGCMD_READ_BYTES, seq, r);
@@ -1439,84 +1448,6 @@ static void h_kernel_status(int fd, uint32_t seq, cJSON *p) {
     cJSON_Delete(r);
 }
 
-static void h_load_gg(int fd, uint32_t seq, cJSON *p) {
-    const char *pattern = cJSON_GetObjectItem(p, "pattern") ?
-        cJSON_GetObjectItem(p, "pattern")->valuestring : "101.*";
-    int strict = cJSON_GetObjectItem(p, "strict") ?
-        (cJSON_GetObjectItem(p, "strict")->valueint != 0) : 1;
-    const char *want_dir = cJSON_GetObjectItem(p, "dir") ?
-        cJSON_GetObjectItem(p, "dir")->valuestring : NULL;
-
-    size_t n = 0;
-    gg_ggdir_t *dirs = loader_find_dirs(&n, pattern);
-    cJSON *r = cJSON_CreateObject();
-    cJSON *arr = cJSON_AddArrayToObject(r, "dirs");
-    int loaded = 0;
-    for (size_t i = 0; i < n; i++) {
-        cJSON *o = cJSON_CreateObject();
-        cJSON_AddStringToObject(o, "dir", dirs[i].dir);
-        cJSON_AddStringToObject(o, "pkg", dirs[i].pkg);
-        cJSON_AddStringToObject(o, "version", dirs[i].version);
-        cJSON_AddBoolToObject(o, "family_match", dirs[i].family_match ? 1 : 0);
-        cJSON_AddBoolToObject(o, "stub_installed", dirs[i].stub_installed ? 1 : 0);
-        cJSON_AddBoolToObject(o, "hook_loaded", dirs[i].hook_loaded ? 1 : 0);
-        int do_load = 0;
-        if (!loaded && (!want_dir || strcmp(want_dir, dirs[i].dir) == 0)) do_load = 1;
-        if (do_load) {
-            int rc = loader_load(&dirs[i], pattern, strict);
-            if (rc == 0) {
-                cJSON_AddBoolToObject(o, "loaded", 1);
-                cJSON_AddStringToObject(o, "load_error", "");
-                loaded = 1;
-            } else {
-                cJSON_AddBoolToObject(o, "loaded", 0);
-                const char *msg = "load failed";
-                switch (-rc) {
-                case GGERR_VERSION_MISMATCH: msg = "version family mismatch (pattern: X.Y.* required)"; break;
-                case GGERR_NOT_FOUND: msg = "lib5.so not found"; break;
-                case GGERR_PERM: msg = "permission denied (need root, /data/adb/vendor_security assets)"; break;
-                default: msg = "internal error"; break;
-                }
-                cJSON_AddStringToObject(o, "load_error", msg);
-                if (want_dir) {
-                    /* 指定目录失败 → 直接返回错误 */
-                    send_err(fd, GGCMD_LOAD_GG, seq, -rc, msg);
-                    cJSON_Delete(r);
-                    free(dirs);
-                    return;
-                }
-            }
-        }
-        cJSON_AddItemToArray(arr, o);
-    }
-    cJSON_AddBoolToObject(r, "loaded_any", loaded ? 1 : 0);
-    free(dirs);
-    send_ok(fd, GGCMD_LOAD_GG, seq, r);
-    cJSON_Delete(r);
-}
-
-static void h_core_versions(int fd, uint32_t seq, cJSON *p) {
-    const char *pattern = cJSON_GetObjectItem(p, "pattern") ?
-        cJSON_GetObjectItem(p, "pattern")->valuestring : "101.*";
-    size_t n = 0;
-    gg_ggdir_t *dirs = loader_find_dirs(&n, pattern);
-    cJSON *r = cJSON_CreateObject();
-    cJSON *arr = cJSON_AddArrayToObject(r, "dirs");
-    for (size_t i = 0; i < n; i++) {
-        cJSON *o = cJSON_CreateObject();
-        cJSON_AddStringToObject(o, "dir", dirs[i].dir);
-        cJSON_AddStringToObject(o, "pkg", dirs[i].pkg);
-        cJSON_AddStringToObject(o, "version", dirs[i].version);
-        cJSON_AddBoolToObject(o, "family_match", dirs[i].family_match ? 1 : 0);
-        cJSON_AddBoolToObject(o, "stub_installed", dirs[i].stub_installed ? 1 : 0);
-        cJSON_AddBoolToObject(o, "hook_loaded", dirs[i].hook_loaded ? 1 : 0);
-        cJSON_AddItemToArray(arr, o);
-    }
-    free(dirs);
-    send_ok(fd, GGCMD_CORE_VERSIONS, seq, r);
-    cJSON_Delete(r);
-}
-
 /* cmd_view.c（拆分外迁） */
 void h_view_memory(int fd, uint32_t seq, cJSON *p);
 void h_resolve_symbol(int fd, uint32_t seq, cJSON *p);
@@ -1621,7 +1552,7 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
      * 位于锁与事件之外, 拦截时直接返回, 不泄漏引擎状态。 */
     static const uint16_t g_destructive_cmds[] = {
         GGCMD_WRITE, GGCMD_SET_RESULTS, GGCMD_FREEZE, GGCMD_UNFREEZE,
-        GGCMD_SHELL, GGCMD_LOAD_GG, GGCMD_PAUSE, GGCMD_RESUME, GGCMD_WATCH
+        GGCMD_SHELL, GGCMD_PAUSE, GGCMD_RESUME, GGCMD_WATCH
     };
     if (g_eng.safe_mode) {
         for (size_t i = 0; i < sizeof(g_destructive_cmds) / sizeof(g_destructive_cmds[0]); i++) {
@@ -1685,8 +1616,14 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
     case GGCMD_PAUSE:              h_pause_resume(fd, seq, p, 1); break;
     case GGCMD_RESUME:             h_pause_resume(fd, seq, p, 0); break;
     case GGCMD_KERNEL_STATUS:      h_kernel_status(fd, seq, p); break;
-    case GGCMD_LOAD_GG:            h_load_gg(fd, seq, p); break;
-    case GGCMD_CORE_VERSIONS:      h_core_versions(fd, seq, p); break;
+    /* 命令码 28/29 保留占位：GG 核心注入链路（lib5_stub + libKernelGg.so）
+     * 已于 2026-10-21 整条删除 —— 该方案实测从未成功，且会改写用户的 lib5.so。
+     * 保留枚举值只为不改变后续命令码（wire ABI），旧客户端调用得到明确错误。 */
+    case GGCMD_LOAD_GG:
+    case GGCMD_CORE_VERSIONS:
+        send_err(fd, h->cmd, seq, GGERR_BAD_REQUEST,
+                 "command removed: GG core injection (lib5_stub/libKernelGg) was deleted");
+        break;
     case GGCMD_SHELL:              h_shell(fd, seq, p); break;
     case GGCMD_DEVICE_INFO:        h_device_info(fd, seq, p); break;
     case GGCMD_WATCH:              h_watch(fd, seq, p); break;
@@ -1764,14 +1701,8 @@ static void print_usage(const char *argv0) {
     fprintf(stderr,
         "设备端内核守护（KO 驱动方案）\n"
         "用法: %s [--port 34127]\n"
-        "           [--driver hook|dev|qx|rwproc] # KO 后端类型（默认 hook）\n"
-        "           [--ko-dir /data/adb/vendor_security/ko]\n"
-        "           [--ko-file name.ko]           # 指定 KO（空=按版本族自动选）\n"
-        "           [--ko-pattern 6.12.*]         # KO 版本族模式（同族可加载）\n"
-        "           [--ko-strict 0|1]             # 族外拒绝（默认 1）\n"
-        "           [--dev /dev/xxx]              # dev 型 KO 的设备节点\n"
-        "           [--ioctl-read 0x7e1a] [--ioctl-write 0x7e1b]\n"
-        "           [--qx-key <key>]              # qx 型驱动 init_key 密钥（可选）\n"
+        "           [--driver rwproc]             # 驱动后端（当前仅 rwproc33）\n"
+        "           # KO 的加载与版本选择由 scripts/install_ko.sh 负责，agentd 不参与\n"
         "           [--rwproc-key <key>]          # rwproc33 内存模块 proc 节点 auth key\n"
         "           [--rwproc-bp-key <key>]       # rwproc33 断点模块 proc 节点 auth key\n"
         "           [--wire-key <hex>]            # wire 握手密钥（PC 端须配置同一值）\n"
@@ -1800,31 +1731,21 @@ int main(int argc, char **argv) {
        dtype 等若直接指向 argv[i]，被 memset 后变空串 → strcmp 全失败 →
        误走默认 hook 型（用户态 process_vm_readv，违反内核通道纪律）。
        修复（2026-08-19）：解析时一律 snprintf 到本地 buffer。 */
-    static char dtype_buf[16], ko_dir_buf[256];
+    static char dtype_buf[16];
     static char rwproc_key_buf[128], rwproc_bp_key_buf[128], logpath_buf[256];
-    static char ko_pattern_buf[64];
     static char wire_key_buf[65], wire_key_file_buf[256];
-    const char *dtype = dtype_buf, *ko_dir = ko_dir_buf;
+    const char *dtype = dtype_buf;
     const char *rwproc_key = rwproc_key_buf, *rwproc_bp_key = rwproc_bp_key_buf;
-    const char *logpath = logpath_buf, *ko_pattern = ko_pattern_buf;
+    const char *logpath = logpath_buf;
     int port = 34127;            /* 非常见高位端口，避免 19100 等默认值被扫 */
     snprintf(dtype_buf, sizeof(dtype_buf), "%s", "hook");
-    snprintf(ko_dir_buf, sizeof(ko_dir_buf), "%s",
-             "/data/adb/vendor_security/ko");  /* 避开 /data/local/tmp（ACE 重点扫描） */
-    snprintf(ko_pattern_buf, sizeof(ko_pattern_buf), "%s", "6.12.*");
     rwproc_key_buf[0] = rwproc_bp_key_buf[0] = logpath_buf[0] = 0;
     wire_key_buf[0] = wire_key_file_buf[0] = 0;
-    int ko_strict = 1;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) port = atoi(argv[++i]);
         else if (strcmp(argv[i], "--driver") == 0 && i + 1 < argc)
             snprintf(dtype_buf, sizeof(dtype_buf), "%s", argv[++i]);
-        else if (strcmp(argv[i], "--ko-dir") == 0 && i + 1 < argc)
-            snprintf(ko_dir_buf, sizeof(ko_dir_buf), "%s", argv[++i]);
-        else if (strcmp(argv[i], "--ko-pattern") == 0 && i + 1 < argc)
-            snprintf(ko_pattern_buf, sizeof(ko_pattern_buf), "%s", argv[++i]);
-        else if (strcmp(argv[i], "--ko-strict") == 0 && i + 1 < argc) ko_strict = atoi(argv[++i]);
         else if (strcmp(argv[i], "--rwproc-key") == 0 && i + 1 < argc)
             snprintf(rwproc_key_buf, sizeof(rwproc_key_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--rwproc-bp-key") == 0 && i + 1 < argc)
@@ -1888,8 +1809,8 @@ int main(int argc, char **argv) {
     g_eng.result_cap = GG_RESULT_CAP_DEFAULT;
     pthread_mutex_init(&g_eng.mtx, NULL);
     if (logpath) g_eng.logf = fopen(logpath, "a");
-    log_msg("starting (port=%d driver=%s ko_dir=%s pattern=%s strict=%d safe=%d)",
-            port, dtype, ko_dir, ko_pattern, ko_strict, g_eng.safe_mode);
+    log_msg("starting (port=%d driver=%s safe=%d)",
+            port, dtype, g_eng.safe_mode);
 
     driver_init_rwproc(&g_eng.drv, rwproc_key, rwproc_bp_key);
     freeze_init(&g_eng.freeze, &g_eng.drv);
@@ -1910,11 +1831,6 @@ int main(int argc, char **argv) {
     if (st < 0) {
         log_msg("WARNING: rwproc channel unavailable; attach/search will fail");
     }
-
-    /* 同步 GG hook 的协议环境（loader_load 时写入 lib5_hook.conf）。
-     * libKernelGg.so 只认 qx/dev 两种 proto，其余值（含 "rwproc"）走直通真实
-     * syscall —— 即 GG 核心用原生 process_vm_readv，靠 root 权限工作。 */
-    loader_set_hook_env("rwproc", NULL, NULL);
 
     int sfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sfd < 0) { perror("socket"); return 1; }

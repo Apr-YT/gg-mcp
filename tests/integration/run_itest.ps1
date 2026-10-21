@@ -25,7 +25,7 @@ if (-not (Test-Path $cc)) { throw "NDK clang 未找到: $cc" }
 & $cc -O2 -Wall -I"$Root" -o "$Root\build\native\itest" `
     "$Root\tests\integration\itest.c" `
     "$Root\agentd\driver.c" "$Root\agentd\process.c" "$Root\agentd\search.c" `
-    "$Root\agentd\freeze.c" "$Root\agentd\version.c" "$Root\agentd\loader.c" `
+    "$Root\agentd\freeze.c" "$Root\agentd\version.c" `
     "$Root\third_party\cJSON.c" -pie
 if ($LASTEXITCODE -ne 0) { throw "itest 编译失败" }
 
@@ -34,7 +34,22 @@ if ($LASTEXITCODE -ne 0) { throw "itest 编译失败" }
 & $Adb push "$Root\build\native\itest" "$DevDir/itest" 2>$null | Out-Null
 & $Adb shell "chmod 755 $DevDir/itest" 2>$null | Out-Null
 Write-Host "== 设备端集成测试 ==" -ForegroundColor Cyan
+# itest 需要 rwproc 的两个 proc 节点 key：模块默认 hide_by_default，
+# 节点在 /proc 里能扫到但目录名不匹配时驱动找不到，必须显式给。
+# su -c 不继承调用方环境变量，所以直接把 key 拼进远端命令行。
+$memKey = ""; $bpKey = ""
+$sas = Join-Path $Root "scripts\start_agentd.sh"
+if (Test-Path $sas) {
+    # 必须显式 -Encoding UTF8：PS 5.1 默认按 ANSI(GBK) 读，含中文注释的 UTF-8
+    # 文件会被解析成乱码并把多行粘成一行，正则于是永远匹配不到。
+    foreach ($line in (Get-Content $sas -Encoding UTF8)) {
+        if ($line -match '^\s*RWPROC_MEM_KEY=(\S*)') { $memKey = $Matches[1] }
+        if ($line -match '^\s*RWPROC_BP_KEY=(\S*)')  { $bpKey = $Matches[1] }
+    }
+}
+if (-not $memKey) { Write-Host "  警告: 未从 start_agentd.sh 读到 RWPROC_MEM_KEY，itest 可能找不到节点" -ForegroundColor DarkYellow }
+$remote = if ($memKey) { "GG_MEM_KEY=$memKey GG_BP_KEY=$bpKey $DevDir/itest" } else { "$DevDir/itest" }
 # adb 会把进度/提示写到 stderr，Stop 模式下会被当致命错误；真正失败由 itest 退出码体现
 $ErrorActionPreference = 'Continue'
-& $Adb shell "su -c '$DevDir/itest'"
+& $Adb shell "su -c '$remote'"
 Write-Host "== 完成 ==" -ForegroundColor Green

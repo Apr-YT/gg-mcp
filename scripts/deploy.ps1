@@ -78,7 +78,7 @@ if ($GgApk) {
 }
 
 # 1) 推送设备端产物
-Write-Host "[1/6] 推送 agentd + native 产物" -ForegroundColor Yellow
+Write-Host "[1/6] 推送 agentd 与脚本" -ForegroundColor Yellow
 # 先停掉正在运行的 agentd：运行中的二进制无法被覆盖（Text file busy）。
 # 首次部署时脚本还不存在，失败属正常，直接吞掉。
 try { Adb-Sh "su -c ""sh $DevDir/start_agentd.sh stop""" | Out-Null } catch { }
@@ -87,8 +87,6 @@ try { Adb-Sh "su -c ""sh $DevDir/start_agentd.sh stop""" | Out-Null } catch { }
 $Stage = Join-Path $env:TEMP "ggmcp_stage"
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 Copy-Item "$Root\build\agentd\gg-agentd" "$Stage\gdm" -Force
-Copy-Item "$Root\build\native\libKernelGg.so" $Stage -Force
-Copy-Item "$Root\build\native\lib5_stub" $Stage -Force
 Copy-Item "$Root\scripts\start_agentd.sh" $Stage -Force
 Copy-Item "$Root\scripts\install_ko.sh" $Stage -Force
 Adb-Sh "su -c ""mkdir -p $DevDir/ko""" | Out-Null
@@ -97,22 +95,16 @@ Adb-Sh "su -c ""mkdir -p $DevDir/ko""" | Out-Null
 $TmpDir = "/data/local/tmp/ggmcp_stage"
 Adb-Sh "mkdir -p $TmpDir" | Out-Null
 Adb-Cmd "push" "$Stage\gdm" "$TmpDir/"
-Adb-Cmd "push" "$Stage\libKernelGg.so" "$TmpDir/"
-Adb-Cmd "push" "$Stage\lib5_stub" "$TmpDir/"
 Adb-Cmd "push" "$Stage\start_agentd.sh" "$TmpDir/"
 Adb-Cmd "push" "$Stage\install_ko.sh" "$TmpDir/"
 # 逐条 su 执行，不要拼成 && 长串：PowerShell + adb 的多层引号穿透会把 && 吃掉，
 # 表现为整条 su -c 返回 1 而单条命令其实都正常。
 Adb-Sh "su -c ""cp $TmpDir/gdm $DevDir/gdm""" | Out-Null
-Adb-Sh "su -c ""cp $TmpDir/libKernelGg.so $DevDir/libKernelGg.so""" | Out-Null
-Adb-Sh "su -c ""cp $TmpDir/lib5_stub $DevDir/lib5_stub""" | Out-Null
 Adb-Sh "su -c ""cp $TmpDir/start_agentd.sh $DevDir/start_agentd.sh""" | Out-Null
 Adb-Sh "su -c ""cp $TmpDir/install_ko.sh $DevDir/install_ko.sh""" | Out-Null
 Adb-Sh "su -c ""chmod 755 $DevDir/gdm""" | Out-Null
-Adb-Sh "su -c ""chmod 755 $DevDir/lib5_stub""" | Out-Null
 Adb-Sh "su -c ""chmod 755 $DevDir/start_agentd.sh""" | Out-Null
 Adb-Sh "su -c ""chmod 755 $DevDir/install_ko.sh""" | Out-Null
-Adb-Sh "su -c ""chmod 777 $DevDir/libKernelGg.so""" | Out-Null
 
 # 2) KO 内核驱动（可跳过）
 if (-not $SkipKo) {
@@ -177,17 +169,25 @@ if ($wireKey) {
 
 # 6) 自检日志（轮询就绪标记，替代固定短 sleep；KO 加载慢时不漏判）
 Write-Host "[6/6] agentd 自检日志" -ForegroundColor Yellow
+# 三个坑，缺一个就读不到日志：
+#   1) 必须走 Adb-Sh：裸 & $Adb 在 Stop 模式下会把 adb 的 stderr 当终止性错误。
+#   2) 必须 su -c：agentd.log 由 root 创建，adb shell 是 shell uid(2000)，tail 直接 RC=1。
+#   3) 日志只是诊断信息，读不到不该让整个部署失败（此时 agentd 其实已经起来了）。
 $ready = $false
 for ($i = 0; $i -lt 10; $i++) {
-    $log = & $Adb @DeviceArg shell "tail -n 20 $DevDir/agentd.log 2>/dev/null"
-    if ($log -match "listening|started|ready|running|port") { $ready = $true; break }
+    try { $log = @(Adb-Sh "su -c ""tail -n 20 $DevDir/agentd.log""") } catch { $log = @() }
+    if (($log -join "`n") -match "listening|driver self-test") { $ready = $true; break }
     Start-Sleep -Milliseconds 500
 }
-& $Adb @DeviceArg shell "tail -n 20 $DevDir/agentd.log 2>/dev/null" | ForEach-Object { Write-Host "  $_" }
+try {
+    Adb-Sh "su -c ""tail -n 20 $DevDir/agentd.log""" | ForEach-Object { Write-Host "  $_" }
+} catch {
+    Write-Host "  （日志读取失败：$($_.Exception.Message)）" -ForegroundColor DarkYellow
+}
 if (-not $ready) { Write-Host "  警告: 未检测到就绪标记，仍请检查日志确认 agentd 已起" -ForegroundColor DarkYellow }
 
 Write-Host ""
 Write-Host "== 部署完成 ==" -ForegroundColor Green
 Write-Host "启动 PC 端 MCP 服务器:"
 Write-Host "  build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json --transport http --port 8788"
-Write-Host "然后调 gg_kernel_status 验证: hook 型期望 state=ko-hook / dev 型期望 state=kernel-driver"
+Write-Host "然后调 gg_kernel_status 验证: 期望 state=kernel-driver (rwproc33)"

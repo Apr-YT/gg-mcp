@@ -13,7 +13,7 @@ PC 上的 MCP 服务器 + 安卓 root 端 agentd + 内核 KO 驱动，让 AI age
 |---|---|---|---|---|
 | PC 侧 | `gg-ghost-mcp.exe` | C++17 | Windows | 2315 行 / 12 文件 |
 | 设备侧 | `gg-agentd` | C（NDK arm64） | Android root | 7122 行 / 27 文件 |
-| 内核侧 | `.ko` + `libKernelGg.so` + `lib5_stub` | C | Android kernel / GG 进程 | 356 行 / 3 文件 |
+| 内核侧 | `build/ko/*.ko` | 预编译二进制 | Android kernel | 2 模块 × 2 内核版本 |
 | 协议 | `wire_protocol.h` | 纯 C | 双端共用 | 162 行 / 1 文件 |
 
 设备侧占全仓 60%，是真正的重心；PC 侧只是协议面与参数收敛层。
@@ -61,7 +61,6 @@ MCP client ──JSON-RPC──▶ gg-ghost-mcp ──20B 帧头 + JSON 负载�
 | `search.c` | 809 | 精确/区间/模糊搜索，位图 + 快照 |
 | `watch.c` | 467 | 硬件断点监视（CE 式"谁访问了这个地址"） |
 | `process.c` | 364 | 进程枚举与 maps 解析 |
-| `loader.c` | 328 | GG 核心加载编排（版本族校验 + lib5 桩替换） |
 | `cmd_view.c` | 312 | 结构化内存查看 / 符号解析 / 指针链 |
 | `elfsym.c` | 222 | ELF `.dynsym` 解析 |
 | `freeze.c` / `disasm.c` / `cmd_shell.c` / `version.c` | 431 | 冻结线程、Capstone 反汇编、shell 白名单、版本匹配 |
@@ -77,7 +76,7 @@ MCP client ──JSON-RPC──▶ gg-ghost-mcp ──20B 帧头 + JSON 负载�
 | 地址解析 | 4 | module_base, calc_offset, pointer_scan, pointer_chain |
 | 符号/反汇编 | 2 | resolve_symbol, disassemble |
 | 执行控制 | 2 | pause, resume |
-| 内核/驱动 | 3 | kernel_status, kernel_load_gg, core_versions |
+| 内核/驱动 | 1 | kernel_status |
 | 硬件断点 | 4 | watch_set, watch_poll, watch_inject, watch_clear |
 | 设备/系统 | 3 | status, shell, device_info |
 | 标注（PC 本地） | 5 | annotate_add, list, get, remove, context |
@@ -96,8 +95,7 @@ MCP client ──JSON-RPC──▶ gg-ghost-mcp ──20B 帧头 + JSON 负载�
 | 真机集成测试 | ⚠️ | adb 在（`D:\Kiln\platform-tools`），当前**无设备连接**，跑不了 `run_itest.ps1` |
 | 性能基准 | ❌ | 仓内无基准源码，`benchmark.bat` 会明确报错 |
 
-产出实测：`gg-agentd` 2.4MB（ELF64 AArch64 PIE，仅 NEEDED `libc.so`/`libdl.so`，`-Wall` 零警告）、
-`libKernelGg.so` 8.6KB、`lib5_stub` 8.8MB。
+产出实测：`gg-agentd` 2.4MB（ELF64 AArch64 PIE，仅 NEEDED `libc.so`/`libdl.so`，`-Wall` 零警告）。
 
 **三端均可本机编译**（2026-10-21 实测）。真正的闭环缺口只剩**真机 itest**：
 没有设备连接时，设备端改动只能编译验证，不能功能验证 —— 不得当作「已验证」上报。

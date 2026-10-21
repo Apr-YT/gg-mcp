@@ -22,7 +22,6 @@ call "%CC%" -O3 -flto -Wall -I"%ROOT%" -I"%CAPSTONE%\include" -o "%ROOT%\build\a
   "%ROOT%\agentd\watch.c" ^
   "%ROOT%\agentd\disasm.c" ^
   "%ROOT%\agentd\elfsym.c" ^
-  "%ROOT%\agentd\loader.c" ^
   "%ROOT%\agentd\version.c" ^
   "%ROOT%\agentd\perf_simple.c" ^
   "%ROOT%\third_party\cJSON.c" ^

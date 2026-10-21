@@ -254,7 +254,7 @@ int AgentClient::tcp_connect() {
         ioctlsocket(fd, FIONBIO, &mode0);   // 恢复阻塞
         // ⚠️ Winsock 的 SO_RCVTIMEO/SO_SNDTIMEO 是 DWORD 毫秒值，不是 timeval！
         // 之前传 timeval{300, 0} → Winsock 只取前 4 字节 = 300 → 实际 300ms 超时，
-        // 慢调用（如 gg_core_versions ~600ms）读响应必超时 WSAETIMEDOUT(10060)。
+        // 慢调用（如 gg_search 全内存扫描，可持续数秒）读响应必超时 WSAETIMEDOUT(10060)。
         DWORD io_ms = static_cast<DWORD>(cfg_.io_timeout_ms);
         GG_LOG(2, "[wire] timeout cfg: io=%dms (winsock DWORD ms)\n", (int)io_ms);
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&io_ms), sizeof(io_ms));

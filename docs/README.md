@@ -22,7 +22,7 @@
 | [HWBP_CRASH_HELP.md](engineering/HWBP_CRASH_HELP.md) | hwBreakpointProc_module 静默挂死排查记录（已解决：命令枚举错位），同类内核挂死可复用其排查法。 |
 | [TOOLCHAIN.md](engineering/TOOLCHAIN.md) | 本机工具链实况（NDK r30 / capstone 5.0.1 / MinGW），跨平台构建 agentd 的可复制步骤。 |
 | [DEVICE_STATUS_6.12.69.md](engineering/DEVICE_STATUS_6.12.69.md) | 内核 6.12.69 设备上的部署与运行状态报告（2026-08-22 快照）。 |
-| [VERSION_MATCHING.md](engineering/VERSION_MATCHING.md) | 版本族（major.minor 同级放行）匹配规则，GG 核心与 KO 驱动两处生效。 |
+| [VERSION_MATCHING.md](engineering/VERSION_MATCHING.md) | 版本族（major.minor 同级放行）匹配规则；GG 核心部分已随注入链路删除，KO 驱动部分仍有效。 |
 | [GG-GHOST.md](engineering/GG-GHOST.md) | GG-Ghost 内核虚拟触摸注入套件（`gg-ghost` input 设备 + proc 注入协议）完整文档。 |
 | [AGENTD_HISTORY.md](engineering/AGENTD_HISTORY.md) | apk/ggtool 时代的旧版工作区指令归档，仅供追溯。 |
 | [MEMORY.md](engineering/MEMORY.md) | AI 会话持久记忆：环境事实、命令、踩坑结论的自动维护清单。 |

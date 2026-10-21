@@ -84,4 +84,4 @@ log "== 相关模块（hide 后可能为空，属正常）=="
 grep -iE "rwProc|hwBreakpoint|apr_dlkm" /proc/modules 2>/dev/null | tee -a "$LOG" || true
 
 log "KO 加载完成。启动 agentd 后可用 gg_kernel_status 自检"
-log "（hook 型期望 state=ko-hook；rwproc 型期望 state=kernel-driver）"
+log "（期望 state=kernel-driver (rwproc33)）"

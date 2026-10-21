@@ -1,5 +1,5 @@
 @echo off
-rem build_ndk.bat - build device artifacts with Android NDK (agentd + hook + stub)
+rem build_ndk.bat - build device artifacts with Android NDK (agentd only)
 rem usage: build_ndk.bat [NDK dir] [Capstone dir]
 rem   NDK default:      D:\Kiln\android-ndk-r30
 rem   Capstone default: D:\Kiln\capstone\capstone-5.0.1
@@ -24,7 +24,7 @@ if not exist "%CAPSTONE%\libcapstone.a" (
   exit /b 1
 )
 
-echo [1/3] gg-agentd (with optimizations) ...
+echo [1/1] gg-agentd (with optimizations) ...
 call "%CC%" -O3 -flto -Wall -I"%ROOT%" -I"%CAPSTONE%\include" -o "%ROOT%\build\agentd\gg-agentd" ^
   "%ROOT%\agentd\main.c" ^
   "%ROOT%\agentd\cmd_shell.c" ^
@@ -36,20 +36,11 @@ call "%CC%" -O3 -flto -Wall -I"%ROOT%" -I"%CAPSTONE%\include" -o "%ROOT%\build\a
   "%ROOT%\agentd\watch.c" ^
   "%ROOT%\agentd\disasm.c" ^
   "%ROOT%\agentd\elfsym.c" ^
-  "%ROOT%\agentd\loader.c" ^
   "%ROOT%\agentd\version.c" ^
   "%ROOT%\agentd\perf_simple.c" ^
   "%ROOT%\third_party\cJSON.c" ^
   "%CAPSTONE%\libcapstone.a" -pie
 if errorlevel 1 ( echo [FAIL] agentd & exit /b 1 )
 
-echo [2/3] libKernelGg.so (syscall 270 hook) ...
-call "%CC%" -shared -fPIC -O2 -Wall -o "%OUT%\libKernelGg.so" "%ROOT%\native\hook\hook.c"
-if errorlevel 1 ( echo [FAIL] hook & exit /b 1 )
-
-echo [3/3] lib5_stub (static PIE ELF stub) ...
-call "%CC%" -static-pie -fPIE -O2 -Wall -o "%OUT%\lib5_stub" "%ROOT%\native\stub\lib5_stub.c"
-if errorlevel 1 ( echo [FAIL] stub & exit /b 1 )
-
-echo [OK] build\native\libKernelGg.so  build\native\lib5_stub  build\agentd\gg-agentd
+echo [OK] build\agentd\gg-agentd
 endlocal

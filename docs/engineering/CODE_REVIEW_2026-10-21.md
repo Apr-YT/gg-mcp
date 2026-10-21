@@ -378,3 +378,15 @@ c.params["len"] = a.value("len", 64);
 ---
 
 *本文所有代码位置均现场核对；§四「test_parallel.c 不覆盖多客户端」一条为基于文件名的推断，未逐行确认。*
+
+---
+
+## 后续变更（本文写就之后）
+
+- **2026-10-21，GG 核心注入链路整条删除**：`agentd/loader.c`（本文 §四 列为「无单测」的 328 行）、
+  `native/hook/hook.c`、`native/stub/lib5_stub.c`、`gg_kernel_load_gg` / `gg_core_versions` 工具、
+  `tests/unit/test_loader.c`、`tests/unit/test_ko_downgrade.c` 均已移除。
+  理由见 `DRIVER_MATRIX.md` §4。文中相关行数与工具数已过时，保留作历史记录。
+- **2026-10-21，hook/dev/qx 三型驱动删除**：`driver.c` 由 1109 行降至 541 行，
+  状态枚举只剩 `ST_DRIVER(1)` / `ST_UNAVAILABLE(4)`。
+- 对外工具数 45 → **43**；单元测试断言 518 条（WSL 侧 `run_tests_wsl.sh` 随 loader 一并删除）。

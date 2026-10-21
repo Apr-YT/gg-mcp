@@ -214,21 +214,6 @@ static const std::vector<ToolDef>& build() {
         tool("gg_kernel_status",
              "内核驱动通道状态：kernel-driver / 降级层 / 自检 / 统计",
              json::object(), json::array()),
-        tool("gg_kernel_load_gg",
-             "加载 GG 核心（外挂圈子方式：ELF 桩 + LD_PRELOAD hook syscall 270 → KO 驱动）。"
-             "版本族匹配：同类型如 101.xx，补丁号不同均可加载；实际包为 GG 101.1（伪装包名 com.tencent.gamereva）",
-             json{
-                 {"pattern", prop("string", "版本族模式（默认 101.*；\"X.Y.*\" 表示 major.minor 相同即同族）")},
-                 {"strict", prop("boolean", "严格模式：族外拒绝（默认 true）")},
-                 {"dir", prop("string", "指定 GG 私有目录（缺省自动选择第一个）")},
-             },
-             json::array()),
-        tool("gg_core_versions",
-             "列出设备上所有 GG 核心目录及其版本/族匹配/桩安装状态",
-             json{
-                 {"pattern", prop("string", "版本族模式（默认 101.*）")},
-             },
-             json::array()),
 
         // ---- 硬件断点监视（CE 式"什么访问了这个地址"） ----
         tool("gg_watch_set",

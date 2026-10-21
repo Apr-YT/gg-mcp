@@ -10,6 +10,10 @@
 >   agentd 可本地编译，步骤见 `docs/TOOLCHAIN.md`
 > - 对外工具数 43 → **45**；wire 命令数 36 → **41**
 > 现状一律以 `AGENTS.md` 为准。
+>
+> ⚠️ **2026-10-21 追加：GG 核心注入链路（`lib5_stub` + `libKernelGg.so`）已整条删除。**
+> 本文中涉及 `lib5_stub` / `libKernelGg.so` / `gg_kernel_load_gg` / `gg_core_versions`
+> 的段落均为**历史记录**，相应文件与工具已不存在。详见 `DRIVER_MATRIX.md` §4。
 
 > 交接时间：2026-08-16
 > 项目路径：`D:\project\workbuddy\工具\gg`

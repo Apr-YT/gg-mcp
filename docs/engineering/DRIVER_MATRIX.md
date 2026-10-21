@@ -50,8 +50,8 @@
 
 ### 3.3 不依赖会话
 
-`gg_kernel_status` / `gg_device_info` / `gg_core_versions` / `gg_status` /
-`gg_list_processes` / `gg_attach` / `gg_detach` / `gg_kernel_load_gg` / `gg_shell`
+`gg_kernel_status` / `gg_device_info` / `gg_status` /
+`gg_list_processes` / `gg_attach` / `gg_detach` / `gg_shell`
 
 ### 3.4 纯用户态（PC 本地）
 
@@ -62,24 +62,22 @@
 
 `gg_ghost_tap` / `gg_ghost_swipe` —— 会真实点击屏幕。
 
-## 4. GG 核心（libKernelGg.so）的协议不匹配 —— 待处理
+## 4. GG 核心注入链路 —— 已删除
 
-`native/hook/hook.c` 编译出的 `libKernelGg.so` 是给 **GG 本体**用的
-（`loader_load` 装进 GG 目录，拦截 GG 的 `process_vm_readv/writev`）。
-它只认三种 proto：
+`native/hook/hook.c`（`libKernelGg.so`）与 `native/stub/lib5_stub.c` 已于 2026-10-21 整条删除，
+`loader.c` / `loader.h`、`gg_kernel_load_gg` / `gg_core_versions` 工具、对应单测一并移除。
 
-```c
-AQ_KO_PROTO=qx      → s_proto=2（QX 协议）
-AQ_KO_DEV=<node>    → s_proto=1（dev 协议）
-（其它 / 未设置）    → s_proto=0（直通真实 syscall）
-```
+删除理由（三条，任一条都足够）：
 
-**它不支持 rwproc。** agentd 现在写进去的是 `AQ_KO_PROTO=rwproc`，
-落到 `s_proto=0` 直通分支 —— 即 GG 核心用**原生 `process_vm_readv`**，
-靠 root 权限工作，没有走我们的内核驱动。
+1. **从未成功**：GG 守护链自检报 `android-daemon err`（`ACCEPTANCE.md` 记录）。
+2. **唯一会改写用户文件的动作**：`loader_load` 备份并覆盖 GG 的 `lib5.so`，
+   中途失败可能让用户的核心无法还原。
+3. **与 rwproc33 协议不兼容**：它只认 `qx` / `dev` / 直通三种 proto，不支持 rwproc33
+   的 33 字节头协议。就算跑通，GG 核心也只能走原生 `process_vm_readv`，
+   拿不到内核通道。
 
-后果：GG 核心能跑，但没有内核 hook 保护，理论上更容易被检测。
-要补的话需要在 `hook.c` 里加 `rwproc` 分支（33B 头协议重定向）。
+现状：agentd 自带引擎直接经 rwproc33 读写，**不需要 GG 本体**。
+wire 命令码 28/29 保留占位（见 `PROTOCOL.md`），旧客户端调用得到明确错误。
 
 ## 5. 本机实测（2026-10-21）
 

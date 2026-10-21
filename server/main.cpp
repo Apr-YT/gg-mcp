@@ -29,8 +29,6 @@ static void print_banner(const ServerConfig& cfg) {
         " GG-GHOST-MCP v1.0.0 (GameGuardian MCP)\n"
         " transport : " << cfg.transport << "\n"
         " agentd    : 127.0.0.1:" << cfg.agent_port << " (adb forward)\n"
-        " GG 版本族 : " << cfg.gg_version_pattern
-        << (cfg.gg_strict ? " (strict)" : " (lenient)") << "\n"
         " safe-mode : " << (cfg.safe_mode ? "ON (read-only)" : "off") << "\n"
         " wire auth : " << (cfg.wire_key.empty() ? "DISABLED (agentd 若要求鉴权将连不上)"
                                                  : "ENABLED") << "\n"
@@ -71,14 +69,6 @@ static LoadResult load_config(const std::string& path, ServerConfig* cfg) {
         cfg->annotations_file = j.value("annotations_file", cfg->annotations_file);
         cfg->export_dir = j.value("export_dir", cfg->export_dir);
         cfg->max_save_bytes = j.value("max_save_bytes", (int64_t)cfg->max_save_bytes);
-        if (j.contains("gg")) {
-            if (!j["gg"].is_object()) {
-                std::cerr << "[GG-GHOST-MCP][FATAL] config.gg must be an object\n";
-                return LOAD_INVALID;
-            }
-            cfg->gg_version_pattern = j["gg"].value("version_pattern", cfg->gg_version_pattern);
-            cfg->gg_strict = j["gg"].value("strict", cfg->gg_strict);
-        }
     } catch (const std::exception& e) {
         std::cerr << "[GG-GHOST-MCP][FATAL] bad config field: " << e.what() << "\n";
         return LOAD_INVALID;

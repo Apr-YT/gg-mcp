@@ -588,16 +588,6 @@ json tool_ghost_swipe(Session::CallCtx& c, const json& a) {
 
 // ---- 状态/内核 ----
 json tool_kernel_status(Session::CallCtx& c, const json&) { return c.send(GGCMD_KERNEL_STATUS); }
-json tool_kernel_load_gg(Session::CallCtx& c, const json& a) {
-    c.params["pattern"] = a.value("pattern", c.cfg().gg_version_pattern);
-    c.params["strict"] = a.value("strict", c.cfg().gg_strict);
-    if (a.contains("dir")) c.params["dir"] = a["dir"];
-    return c.send(GGCMD_LOAD_GG);
-}
-json tool_core_versions(Session::CallCtx& c, const json& a) {
-    c.params["pattern"] = a.value("pattern", c.cfg().gg_version_pattern);
-    return c.send(GGCMD_CORE_VERSIONS);
-}
 json tool_status(Session::CallCtx& c, const json&) {
     return c.ok(c.s->local_status());
 }
@@ -711,8 +701,6 @@ const ToolEntry kTools[] = {
     {"gg_ghost_swipe",      tool_ghost_swipe,      true},
 
     {"gg_kernel_status",    tool_kernel_status,    false},
-    {"gg_kernel_load_gg",   tool_kernel_load_gg,   true},
-    {"gg_core_versions",    tool_core_versions,    false},
     {"gg_status",           tool_status,           false},
     {"gg_shell",            tool_shell,            true},
     {"gg_device_info",      tool_device_info,      false},

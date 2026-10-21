@@ -1,4 +1,9 @@
-# VERSION_MATCHING.md — 版本族匹配规则（GG 核心 + KO 驱动）
+# VERSION_MATCHING.md — 版本族匹配规则（KO 驱动）
+
+> ⚠️ **2026-10-21：本文的「GG 核心版本族」部分已作废。**
+> GG 核心注入链路（`lib5_stub` + `libKernelGg.so` + `loader.c`）已整条删除，
+> `gg_kernel_load_gg` / `gg_core_versions` 工具不再存在。
+> 下文 `6.12.xx`（KO 驱动 vermagic）部分仍然有效，见 `RWPROC33_ADAPTER.md` §十一。
 
 ## 核心需求
 

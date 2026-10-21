@@ -8,8 +8,6 @@ Capstone 的获取与交叉编译步骤、批处理参数用法、常见报错�
 | 产物 | 路径 | 说明 |
 |------|------|------|
 | `gg-agentd` | `build/agentd/gg-agentd` | 设备端守护进程，动态 PIE 可执行文件 |
-| `libKernelGg.so` | `build/native/libKernelGg.so` | syscall 270 hook 动态库 |
-| `lib5_stub` | `build/native/lib5_stub` | 静态 PIE ELF 桩 |
 
 ---
 
@@ -196,8 +194,6 @@ cmd //c "scripts\build_ndk.bat"
 
 1. 用 `aarch64-linux-android28-clang.cmd` 把 `agentd/*.c` + `third_party/cJSON.c` 编成
    `build/agentd/gg-agentd`（`-O3 -flto`，链接 `libcapstone.a`，`-pie`）。
-2. `native/hook/hook.c` → `build/native/libKernelGg.so`（`-shared -fPIC`）。
-3. `native/stub/lib5_stub.c` → `build/native/lib5_stub`（`-static-pie`）。
 
 任一阶段失败会打印 `[FAIL]` 并以非 0 退出，不会留半成品成功提示。
 

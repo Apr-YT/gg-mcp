@@ -195,8 +195,6 @@ g++ -std=c++17 -O2 -Wall -Wextra ^
 /data/adb/GG-Ghost/
 ├── GG-Ghost.sh            # 包装启动脚本（start/stop/status）
 ├── gg-ghost-agentd        # 设备端守护进程
-├── libKernelGg.so.gz      # GG 核心 hook so（gzip 压缩存储）
-├── lib5_stub.gz           # GG 核心 ELF 桩（gzip 压缩存储）
 ├── ko/
 │   ├── rwProcMem_module.ko      # 内存读写 + gg-ghost 触摸驱动
 │   └── hwBreakpointProc_module.ko  # 硬件断点驱动（全线程 INST_ALL）
@@ -332,7 +330,7 @@ su -c 'sh /data/adb/GG-Ghost/GG-Ghost.sh stop'      # 停止
 | gg-mcp 源码 | `D:\project\workbuddy\工具\gg\`（git: Apr-YT/gg-mcp） |
 | 设备端工具 | `D:\project\ai_workspace\scripts\gg-ghost-touch.c`（用户态 + 内核双模式） |
 | 编译环境 | Linux Mint VM（king@192.168.42.128，key: `~/.ssh/vm_mint_ed25519`，内核树 /opt/gki） |
-| 构建产物 | `gg\build\agentd\gg-ghost-agentd`、`gg\build\pc\gg-ghost-mcp.exe`、`gg\build\native\libKernelGg.so/lib5_stub` |
+| 构建产物 | `gg-mcp\build\agentd\gg-agentd`、`gg-mcp\build\pc\gg-ghost-mcp.exe`、`gg-mcp\build\ko\*.ko` |
 | 部署目录 | 设备 `/data/adb/GG-Ghost/`；**成品包 `D:\Finished product\GG-Ghost\`** |
 | Python 脚本 | `gg\tools\`（ggghost.py / hillclimb_coin.py / ptrscan.py） |
 

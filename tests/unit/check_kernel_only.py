@@ -110,7 +110,7 @@ def main():
             print(f"  - {f}")
         return 1
     print("[OK] driver.c kernel-only guardrail passed "
-          "(no user-level fallback in dev/qx/rwproc paths)")
+          "(no user-level fallback in rwproc paths)")
     return 0
 
 

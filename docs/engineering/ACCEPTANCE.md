@@ -8,8 +8,6 @@
 |---|---|---|
 | `build/pc/gg-ghost-mcp.exe` (~1.4MB) | ✅ | MinGW g++ 16.2 编译通过；stdio/HTTP 双传输冒烟测试通过 |
 | `build/agentd/gg-agentd` (arm64, 83KB) | ✅ | NDK clang 编译通过；ELF Type=DYN (PIE) |
-| `build/native/libKernelGg.so` (7.5KB) | ✅ | NDK 编译通过；导出 GLOBAL `syscall` 符号 |
-| `build/native/lib5_stub` (静态 PIE) | ✅ | NDK `-static-pie` 编译通过；无 INTERP 段 |
 
 ## 2. MCP 服务器（本机已验证 ✅）
 
@@ -34,8 +32,9 @@
 - [x] **引擎集成**：`tests/integration/itest`（搜索→读→写→冻结→解冻 全链路）**ALL PASS** ✅
 - [x] **64 位进程 attach + 搜索**：登山赛车 `com.fingersoft.hillclimb.noncmcc`（arm64）attach → module_base(libgame.so)
       → hex_dump 读 ELF 头 `7f454c46` → 模糊搜索 init/refine → 精确搜索 `0x464c457f` 命中 5256 处 ✅（修复 process_is_64bit 误判后）
-- [ ] **GG 核心对接**：GG 101.1 注入式（lib5_stub+libKernelGg.so）实测失败——GG 守护链自检 `android-daemon err`
-      判定失败；**主链路无需 GG 本体**（agentd 自带引擎，见上一条）
+- [x] ~~GG 核心对接~~：**已放弃并整条删除**（2026-10-21）。GG 101.1 注入式
+      （lib5_stub + libKernelGg.so）实测失败（守护链自检 `android-daemon err`），
+      且是唯一会改写用户 `lib5.so` 的动作。主链路无需 GG 本体（agentd 自带引擎）。
 - [ ] **降级链**：卸载 KO 后 `state=degraded`，搜索仍可用（process_vm_readv / /proc/pid/mem）
 - [ ] **adb 重连**：断线后工具调用报 NO_DEVICE，重连后恢复
 - [ ] **真实 AI 客户端**：Claude Code / Cline 完成握手与一次 `gg_search` 调用

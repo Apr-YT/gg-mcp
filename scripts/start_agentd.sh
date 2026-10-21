@@ -16,23 +16,14 @@ PORT=34127
 LOG=$DIR/agentd.log
 PIDFILE=$DIR/agentd.pid
 
-# KO 配置（可在此调整）
-KO_DIR=$DIR/ko
-KO_PATTERN=6.12.*
-KO_STRICT=1
-# 后端类型: hook | dev | qx | rwproc
-#   hook  : 内核 hook process_vm_readv（零协议）
-#   dev   : /dev 节点 + ioctl 0x7e1a/0x7e1b（通用布局, 填 DEV_PATH）
-#   qx    : Aloha 开源 QX9-10（隐藏进程自动发现 + 建节点, 填 QX_KEY）
-#   rwproc: abcz316/rwProcMem33（proc read 33B 头协议, 开源; 填 RWPROC_MEM_KEY/BP_KEY）
+# 驱动配置
+# 后端只有 rwproc33 一种（hook / dev / qx 三型已于 2026-10-21 删除）。
+# KO 的 insmod 与版本选择由 install_ko.sh 负责，agentd 不参与加载。
 KO_TYPE=rwproc
-DEV_PATH=
-QX_KEY=
 # rwProcMem33 两模块的 proc 节点 auth key（与编译模块时的 CONFIG_PROC_NODE_AUTH_KEY 一致;
 # 留空则 agentd 自动扫描 /proc, 但节点被隐藏时扫描不到, 建议显式填写）
 RWPROC_MEM_KEY=e84523d7b60d5d341a7c4d1861773ecd
 RWPROC_BP_KEY=dce3771681d4c7a143d5d06b7d32548e
-# 若用 dev 型, 填节点路径: DEV_PATH=/dev/your_ko_dev
 
 # wire 握手密钥文件（0600, 仅 root 可读）。存在即启用鉴权：
 # 设备上普通 App 即使能连 127.0.0.1:$PORT，没有密钥也无法调用任何 root 级命令。
@@ -69,15 +60,10 @@ case "$1" in
     else
         echo "[WARN] $WIRE_KEY_FILE 不可用, agentd 将以无鉴权模式启动"
     fi
-    if [ "$KO_TYPE" = "qx" ]; then
-        [ -n "$QX_KEY" ] && ARGS="$ARGS --qx-key $QX_KEY"
-    elif [ "$KO_TYPE" = "rwproc" ]; then
-        [ -n "$RWPROC_MEM_KEY" ] && ARGS="$ARGS --rwproc-key $RWPROC_MEM_KEY"
-        [ -n "$RWPROC_BP_KEY" ] && ARGS="$ARGS --rwproc-bp-key $RWPROC_BP_KEY"
-    else
-        ARGS="$ARGS --ko-dir $KO_DIR --ko-pattern $KO_PATTERN --ko-strict $KO_STRICT"
-        [ -n "$DEV_PATH" ] && ARGS="$ARGS --dev $DEV_PATH"
-    fi
+    # 只传 rwproc 的参数。agentd 对未知参数是 "unknown arg" + return 1（直接退出），
+    # 所以绝不能再传 --dev / --qx-key 这类已删除的历史参数。
+    [ -n "$RWPROC_MEM_KEY" ] && ARGS="$ARGS --rwproc-key $RWPROC_MEM_KEY"
+    [ -n "$RWPROC_BP_KEY" ] && ARGS="$ARGS --rwproc-bp-key $RWPROC_BP_KEY"
     setsid nohup "$BIN" $ARGS --log "$LOG" >/dev/null 2>&1 < /dev/null &
     echo $! > "$PIDFILE"
     # 轮询就绪(最多 5s, 每 0.5s), 避免 KO 加载慢时过早判失败
@@ -131,7 +117,7 @@ KEOF
     cat > /data/adb/modules/vsec/service.sh <<'KEOF'
 #!/system/bin/sh
 # KernelSU boot: 启动 agentd（dspbridge 伪装）+ 内核通道恢复
-sh /data/adb/vendor_security/start_agentd.sh start
+sh /data/adb/GG-Ghost/start_agentd.sh start
 KEOF
     chmod 755 /data/adb/modules/vsec/service.sh
     echo "已写入 /data/adb/modules/vsec (KernelSU boot service)"

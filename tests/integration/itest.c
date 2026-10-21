@@ -102,13 +102,30 @@ int main(void) {
     if (g_child < 0) { printf("FATAL: fork failed\n"); return 1; }
     usleep(200000);
 
-    /* 2) 驱动初始化 + 自检 */
+    /* 2) 驱动初始化 + 自检（仅 rwproc33；hook/dev/qx 三型已于 2026-10-21 删除）
+     * key 从环境变量取，未设置时由 driver_init_rwproc 自动扫描 /proc
+     * （模块未隐藏时可见）。 */
     gg_driver_t drv;
-    driver_init(&drv, "hook", NULL, 0x7e1a, 0x7e1b);
+    const char *mem_key = getenv("GG_MEM_KEY");
+    const char *bp_key = getenv("GG_BP_KEY");
+    if (driver_init_rwproc(&drv, mem_key, bp_key) != 0) {
+        printf("FATAL: driver_init_rwproc failed: %s\n", drv.last_error);
+        return 1;
+    }
+    /* driver_init_rwproc 只做字段初始化，节点打开 + CMD_INIT_DEVICE_INFO
+     * 在 rwproc_attach 里（与 agentd main.c 的顺序一致，漏了它 self-test 必然 unavailable）。 */
+    if (rwproc_attach(&drv) != 0) {
+        printf("FATAL: rwproc_attach failed: %s\n", drv.last_error);
+        return 1;
+    }
     int st = driver_self_test(&drv);
     printf("driver self-test: %d (%s)\n", st, driver_state_str(drv.state));
-    CHECK(st >= 0, "driver channel available (kernel or degraded)");
-    printf("  note: state=ko-hook/kernel-driver 表示 KO/QX 通道 OK；degraded 表示走降级链\n");
+    CHECK(st > 0, "rwproc33 channel available");
+    if (st <= 0) {
+        /* 通道不可用则后续搜索/读写全部无意义，早退比一路报错清楚 */
+        printf("FATAL: rwproc channel unavailable: %s\n", drv.last_error);
+        return 1;
+    }
 
     /* 3) 精确搜索（子进程尚未自增, 值应为 0x12345678） */
     gg_results_t res;

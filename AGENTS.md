@@ -10,7 +10,6 @@
 ```
 server/    PC 端 gg-ghost-mcp（C++17）：MCP 协议 + 会话 + wire 客户端
 agentd/    设备端 gg-agentd（C, NDK arm64, root）：搜索/读写/冻结/监视 + 驱动对接
-native/    内核侧：hook.c（hook 型 KO）、lib5_stub.c（GG 核心加载桩）
 shared/    wire_protocol.h — PC/设备双端协议唯一事实源（20B 头 + JSON 负载；含 GGCMD_AUTH 握手）
 tests/     unit（posix_stub 可 PC 跑）/ integration / regression 三层
 scripts/   构建（build_pc.bat / build_ndk.bat / build_all.bat）、部署、测试、基准
@@ -46,9 +45,8 @@ python tests\unit\check_kernel_only.py
 > - NDK 为 **r30**（`D:\Kiln\android-ndk-r30`，`Pkg.Revision = 30.0.16248370`）；
 >   `toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android28-clang.cmd` 存在。
 > - **capstone 5.0.1 已就位**：`D:\Kiln\capstone\capstone-5.0.1\libcapstone.a`（17:44 装入）。
-> - **agentd / native 现已可本地完整编译**。实测 `scripts\build_ndk.bat` 全绿，产出
->   `build\agentd\gg-agentd`（2.4MB，ELF64 **AArch64 PIE**，仅 NEEDED `libc.so`/`libdl.so`，`-Wall` 零警告）、
->   `build\native\libKernelGg.so`、`build\native\lib5_stub`。
+> - **agentd 现已可本地完整编译**。实测 `scripts\build_ndk.bat` 全绿，产出
+>   `build\agentd\gg-agentd`（2.4MB，ELF64 **AArch64 PIE**，仅 NEEDED `libc.so`/`libdl.so`，`-Wall` 零警告）。
 > - ⚠️ **编译通过 ≠ 功能可用**：设备端改动仍必须过真机 itest（`deploy.bat` → `run_itest.ps1`）才算完成。
 > - `run_tests.bat` 的护栏探测已修（此前是死代码）：找不到 python 会**直接 `exit /b 1`**，
 >   不再静默跳过报假绿。确需跳过时显式设 `GG_SKIP_GUARDRAILS=1`；
