@@ -1,6 +1,7 @@
 # FINAL REPORT — gg-mcp 全面审查（2026-10-21）
 
-> 分支：`audit/full-review`（基于 `master` @ `dddda9b`）
+> 分支：`audit/full-review`（已 rebase 到 `master` @ `4b0a4d7`，无冲突）
+> 审查基线为 `dddda9b`；rebase 后重新执行了构建、单元测试与冒烟测试，全部通过
 > 审查范围：PC server（C++17）、agentd（C, NDK arm64）、wire 协议、MCP 服务层、构建/测试体系
 > 说明：`fix/mem-io-integrity` 分支基于旧代码（落后 20+ 提交，且其修改的 hook/dev/qx 三型驱动已被删除），
 > 本次未合并、未使用。
@@ -47,6 +48,17 @@
 | 静态分析 | `lint.bat` → cppcheck | ⚠️ **完整跑未完成**（一次用户中断、一次超时）。分项结论：agentd 段 `EXIT=0`；自有代码唯一告警是 `wire.cpp` 的宏参数 #ifdef，已修；`lint.bat` 失败传播用结构副本实测 `RC=1` |
 | 完整测试套件 | `scripts\test_all.bat` | ✅ **RC=0**，四阶段：单元 ✅ / 冒烟 18/18 ✅ / 真机集成 ✅ / 基准 SKIP |
 | 真机集成测试 | `tests\integration\run_itest.ps1` | ✅ **ITEST ALL PASS** |
+
+### rebase 后复验（master 4b0a4d7）
+
+审查期间 `master` 前进了一个提交（`4b0a4d7` hwbp KO 脚本/文档，与本次改动无重叠）。rebase 后重跑：
+
+| 项 | 结果 |
+|---|---|
+| `build_pc.bat` | ✅ |
+| `build_ndk.bat` | ✅ |
+| `run_tests.bat` | ✅ RC=0（含三道结构护栏） |
+| `test_stdio_smoke.py` | ✅ RC=0，18/18 |
 
 ### 真机结果的两次记录（如实保留）
 
