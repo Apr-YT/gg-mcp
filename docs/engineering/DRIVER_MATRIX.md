@@ -101,9 +101,61 @@ wire 命令码 28/29 保留占位（见 `PROTOCOL.md`），旧客户端调用得
 并说明原因；要启用需 `agentd --hwbp`（仅在换用自编译模块后）。四个 `gg_watch_*`
 因此处于「保留但默认不可用」状态。
 
-**要恢复硬件断点**：按 `RWPROC33_ADAPTER.md` §10 在 VM 里用 6.12 源码树重编
-`hwBreakpointProc_module`（枚举改 1 起始 + 回调改 raw_spinlock），再用 §11 的两步
-（vermagic + CRC）适配到本机。
+### 4.6 源码已定位，缺陷共三处（2026-10-21 晚）
+
+源码在 `build/rwProcMem33/hwBreakpointProcModule/hwBreakpointProc_module/`（afei 仓库）。
+读源码后确认：**afei 的 prebuilt 是上游原版编译的，下面三条一个都没修**。
+
+| # | 位置 | 缺陷 | 后果 |
+|---|---|---|---|
+| 1 | `hwBreakpointProc_module.h` 的 `enum` | 首项 `CMD_OPEN_PROCESS` **无赋值 → 从 0 起**，而 `rwProcMem_module.h` 是 `CMD_INIT_DEVICE_INFO = 1`；agentd 的 `RWBP_CMD_*` 按 1 起始发 | `cmd=1`（以为 OPEN）落到 `CLOSE_PROCESS` → `put_pid((struct pid*)1)` 解引用野指针 → **整机重启**（实测就是这一步） |
+| 2 | `hwbp_proc.c` / `hwBreakpointProc_module.c` 的 `hwbp_handler` | perf_event 溢出回调（ARM64 调试异常，中断/抢占关闭）里 `mutex_lock` + `cvector_pushback`（内部 vmalloc） | `scheduling while atomic` → 命中时挂死。即使修好①，命中那一刻照样崩 |
+| 3 | `OnCmdGetHwbpHitDetail` | 返回**条目数**，而 `driver.c` 按 `rsize / sizeof(item)` 折算条目数 | 条数 < 312 时恒为 0 → **永远取不到命中**（这条此前没被发现） |
+
+作者自己也写过这个差异（`AFEI_CHANGES.md` 第 3 条）："rwProcMem 首项显式 `=1` ⇒ UNHIDE=15；
+hwBreakpointProc 首项从 0 起 ⇒ =12" —— 他知道，但只用来算自己的命令号，没对齐成 1 起始。
+
+**已完成的修复**（`scripts/patches/hwbp-fix.patch`，4 文件 +195/−155）：
+
+- 枚举改 `CMD_OPEN_PROCESS = 1`，`CMD_UNHIDE_KERNEL_MODULE` 挪到 14，13 让给
+  `CMD_INST_PROCESS_HWBP_ALL`（watch.c 用的批量注册，避免撞号）
+- 句柄表 `cvector` → 固定 16 槽静态数组（UNINST 用 swap-remove）；
+  命中缓冲改 INST 时一次性 `vmalloc` 的固定数组，回调内只 `memcpy`
+- `struct mutex` → `raw_spinlock_t`；`COUNT`/`DETAIL` 的 `copy_to_user` 挪到锁外
+  （会缺页睡眠）；`DETAIL` 返回字节数
+- `CONFIG_MODIFY_HIT_NEXT_MODE` / `CONFIG_ANTI_PTRACE_DETECTION_MODE` 关闭
+  （前者让回调改断点属性、后者接管已废弃的 mutex+cvector），
+  `SUSPEND/RESUME` 改为句柄 `suspended` 标志
+
+**编译环境（已在本机 WSL 打通）**：`scripts/build_hwbp_ko.sh`。
+Ubuntu 24.04 + clang 18/lld/flex/bison + Linux 6.12 源码，用设备真值 config
+（`/proc/config.gz`，8162 行）以 `ARCH=arm64` 配置，vermagic 通过
+`SUBLEVEL=69` + `CONFIG_LOCALVERSION="-android16-6-4k"` 直接产出设备真值。
+改后的源码编译通过（332KB）。
+
+**当前卡点：`struct module` 尺寸**。vanilla 6.12 是 **1280** 字节；GKI 是 **1344**
+（多 `scmversion`、无条件的 `sig_ok`、4×`ANDROID_KABI_RESERVE`）。用设备 config 也不够 ——
+GKI 的改动不在 config 里。insmod 报：
+
+```
+module hwBreakpointProc_module: .gnu.linkonce.this_module section size
+must match the kernel's built struct module size at run time
+```
+
+已把 GKI 的 `include/linux/module.h` + `android_kabi.h`（单文件下载，28KB+6KB）替换进
+vanilla 树，尺寸从 1280 变成 **1344**，但仍被拒 —— 说明设备内核与当前 GKI 分支
+（android16-6.12）的 `struct module` 还有差异，需要**完整 GKI 源码树**而不是单换头文件。
+
+**下一步（唯一可靠路径）**：
+
+1. 取完整 GKI 源码：`android.googlesource.com/kernel/common` 的 `android16-6.12`，
+   或 GitHub 镜像 `aosp-mirror/kernel_common`（本机经 ghfast 代理下 tarball 会
+   在 42MB 处断流且不支持 Range 续传，需要换网络或用 `git clone --depth 1`）。
+2. `ARCH=arm64 olddefconfig` + `modules_prepare`（用设备 config）。
+3. 打 `scripts/patches/hwbp-fix.patch` 后编译。
+4. 真机 `insmod` 应能看到 `proc 节点`；再逐步 `gg_watch_set` → 写触发 → `gg_watch_poll`。
+
+在此之前，`gg_watch_*` 保持默认禁用（返回 `DEGRADED`）。
 
 ## 5. 本机实测（2026-10-21）
 

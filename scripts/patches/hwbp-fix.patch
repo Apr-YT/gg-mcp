@@ -1,0 +1,560 @@
+diff --git a/hwBreakpointProcModule/hwBreakpointProc_module/api_proxy.h b/hwBreakpointProcModule/hwBreakpointProc_module/api_proxy.h
+index 13980ea..8c2db97 100644
+--- a/hwBreakpointProcModule/hwBreakpointProc_module/api_proxy.h
++++ b/hwBreakpointProcModule/hwBreakpointProc_module/api_proxy.h
+@@ -12,9 +12,13 @@ static void x_unregister_hw_breakpoint(struct perf_event *bp) {
+ 	unregister_hw_breakpoint_sym(bp);
+ }
+ 
++#ifdef CONFIG_MODIFY_HIT_NEXT_MODE
++/* 仅在精准命中模式下需要：关闭该模式时 kallsyms 里不解析这个符号
++ * （SUSPEND/RESUME 已改为句柄标志位，不再依赖它）。 */
+ static int x_modify_user_hw_breakpoint(struct perf_event *bp, struct perf_event_attr *attr) {
+ 	return modify_user_hw_breakpoint_sym(bp, attr);
+ }
++#endif
+ #else
+ static struct perf_event* x_register_user_hw_breakpoint(struct perf_event_attr *attr, perf_overflow_handler_t triggered, void *context, struct task_struct *tsk) {
+ 	return register_user_hw_breakpoint(attr, triggered, context, tsk);
+@@ -24,10 +28,12 @@ static void x_unregister_hw_breakpoint(struct perf_event *bp) {
+ 	unregister_hw_breakpoint(bp);
+ }
+ 
++#ifdef CONFIG_MODIFY_HIT_NEXT_MODE
+ static int x_modify_user_hw_breakpoint(struct perf_event *bp, struct perf_event_attr *attr) {
+ 	return modify_user_hw_breakpoint(bp, attr);
+ }
+ #endif
++#endif
+ 
+ static void * x_kmalloc(size_t size, gfp_t flags) {
+ 	/* ★6.12 适配：本内核 CONFIG_SLAB_BUCKETS=y，没有裸 __kmalloc 可链接，
+diff --git a/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.c b/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.c
+index a1e47b0..864b911 100644
+--- a/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.c
++++ b/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.c
+@@ -18,8 +18,18 @@ struct ioctl_request {
+ static atomic64_t g_hook_pc;
+ 
+ 
+-static struct mutex g_hwbp_handle_info_mutex;
+-static cvector g_hwbp_handle_info_arr = NULL;
++/* 句柄表改固定数组 + raw_spinlock：
++ * 原实现是 cvector + struct mutex。cvector_pushback 内部 vmalloc，而命中回调
++ * hwbp_handler 运行在 perf_event 溢出上下文（ARM64 调试异常，中断/抢占关闭），
++ * 在那里 mutex_lock + vmalloc 会 scheduling while atomic → 整机挂死。
++ * 现在：句柄表固定 16 槽（INST 写入、UNINST 用 swap-remove，全程 spinlock）；
++ * 命中缓冲在 INST（进程上下文）一次性 vmalloc，回调只做 memcpy。 */
++#define HWBP_MAX_HANDLES 16
++#define HWBP_HIT_CAP     1024   /* 每个断点最多缓存多少条命中（= 上游 MIN_LEN） */
++
++static DEFINE_RAW_SPINLOCK(g_hwbp_lock);
++static struct HWBP_HANDLE_INFO g_hwbp_handles[HWBP_MAX_HANDLES];
++static int g_hwbp_nhandle;
+ 
+ static void record_hit_details(struct HWBP_HANDLE_INFO *info, struct pt_regs *regs) {
+     struct HWBP_HIT_ITEM hit_item = {0};
+@@ -35,11 +45,9 @@ static void record_hit_details(struct HWBP_HANDLE_INFO *info, struct pt_regs *re
+     hit_item.regs_info.pstate = regs->pstate;
+     hit_item.regs_info.orig_x0 = regs->orig_x0;
+     hit_item.regs_info.syscallno = regs->syscallno;
+-    if (info->hit_item_arr) {
+-		if(cvector_length(info->hit_item_arr) < MIN_LEN) { // 最多存放MIN_LEN个
+-			cvector_pushback(info->hit_item_arr, &hit_item);
+-		}
+-    }
++    /* 只做一次 memcpy —— 调用方已持 raw_spinlock，这里不能分配、不能睡眠 */
++    if (info->hit_arr && info->hit_count < HWBP_HIT_CAP)
++        info->hit_arr[info->hit_count++] = hit_item;
+ }
+ 
+ #ifdef CONFIG_MODIFY_HIT_NEXT_MODE
+@@ -88,7 +96,8 @@ static void hwbp_hit_user_info_callback(struct perf_event *bp,
+ static void hwbp_handler(struct perf_event *bp,
+ 	struct perf_sample_data *data,
+ 	struct pt_regs *regs) {
+-	citerator iter;
++	int i;
++	unsigned long flags;
+ 	uint64_t hook_pc;
+ 	printk_debug(KERN_INFO "hw_breakpoint HIT!!!!! bp:%px, pc:%px, id:%d\n", bp, regs->pc, bp->id);
+ 
+@@ -98,12 +107,13 @@ static void hwbp_handler(struct perf_event *bp,
+ 		return;
+ 	}
+ 
+-	mutex_lock(&g_hwbp_handle_info_mutex);
+-	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
+-		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
+-		if (hwbp_handle_info->sample_hbp != bp) {
++	raw_spin_lock_irqsave(&g_hwbp_lock, flags);
++	for (i = 0; i < g_hwbp_nhandle; i++) {
++		struct HWBP_HANDLE_INFO * hwbp_handle_info = &g_hwbp_handles[i];
++		if (hwbp_handle_info->sample_hbp != bp)
+ 			continue;
+-		}
++		if (hwbp_handle_info->suspended)   /* 已暂停：只跳过记录 */
++			break;
+ #ifdef CONFIG_MODIFY_HIT_NEXT_MODE
+ 		if(hwbp_handle_info->next_instruction_attr.bp_addr != regs->pc) {
+ 			// first hit
+@@ -129,7 +139,7 @@ static void hwbp_handler(struct perf_event *bp,
+ #endif
+ 	}
+ 	
+-	mutex_unlock(&g_hwbp_handle_info_mutex);
++	raw_spin_unlock_irqrestore(&g_hwbp_lock, flags);
+ }
+ 
+ 
+@@ -182,6 +192,7 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
+ 	pid_t pid_val;
+ 	struct task_struct *task;
+ 	struct HWBP_HANDLE_INFO hwbp_handle_info = { 0 };
++	unsigned long flags;
+ 	printk_debug(KERN_INFO "CMD_INST_PROCESS_HWBP\n");
+ 	printk_debug(KERN_INFO "proc_pid_struct *:%px\n", proc_pid_struct);
+ 	printk_debug(KERN_INFO "proc_virt_addr :%px\n", proc_virt_addr);
+@@ -217,10 +228,23 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
+ 		printk_debug(KERN_INFO "register_user_hw_breakpoint failed: %d\n", ret);
+ 		return ret;
+ 	}
+-	hwbp_handle_info.hit_item_arr = cvector_create(sizeof(struct HWBP_HIT_ITEM));
+-	mutex_lock(&g_hwbp_handle_info_mutex);
+-	cvector_pushback(g_hwbp_handle_info_arr, &hwbp_handle_info);
+-	mutex_unlock(&g_hwbp_handle_info_mutex);
++	/* 命中缓冲在进程上下文预分配（可睡眠），回调里只用不申请 */
++	hwbp_handle_info.hit_arr = vmalloc(HWBP_HIT_CAP * sizeof(struct HWBP_HIT_ITEM));
++	if (!hwbp_handle_info.hit_arr) {
++		x_unregister_hw_breakpoint(hwbp_handle_info.sample_hbp);
++		return -ENOMEM;
++	}
++	hwbp_handle_info.hit_count = 0;
++
++	raw_spin_lock_irqsave(&g_hwbp_lock, flags);
++	if (g_hwbp_nhandle >= HWBP_MAX_HANDLES) {
++		raw_spin_unlock_irqrestore(&g_hwbp_lock, flags);
++		vfree(hwbp_handle_info.hit_arr);
++		x_unregister_hw_breakpoint(hwbp_handle_info.sample_hbp);
++		return -ENOSPC;
++	}
++	g_hwbp_handles[g_hwbp_nhandle++] = hwbp_handle_info;
++	raw_spin_unlock_irqrestore(&g_hwbp_lock, flags);
+ 
+ 	if (x_copy_to_user((void*)buf, &hwbp_handle_info.sample_hbp, sizeof(uint64_t))) {
+ 		return -EINVAL;
+@@ -230,28 +254,29 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
+ 
+ static ssize_t OnCmdUninstProcessHwbp(struct ioctl_request *hdr, char __user* buf) {
+ 	struct perf_event * sample_hbp = (struct perf_event *)hdr->param1;
+-	citerator iter;
++	int i;
++	unsigned long flags;
+ 	bool found = false;
++	struct HWBP_HIT_ITEM *freed_arr = NULL;
+ 	printk_debug(KERN_INFO "CMD_UNINST_PROCESS_HWBP\n");
+ 	printk_debug(KERN_INFO "sample_hbp *:%px\n", sample_hbp);
+ 	if(!sample_hbp) {
+ 		return -EFAULT;
+ 	}
+ 
+-	mutex_lock(&g_hwbp_handle_info_mutex);
+-	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
+-		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
+-		if(hwbp_handle_info->sample_hbp == sample_hbp) {
+-			if(hwbp_handle_info->hit_item_arr) {
+-				cvector_destroy(hwbp_handle_info->hit_item_arr);
+-				hwbp_handle_info->hit_item_arr = NULL;
+-			}
+-			cvector_rm(g_hwbp_handle_info_arr, iter);
+-			found = true;
+-			break;
+-		}
+-	}
+-	mutex_unlock(&g_hwbp_handle_info_mutex);
++	raw_spin_lock_irqsave(&g_hwbp_lock, flags);
++	for (i = 0; i < g_hwbp_nhandle; i++) {
++		struct HWBP_HANDLE_INFO * hwbp_handle_info = &g_hwbp_handles[i];
++		if (hwbp_handle_info->sample_hbp != sample_hbp)
++			continue;
++		freed_arr = hwbp_handle_info->hit_arr;              /* vfree 放到锁外 */
++		g_hwbp_handles[i] = g_hwbp_handles[--g_hwbp_nhandle]; /* swap-remove */
++		found = true;
++		break;
++	}
++	raw_spin_unlock_irqrestore(&g_hwbp_lock, flags);
++	if (freed_arr)
++		vfree(freed_arr);            /* 可能睡眠，必须在锁外 */
+ 	if(found) {
+ 		x_unregister_hw_breakpoint(sample_hbp);
+ 	}
+@@ -261,64 +286,50 @@ static ssize_t OnCmdUninstProcessHwbp(struct ioctl_request *hdr, char __user* bu
+ 
+ static ssize_t OnCmdSuspendProcessHwbp(struct ioctl_request *hdr, char __user* buf) {
+ 	struct perf_event * sample_hbp = (struct perf_event *)hdr->param1;
+-	struct perf_event_attr new_instruction_attr;
+-	citerator iter;
+ 	bool found = false;
++	int i;
++	unsigned long flags;
+ 	printk_debug(KERN_INFO "CMD_SUSPEND_PROCESS_HWBP\n");
+-	printk_debug(KERN_INFO "sample_hbp *:%px\n", sample_hbp);
+-	if(!sample_hbp) {
++	if (!sample_hbp)
+ 		return -EFAULT;
+-	}
+ 
+-	mutex_lock(&g_hwbp_handle_info_mutex);
+-	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
+-		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
+-		if(hwbp_handle_info->sample_hbp == sample_hbp) {
+-			hwbp_handle_info->original_attr.disabled = 1;
+-			memcpy(&new_instruction_attr, &hwbp_handle_info->original_attr, sizeof(struct perf_event_attr));
+-			found = true;
+-			break;
+-		}
+-	}
+-	mutex_unlock(&g_hwbp_handle_info_mutex);
+-	if(found) {
+-		if(!x_modify_user_hw_breakpoint(sample_hbp, &new_instruction_attr)) {
+-			return 0;
+-		}
++	/* 只改标志位：回调看到 suspended 就跳过记录。不去动 perf_event 属性 ——
++	 * 那要进 perf_event 的 mutex，而本模块的锁已经是 raw_spinlock。 */
++	raw_spin_lock_irqsave(&g_hwbp_lock, flags);
++	for (i = 0; i < g_hwbp_nhandle; i++) {
++		if (g_hwbp_handles[i].sample_hbp != sample_hbp)
++			continue;
++		g_hwbp_handles[i].suspended = 1;
++		found = true;
++		break;
+ 	}
+-	return -EFAULT;
+-}
++	raw_spin_unlock_irqrestore(&g_hwbp_lock, flags);
+ 
++	return found ? 0 : -EFAULT;
++}
+ static ssize_t OnCmdResumeProcessHwbp(struct ioctl_request *hdr, char __user* buf) {
+ 	struct perf_event * sample_hbp = (struct perf_event *)hdr->param1;
+-	struct perf_event_attr new_instruction_attr;
+-	citerator iter;
+ 	bool found = false;
++	int i;
++	unsigned long flags;
+ 	printk_debug(KERN_INFO "CMD_RESUME_PROCESS_HWBP\n");
+-	printk_debug(KERN_INFO "sample_hbp *:%px\n", sample_hbp);
+-	if(!sample_hbp) {
++	if (!sample_hbp)
+ 		return -EFAULT;
+-	}
+ 
+-	mutex_lock(&g_hwbp_handle_info_mutex);
+-	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
+-		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
+-		if(hwbp_handle_info->sample_hbp == sample_hbp) {
+-			hwbp_handle_info->original_attr.disabled = 0;
+-			memcpy(&new_instruction_attr, &hwbp_handle_info->original_attr, sizeof(struct perf_event_attr));
+-			found = true;
+-			break;
+-		}
+-	}
+-	mutex_unlock(&g_hwbp_handle_info_mutex);
+-	if(found) {
+-		if(!x_modify_user_hw_breakpoint(sample_hbp, &new_instruction_attr)) {
+-			return 0;
+-		}
++	/* 只改标志位：回调看到 suspended 就跳过记录。不去动 perf_event 属性 ——
++	 * 那要进 perf_event 的 mutex，而本模块的锁已经是 raw_spinlock。 */
++	raw_spin_lock_irqsave(&g_hwbp_lock, flags);
++	for (i = 0; i < g_hwbp_nhandle; i++) {
++		if (g_hwbp_handles[i].sample_hbp != sample_hbp)
++			continue;
++		g_hwbp_handles[i].suspended = 0;
++		found = true;
++		break;
+ 	}
+-	return -EFAULT;
+-}
++	raw_spin_unlock_irqrestore(&g_hwbp_lock, flags);
+ 
++	return found ? 0 : -EFAULT;
++}
+ static ssize_t OnCmdGetHwbpHitCount(struct ioctl_request *hdr, char __user* buf) {
+ 	#pragma pack(1)
+ 	struct buf_layout {
+@@ -328,21 +339,22 @@ static ssize_t OnCmdGetHwbpHitCount(struct ioctl_request *hdr, char __user* buf)
+ 	#pragma pack()
+ 	struct perf_event *sample_hbp = (struct perf_event *)hdr->param1;
+ 	struct buf_layout user_data = {0};
+-	citerator iter;
++	int i;
++	unsigned long flags;
+ 	printk_debug(KERN_INFO "CMD_GET_HWBP_HIT_COUNT\n");
+ 	printk_debug(KERN_INFO "sample_hbp *:%px\n", sample_hbp);
+ 
+-	mutex_lock(&g_hwbp_handle_info_mutex);
+-	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
+-		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
+-		if (hwbp_handle_info->sample_hbp == sample_hbp && hwbp_handle_info->hit_item_arr) {
++	raw_spin_lock_irqsave(&g_hwbp_lock, flags);
++	for (i = 0; i < g_hwbp_nhandle; i++) {
++		struct HWBP_HANDLE_INFO * hwbp_handle_info = &g_hwbp_handles[i];
++		if (hwbp_handle_info->sample_hbp == sample_hbp && hwbp_handle_info->hit_arr) {
+ 			user_data.hit_total_count = hwbp_handle_info->hit_total_count;
+-			user_data.hit_item_arr_count = cvector_length(hwbp_handle_info->hit_item_arr);
++			user_data.hit_item_arr_count = hwbp_handle_info->hit_count;
+ 			break;
+ 		}
+ 	}
+ 
+-	mutex_unlock(&g_hwbp_handle_info_mutex);
++	raw_spin_unlock_irqrestore(&g_hwbp_lock, flags);
+ 	
+ 	printk_debug(KERN_INFO "user_data.hit_total_count:%zu\n", user_data.hit_total_count);
+ 	if (x_copy_to_user((void*)buf, &user_data, sizeof(user_data))) {
+@@ -354,37 +366,42 @@ static ssize_t OnCmdGetHwbpHitCount(struct ioctl_request *hdr, char __user* buf)
+ static ssize_t OnCmdGetHwbpHitDetail(struct ioctl_request *hdr, char __user* buf) {
+ 	struct perf_event *sample_hbp = (struct perf_event *)hdr->param1;
+ 	size_t size = hdr->buf_size;
+-	ssize_t count = 0;
+-	size_t copy_pos;
+-	size_t end_pos;
+-
+-	citerator iter;
+-	printk_debug(KERN_INFO "sample_hbp *:%ld\n", sample_hbp);
+-
+-	copy_pos = (size_t)buf;
+-	end_pos = (size_t)((size_t)buf + size);
+-
+-	mutex_lock(&g_hwbp_handle_info_mutex);
+-	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
+-		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
+-		if (hwbp_handle_info->sample_hbp == sample_hbp && hwbp_handle_info->hit_item_arr) {
+-			citerator child;
+-			for (child = cvector_begin(hwbp_handle_info->hit_item_arr); child != cvector_end(hwbp_handle_info->hit_item_arr); child = cvector_next(hwbp_handle_info->hit_item_arr, child)) {
+-				struct HWBP_HIT_ITEM * hit_item = (struct HWBP_HIT_ITEM *)child;
+-				if (copy_pos >= end_pos) {
+-					break;
+-				}
+-				if (x_copy_to_user((void*)copy_pos, hit_item, sizeof(struct HWBP_HIT_ITEM))) {
+-					break;
+-				}
+-				copy_pos += sizeof(struct HWBP_HIT_ITEM);
+-				count++;
+-			}
+-			break;
+-		}
++	struct HWBP_HIT_ITEM *tmp;
++	size_t taken = 0;
++	unsigned long flags;
++	int i;
++
++	if (size < sizeof(struct HWBP_HIT_ITEM))
++		return -EINVAL;
++
++	/* 锁外分配临时缓冲：copy_to_user 可能缺页睡眠，raw_spinlock 内不能做；
++	 * 锁内只把命中条目 memcpy 出来，锁外再交给用户态。 */
++	tmp = vmalloc(size);
++	if (!tmp)
++		return -ENOMEM;
++
++	raw_spin_lock_irqsave(&g_hwbp_lock, flags);
++	for (i = 0; i < g_hwbp_nhandle; i++) {
++		struct HWBP_HANDLE_INFO * hwbp_handle_info = &g_hwbp_handles[i];
++		if (hwbp_handle_info->sample_hbp != sample_hbp || !hwbp_handle_info->hit_arr)
++			continue;
++		taken = hwbp_handle_info->hit_count;
++		if (taken > size / sizeof(struct HWBP_HIT_ITEM))
++			taken = size / sizeof(struct HWBP_HIT_ITEM);
++		memcpy(tmp, hwbp_handle_info->hit_arr, taken * sizeof(struct HWBP_HIT_ITEM));
++		break;
++	}
++	raw_spin_unlock_irqrestore(&g_hwbp_lock, flags);
++
++	if (taken &&
++	    x_copy_to_user((void*)buf, tmp, taken * sizeof(struct HWBP_HIT_ITEM))) {
++		vfree(tmp);
++		return -EINVAL;
+ 	}
+-	mutex_unlock(&g_hwbp_handle_info_mutex);
+-	return count;
++	vfree(tmp);
++	/* 返回**字节数**（read() 惯例）。原来返回条目数，而 agentd 用
++	 * rsize / sizeof(item) 折算条目数 → 条数 < 312 时恒为 0，永远取不到命中。 */
++	return (ssize_t)(taken * sizeof(struct HWBP_HIT_ITEM));
+ }
+ 
+ static ssize_t OnCmdSetHookPc(struct ioctl_request *hdr, char __user* buf) {
+@@ -515,39 +532,31 @@ static ssize_t hwBreakpointProc_read(struct file* filp,
+ }
+ 
+ static void clean_hwbp(void) {
+-	citerator iter;
+-	cvector wait_unregister_bp_arr = cvector_create(sizeof(struct perf_event *));
+-	if(!wait_unregister_bp_arr || !g_hwbp_handle_info_arr) {
+-		return;
+-	}
+-	mutex_lock(&g_hwbp_handle_info_mutex);
+-	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
+-		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
+-		if(hwbp_handle_info->sample_hbp) {
+-			cvector_pushback(wait_unregister_bp_arr, &hwbp_handle_info->sample_hbp);
+-			hwbp_handle_info->sample_hbp = NULL;
+-		}
+-		if(hwbp_handle_info->hit_item_arr) {
+-			cvector_destroy(hwbp_handle_info->hit_item_arr);
+-			hwbp_handle_info->hit_item_arr = NULL;
+-		}
+-	}
+-	cvector_destroy(g_hwbp_handle_info_arr);
+-	g_hwbp_handle_info_arr = NULL;
+-	mutex_unlock(&g_hwbp_handle_info_mutex);
+-	
+-	for (iter = cvector_begin(wait_unregister_bp_arr); iter != cvector_end(wait_unregister_bp_arr); iter = cvector_next(wait_unregister_bp_arr, iter)) {
+-	  struct perf_event * bp = *(struct perf_event **)iter;
+-	  x_unregister_hw_breakpoint(bp);
++	struct perf_event *bps[HWBP_MAX_HANDLES];
++	struct HWBP_HIT_ITEM *arrs[HWBP_MAX_HANDLES];
++	int n = 0, i;
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&g_hwbp_lock, flags);
++	for (i = 0; i < g_hwbp_nhandle; i++) {
++		bps[n] = g_hwbp_handles[i].sample_hbp;
++		arrs[n] = g_hwbp_handles[i].hit_arr;
++		n++;
++	}
++	g_hwbp_nhandle = 0;
++	raw_spin_unlock_irqrestore(&g_hwbp_lock, flags);
++
++	/* unregister / vfree 都可能睡眠，一律在锁外 */
++	for (i = 0; i < n; i++) {
++		if (bps[i])
++			x_unregister_hw_breakpoint(bps[i]);
++		if (arrs[i])
++			vfree(arrs[i]);
+ 	}
+-	cvector_destroy(wait_unregister_bp_arr);
+ }
+-
+ static int hwBreakpointProc_release(struct inode *inode, struct file *filp) {
++	/* 句柄表是静态数组，clean_hwbp 已经把 g_hwbp_nhandle 归零，无需重建 */
+ 	clean_hwbp();
+-	mutex_lock(&g_hwbp_handle_info_mutex);
+-	g_hwbp_handle_info_arr = cvector_create(sizeof(struct HWBP_HANDLE_INFO));
+-	mutex_unlock(&g_hwbp_handle_info_mutex);
+ 	return 0;
+ }
+ 
+@@ -569,12 +578,12 @@ static int hwBreakpointProc_dev_init(void) {
+ 		return -EBADF;
+ 	}
+ #endif
+-	g_hwbp_handle_info_arr = cvector_create(sizeof(struct HWBP_HANDLE_INFO));
+-	mutex_init(&g_hwbp_handle_info_mutex);
++	/* 句柄表是静态数组（g_hwbp_handles / g_hwbp_nhandle），锁由
++	 * DEFINE_RAW_SPINLOCK 静态初始化，这里只需清零计数。 */
++	g_hwbp_nhandle = 0;
+ 
+-#ifdef CONFIG_ANTI_PTRACE_DETECTION_MODE
+-	start_anti_ptrace_detection(&g_hwbp_handle_info_mutex, &g_hwbp_handle_info_arr);
+-#endif
++	/* 反 ptrace 侦测依赖已不存在的 mutex + cvector，且其 kprobe 路径本身有
++	 * 崩溃风险；ver_control.h 里已关闭 CONFIG_ANTI_PTRACE_DETECTION_MODE。 */
+ 
+ 	g_hwBreakpointProc_devp = x_kmalloc(sizeof(struct hwBreakpointProcDev), GFP_KERNEL);
+ 	memset(g_hwBreakpointProc_devp, 0, sizeof(struct hwBreakpointProcDev));
+@@ -627,8 +636,6 @@ static void hwBreakpointProc_dev_exit(void) {
+ 
+ 	clean_hwbp();
+ 	
+-	mutex_destroy(&g_hwbp_handle_info_mutex);
+-	
+ #ifdef CONFIG_USE_PROC_FILE_NODE
+ 	if(g_hwBreakpointProc_devp->proc_entry) {
+ 		proc_remove(g_hwBreakpointProc_devp->proc_entry);
+diff --git a/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.h b/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.h
+index 1682453..fbcc005 100644
+--- a/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.h
++++ b/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.h
+@@ -6,6 +6,9 @@
+ #include <linux/errno.h>
+ #include <linux/mm.h>
+ #include <linux/sched.h>
++#include <linux/sched/signal.h>   /* for_each_thread */
++#include <linux/vmalloc.h>
++#include <linux/pid.h>
+ #include <linux/init.h>
+ #include <asm/io.h>
+ #include <asm/uaccess.h>
+@@ -35,8 +38,19 @@
+ #endif
+ //////////////////////////////////////////////////////////////////
+ 
++/* 命令码必须与 agentd/driver.h 的 RWBP_CMD_* 一一对应。
++ *
++ * ★ 上游这里首项没有赋值（从 0 起），而 rwProcMem 模块首项是
++ *   `CMD_INIT_DEVICE_INFO = 1` —— 两个模块基准不同。afei 的 prebuilt 按 0 起编译，
++ *   agentd 按 1 起始发送，于是 cmd=1（以为 OPEN_PROCESS）实际执行
++ *   CMD_CLOSE_PROCESS → put_pid((struct pid*)1) 解引用野指针 → 内核崩。
++ *   这里显式从 1 起始，消除该偏移。
++ *
++ * ★ UNHIDE 从 12 挪到 14，把 13 留给 INST_PROCESS_HWBP_ALL —— 否则它会与
++ *   agentd 的批量注册命令撞号。
++ */
+ enum {
+-	CMD_OPEN_PROCESS, 				// 打开进程
++	CMD_OPEN_PROCESS = 1, 			// 打开进程
+ 	CMD_CLOSE_PROCESS, 				// 关闭进程
+ 	CMD_GET_NUM_BRPS, 				// 获取CPU硬件执行断点支持数量
+ 	CMD_GET_NUM_WRPS, 				// 获取CPU硬件访问断点支持数量
+@@ -48,7 +62,8 @@ enum {
+ 	CMD_GET_HWBP_HIT_DETAIL,		// 获取硬件断点命中详细信息
+ 	CMD_SET_HOOK_PC,				// 设置无条件Hook跳转
+ 	CMD_HIDE_KERNEL_MODULE,			// 隐藏驱动
+-	CMD_UNHIDE_KERNEL_MODULE,		// 【新增·逃生舱】恢复模块可见性，使 rmmod 重新可用
++	CMD_INST_PROCESS_HWBP_ALL,		// 13: 进程内全部线程批量注册（agentd 用）
++	CMD_UNHIDE_KERNEL_MODULE,		// 14: 【AFEI·逃生舱】恢复模块可见性
+ };
+ 
+ struct hwBreakpointProcDev {
+@@ -93,7 +108,15 @@ struct HWBP_HANDLE_INFO {
+ 	struct perf_event_attr next_instruction_attr;
+ #endif
+ 	size_t hit_total_count;
+-	cvector hit_item_arr;
++	/* 命中缓冲：INST 时一次性 vmalloc MIN_LEN 条（进程上下文，可睡眠）；
++	 * 命中回调只往 hit_arr[hit_count++] 里 memcpy，不做任何分配。
++	 * 原来用 cvector，pushback 内部 vmalloc —— 在 perf_event 溢出回调
++	 * （中断上下文）里会 scheduling while atomic。 */
++	struct HWBP_HIT_ITEM *hit_arr;
++	u32 hit_count;
++	/* 暂停标志：SUSPEND 置 1 后回调只跳过记录，不碰硬件属性
++	 * （原来靠 modify_user_hw_breakpoint，要进 perf_event 的 mutex）。 */
++	int suspended;
+ };
+ 
+ #endif /* _HWBP_PROC_H_ */
+\ No newline at end of file
+diff --git a/hwBreakpointProcModule/hwBreakpointProc_module/ver_control.h b/hwBreakpointProcModule/hwBreakpointProc_module/ver_control.h
+index f7ae7b4..ef498ed 100644
+--- a/hwBreakpointProcModule/hwBreakpointProc_module/ver_control.h
++++ b/hwBreakpointProcModule/hwBreakpointProc_module/ver_control.h
+@@ -17,10 +17,14 @@
+ #define CONFIG_KALLSYMS_LOOKUP_NAME
+ 
+ // 精准命中记录模式
+-#define CONFIG_MODIFY_HIT_NEXT_MODE
++// ★ 关闭：开启后命中回调里会 modify_user_hw_breakpoint（进 perf_event ctx->mutex），
++//   而回调本身运行在调试异常上下文；W/R 监视点不需要它，X 断点才用得上。
++//#define CONFIG_MODIFY_HIT_NEXT_MODE
+ 
+ // 反PTRACE侦测模式
+-#define CONFIG_ANTI_PTRACE_DETECTION_MODE
++// ★ 关闭：它要接管 g_hwbp_handle_info_mutex/_arr（已改为静态数组 + raw_spinlock），
++//   且内部 kprobe 路径在本内核上有崩溃风险（见 RWPROC33_ADAPTER.md 10.4）。
++//#define CONFIG_ANTI_PTRACE_DETECTION_MODE
+ 
+ /* ============================================================================
+  * 【AFEI 移植】运行时 CFI 绕过开关
