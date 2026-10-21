@@ -68,4 +68,7 @@ void log_msg(const char *fmt, ...);
  * 排查成本极高。dispatch 在分发前统一用本函数校验 addr/base/pc/fp/sp/lr。 */
 int parse_u64_strict(const char *s, uint64_t *out);
 
+/* force 布尔参数解析（只接受 0/1）。实现在 main.c。 */
+int parse_force(const cJSON *p);
+
 #endif /* GG_ENGINE_INTERNAL_H */

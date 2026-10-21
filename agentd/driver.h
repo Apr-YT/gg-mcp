@@ -169,6 +169,12 @@ int driver_self_test(gg_driver_t *d);
 
 /* 跨进程读/写。返回实际字节数；失败返回 -1 并置 last_error。 */
 ssize_t driver_read(gg_driver_t *d, pid_t pid, uint64_t addr, void *buf, size_t len);
+
+/* 带 force 的读：force=1 让驱动临时改 PTE 强制读（可用于未驻留页/受限页）。
+ * 只有 rwproc 后端有此语义，其余后端忽略。driver_read 等价于 force=0。
+ * 注意：force=1 会与目标进程的活跃页竞争，可能触发内核崩溃，只在必要时用。 */
+ssize_t driver_read_ex(gg_driver_t *d, pid_t pid, uint64_t addr, void *buf,
+                       size_t len, int force);
 ssize_t driver_write(gg_driver_t *d, pid_t pid, uint64_t addr, const void *buf, size_t len);
 
 /* GG-TOUCH 内核虚拟触摸注入。

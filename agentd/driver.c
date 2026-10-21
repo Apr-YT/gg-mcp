@@ -331,16 +331,17 @@ int rwproc_close_process(gg_driver_t *d, uint64_t handle) {
 }
 
 /* rwproc 读（调用方已持有引擎锁）。len 上限 RWPROC_MAX_IO。
- * is_force=0: 只读映射权限允许的页（不翻转 PTE, 避免与目标进程活跃页竞争导致崩溃）。
+ * force=0: 只读映射权限允许的页（不翻转 PTE, 避免与目标进程活跃页竞争导致崩溃）。
+ * force=1: 让驱动临时改 PTE 强制读（未驻留页/受限页）。
  * 读失败返回部分/错误, 调用方按实际字节数处理。 */
 static ssize_t rwproc_read_mem(gg_driver_t *d, pid_t pid, uint64_t addr,
-                               void *buf, size_t len) {
+                               void *buf, size_t len, int force) {
     if (len > RWPROC_MAX_IO) len = RWPROC_MAX_IO;
     if (rwproc_open_process(d, pid, NULL) != 0) return -1;
     /* 结果拷出与长度校验都在 rwproc_call_ex 的临界区内完成：
      * 在锁外按返回值 memcpy 会被别的线程的下一次请求覆盖，r>len 时还会写穿调用方缓冲。 */
     return rwproc_call_ex(d, d->rwproc_mem_fd, RWPROC_CMD_READ_PROCESS_MEMORY,
-                          d->rwproc_handle, addr, 0 /* is_force */,
+                          d->rwproc_handle, addr, force ? 1 : 0,
                           NULL, len, len, buf, len);
 }
 
@@ -542,7 +543,7 @@ int driver_self_test(gg_driver_t *d) {
         uint64_t h = 0;
         if (rwproc_open_process(d, self, &h) == 0) {
             ssize_t r = rwproc_read_mem(d, self, (uint64_t)(uintptr_t)&s_magic,
-                                        &back, sizeof(back));
+                                        &back, sizeof(back), 0);
             if (r == (ssize_t)sizeof(back) && back == 0x12345678u) {
                 d->state = ST_DRIVER;
                 d->ko_loaded = 1;
@@ -558,16 +559,31 @@ int driver_self_test(gg_driver_t *d) {
 }
 
 ssize_t driver_read(gg_driver_t *d, pid_t pid, uint64_t addr, void *buf, size_t len) {
+    return driver_read_ex(d, pid, addr, buf, len, 0);
+}
+
+ssize_t driver_read_ex(gg_driver_t *d, pid_t pid, uint64_t addr, void *buf,
+                       size_t len, int force) {
+    /* force=1 会让驱动临时改 PTE 去读未驻留/受限页。
+     * 2026-10-22 实测：在 rwProcMem_6.12.69 上对活跃进程（agentd 自身）使用，
+     * 连续两次触发内核崩溃 → 设备重启（uptime 归零、adb 掉线）。
+     * 这与后端注释里"避免与目标进程活跃页竞争导致内核崩溃"的判断一致。
+     * 驱动修好之前一律拒绝并给出原因 —— 比静默忽略或让用户把设备搞崩都好。 */
+    if (force) {
+        set_err(d, "force=1 disabled: rwproc33 is_force_read panics this kernel "
+                   "(RWPROC33_ADAPTER.md 10.4); retry with force=0");
+        return -1;
+    }
     /* ---- 专用 KO 驱动 (dev/qx/rwproc): 内核通信唯一通道 ----
      * 驱动 ioctl/节点读失败 → 直接报错返回, 绝不留落到用户态
-     * (裸 process_vm_readv / /proc/pid/mem), 避免语义不一致/可被检测的越界读取。
+     * (裸 process_vm_readv / proc/pid/mem), 避免语义不一致/可被检测的越界读取。
      * 调用方（搜索引擎等）已按实际返回字节数处理部分读。 */
     {
         if (d->rwproc_mem_fd < 0) {
             set_err(d, "rwproc node not open (attach failed?)");
             return -1;
         }
-        ssize_t r = rwproc_read_mem(d, pid, addr, buf, len);
+        ssize_t r = rwproc_read_mem(d, pid, addr, buf, len, force);
         if (r >= 0) { atomic_fetch_add_explicit(&d->stat_reads, 1, memory_order_relaxed); return r; }
         return -1;   /* last_error 已由 rwproc_call 置好 */
     }

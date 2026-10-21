@@ -120,8 +120,20 @@ int parse_u64_strict(const char *s, uint64_t *out) {
     return 1;
 }
 
-/* ---------------- 帧收发 ---------------- */
+/* force 参数: 1 = 允许驱动临时改 PTE 强制读（rwproc33 的 is_force_read）。
+ * 只接受 0/1，不把任意整数塞给驱动（那是未定义语义）。
+ * 背景：PC 端 schema 与 handler 一直在传 force，agentd 早期把它丢掉了，
+ * 表现为"读未驻留页失败，加 force 也没用"。 */
+int parse_force(const cJSON *p) {
+    const cJSON *j = cJSON_GetObjectItem(p, "force");
+    if (!j) return 0;
+    if (cJSON_IsBool(j)) return cJSON_IsTrue(j) ? 1 : 0;
+    if (cJSON_IsNumber(j)) return j->valueint ? 1 : 0;
+    if (cJSON_IsString(j) && j->valuestring) return atoi(j->valuestring) ? 1 : 0;
+    return 0;
+}
 
+/* ---------------- 帧收发 ---------------- */
 int read_full(int fd, void *buf, size_t len) {
     size_t off = 0;
     while (off < len) {
@@ -1180,7 +1192,8 @@ static void h_read(int fd, uint32_t seq, cJSON *p) {
                             "type bytes not supported for single-value read (use gg_read_bytes)"); return; }
     uint64_t addr = strtoull(as, NULL, 0);
     uint8_t buf[8] = {0};
-    ssize_t got = driver_read(&g_eng.drv, g_eng.session_pid, addr, buf, (size_t)sz);
+    ssize_t got = driver_read_ex(&g_eng.drv, g_eng.session_pid, addr, buf, (size_t)sz,
+                                 parse_force(p));
     if (got < 0) { send_err(fd, GGCMD_READ, seq, GGERR_PERM, g_eng.drv.last_error); return; }
     /* 短读不能当成功：buf 是零初始化的，1/4 字节会把"页读不到"报成"值是 0" */
     if (got != (ssize_t)sz) {
@@ -1209,7 +1222,7 @@ static void h_read_bytes(int fd, uint32_t seq, cJSON *p) {
     uint64_t addr = strtoull(as, NULL, 0);
     uint8_t *buf = malloc(len);
     if (!buf) { send_err(fd, GGCMD_READ_BYTES, seq, GGERR_INTERNAL, "out of memory"); return; }
-    ssize_t got = driver_read(&g_eng.drv, g_eng.session_pid, addr, buf, len);
+    ssize_t got = driver_read_ex(&g_eng.drv, g_eng.session_pid, addr, buf, len, parse_force(p));
     cJSON *r = cJSON_CreateObject();
     if (got < 0) {
         cJSON_AddStringToObject(r, "hex", "");

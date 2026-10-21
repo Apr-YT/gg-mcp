@@ -22,12 +22,23 @@ DRV_TYPES = ("KO_TYPE_RWPROC",)
 
 
 def find_func(lines, name):
-    """返回函数体 [start, end]（含签名行与结束 '}' 行）; 找不到返回 None。"""
+    """返回函数体 [start, end]（含签名行与结束 '}' 行）; 找不到返回 None。
+
+    签名可能跨行（参数换行后才到 '{'）：必须先定位首个含 '{' 的行再算深度，
+    否则在签名首行 depth 就是 0，函数体会被截成一行（driver_read_ex 正是这种写法）。
+    """
     sig = re.compile(r"^(?:ssize_t|int)\s+" + re.escape(name) + r"\s*\(")
     for i, ln in enumerate(lines):
         if sig.match(ln):
-            depth = 0
+            open_at = None
             for j in range(i, len(lines)):
+                if "{" in lines[j]:
+                    open_at = j
+                    break
+            if open_at is None:
+                return None
+            depth = 0
+            for j in range(open_at, len(lines)):
                 depth += lines[j].count("{") - lines[j].count("}")
                 if depth <= 0:
                     return i, j
@@ -78,18 +89,25 @@ def main():
     fails = []
 
     # 1) driver_read / driver_write: 不得出现用户态通道，且必须走 rwproc
-    for fn, need in (("driver_read", "rwproc_read_mem("),
-                     ("driver_write", "rwproc_write_mem(")):
-        span = find_func(lines, fn)
+    # driver_read 是 driver_read_ex(..., force=0) 的转发壳，实现在后者，
+    # 所以按候选顺序找真正带分支的函数体。
+    for label, cands, need in (
+            ("driver_read", ("driver_read_ex", "driver_read"), "rwproc_read_mem("),
+            ("driver_write", ("driver_write",), "rwproc_write_mem(")):
+        span = None
+        for cand in cands:
+            span = find_func(lines, cand)
+            if span:
+                break
         if not span:
-            fails.append(f"{fn}: function body not found")
+            fails.append(f"{label}: function body not found")
             continue
         body = lines[span[0]:span[1] + 1]
         hits = user_calls_in("".join(body))
         if hits:
-            fails.append(f"{fn}: user-level memory call(s) present: {sorted(set(hits))}")
+            fails.append(f"{label}: user-level memory call(s) present: {sorted(set(hits))}")
         if need not in "".join(body):
-            fails.append(f"{fn}: must call {need}")
+            fails.append(f"{label}: must call {need}")
 
     # 2) driver_self_test: 同样不得出现用户态通道，且必须用 rwproc 回环
     span = find_func(lines, "driver_self_test")

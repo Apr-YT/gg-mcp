@@ -58,7 +58,8 @@ void h_view_memory(int fd, uint32_t seq, cJSON *p) {
     size_t nbytes = (size_t)range * (size_t)esz;
     uint8_t *buf = malloc(nbytes);
     if (!buf) { send_err(fd, GGCMD_VIEW_MEMORY, seq, GGERR_INTERNAL, "oom"); return; }
-    ssize_t got = driver_read(&g_eng.drv, g_eng.session_pid, addr, buf, nbytes);
+    ssize_t got = driver_read_ex(&g_eng.drv, g_eng.session_pid, addr, buf, nbytes,
+                                 parse_force(p));
 
     /* 一次取 maps：顶层标注基址所在区域，pointer 元素标注目标是否映射/所在模块 */
     size_t nreg = 0;

@@ -108,7 +108,7 @@ static const std::vector<ToolDef>& build() {
              json{
                  {"addr", prop("string", "目标地址（0x 十六进制）")},
                  {"type", prop("string", "值类型", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
-                 {"force", prop("integer", "强制读取模式：0=默认（受限页跳过），1=强制翻转 PTE 读取受限页（需 rwProcMem33 驱动）")},
+                 {"force", prop("integer", "强制读取（已禁用）：is_force_read 会在本机驱动上崩内核并重启设备，传 1 直接返回错误；请保持 0")},
              },
              json{"addr"}),
         tool("gg_read_bytes",
@@ -119,7 +119,7 @@ static const std::vector<ToolDef>& build() {
              json{
                  {"addr", prop("string", "目标地址")},
                  {"len", prop("integer", "字节数（默认 64；hex 模式上限 65536，save_to 模式自动分段，受 max_save_bytes 约束）")},
-                 {"force", prop("integer", "强制读取模式：0=默认，1=强制读取受限页")},
+                 {"force", prop("integer", "强制读取（已禁用）：is_force_read 会在本机驱动上崩内核并重启设备，传 1 直接返回错误；请保持 0")},
                  {"save_to", prop("string", "落盘相对路径（可选）：只能写到配置的 export_dir 内，拒绝绝对路径、盘符与 `..`；不再返回 hex")},
              },
              json{"addr"}),
@@ -128,7 +128,7 @@ static const std::vector<ToolDef>& build() {
              json{
                  {"addr", prop("string", "目标地址")},
                  {"len", prop("integer", "字节数（默认 64）")},
-                 {"force", prop("integer", "强制读取模式：0=默认，1=强制读取受限页")},
+                 {"force", prop("integer", "强制读取（已禁用）：is_force_read 会在本机驱动上崩内核并重启设备，传 1 直接返回错误；请保持 0")},
              },
              json{"addr"}),
         tool("gg_view_memory",
@@ -139,7 +139,7 @@ static const std::vector<ToolDef>& build() {
                  {"addr", prop("string", "起始地址（十六进制 0x...）")},
                  {"range", prop("integer", "元素个数（按 element_type 宽度逐个解析；默认 8，上限 512）")},
                  {"element_type", prop("string", "元素解释类型", "\"enum\":[\"int32\",\"float32\",\"pointer\"]")},
-                 {"force", prop("integer", "强制读取模式：0=默认，1=强制读取受限页")},
+                 {"force", prop("integer", "强制读取（已禁用）：is_force_read 会在本机驱动上崩内核并重启设备，传 1 直接返回错误；请保持 0")},
              },
              json{"addr"}),
         tool("gg_write",
