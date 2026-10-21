@@ -582,4 +582,76 @@ adb shell su -c 'dmesg | grep -E "hwbp:|register_user_hw_breakpoint" | tail -20'
 - X 执行断点 = 一次性（命中后硬件槽 E 位清除），W/R/RW 监视点可重复命中。
 - proc 节点不再隐藏（`/proc/dce3771681d4c7a143d5d06b7d32548e/...` 可见）。
 
+---
+
+## 十一、跨内核复用 prebuilt（6.12.23 → 6.12.69，2026-10-21 验证）
+
+**场景**：`gitee.com/wei-yetao/rwProcMem33-afei` 的 `prebuilt/` 是给 **6.12.23（K90）** 编的，
+本机 **myron 是 6.12.69**。直接 insmod 报 `Exec format error`。
+在**没有内核源码树**的 Windows 上，可以不重编就让它跑起来，只需两步。
+
+### 第一步：vermagic 对齐
+
+设备的**精确** vermagic 不要从 `uname -r` 抄 —— 两者不一致：
+
+```
+uname -r                 6.12.69-android16-6-g43b5ab7e247d-abogki561813157-4k
+厂商模块 vermagic=        6.12.69-android16-6-4k SMP preempt mod_unload modversions aarch64
+```
+
+内核 `check_modinfo()` 比的是**编译期 UTS_RELEASE**（`-android16-6-4k`，关了 LOCALVERSION_AUTO），
+所以必须从设备自带的厂商模块读真值：
+
+```bash
+adb exec-out "su -c 'cat /vendor/lib/modules/adsp_loader_dlkm.ko'" > vendor_sample.ko
+strings vendor_sample.ko | grep vermagic=
+```
+
+替换方法（**新串与旧串长度通常不等**，用 NUL 填充到原长度，`strcmp` 在首个 NUL 结束）：
+
+```python
+i = data.find(b'vermagic='); j = data.find(b'\0', i)
+old = data[i+9:j]
+new = b'6.12.69-android16-6-4k SMP preempt mod_unload modversions aarch64'
+out = data[:i+9] + new + b'\0'*(len(old)-len(new)) + data[j:]   # 总长不变
+```
+
+### 第二步：CRC 修补
+
+设备开 `CONFIG_EXTENDED_MODVERSIONS`，Xiaomi 又改过内核结构体，符号 CRC 与 vanilla GKI 大面积不符。
+拉设备全部厂商模块作为映射源：
+
+```bash
+adb exec-out "su -c 'tar cf - -C /vendor/lib/modules .'" > build/devmod/modules.tar
+cd build/devmod/all && tar xf ../modules.tar
+python scripts/patch_ko_versions.py build/devmod/all build/ko/apr_dlkm.ko
+```
+
+本机实测：402 个模块 → 4547 个符号映射；`rwProcMem_slim` 修补 19 处、`module_layout`
+`0xe976b219 → 0x797f2b3e`，0 missing。
+
+★ **只改 `__versions` 是没用的**：内核 `check_version()` 优先读
+`__version_ext_names` + `__version_ext_crcs`，旧式段只作回退。原脚本只处理前者，
+在 ext 内核上仍报 `disagrees about version of symbol module_layout`。
+`patch_ko_versions.py` 已扩展为两种都改（ext 优先建映射）。
+
+### 结果（本机 6.12.69）
+
+| 步骤 | 结果 |
+|---|---|
+| `apr_dlkm.ko`（rwProcMem slim）insmod | RC=0，dmesg `module hidden by default (init)` |
+| `hwBreakpointProc_module.ko` insmod | RC=0 |
+| `/proc/<MEM_KEY>/<MEM_KEY>`、`/proc/<BP_KEY>/<BP_KEY>` | 均就绪 |
+| `gg_kernel_status` | `kernel-driver (kernel module)` / `ko_module=rwproc33` / `error` 空 |
+| `attach(pid 1)` + `read_bytes` | `7f454c46…`（init 的 ELF 头） |
+| `run_itest.ps1` | ITEST ALL PASS |
+
+### 风险与遗留
+
+- **未经内核源码重编**，`struct module` 布局只靠 CRC 对齐 + 运行验证，没有形式化保证。
+  §十 提过 KCFI 不匹配会导致 **insmod 后 5–7 分钟随机重启**，本次加载后需持续观察。
+- 复用前提是**同 major.minor 分支**（都 android16-6.x）；跨分支（5.x ↔ 6.x）不要尝试。
+- 这套流程只解决"能用"，不等于"可维护"：真出问题仍要回到 §十 的源码树重编路径。
+
+
 
