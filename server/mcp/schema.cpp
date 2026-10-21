@@ -1,5 +1,7 @@
-// schema.cpp — 33 个 MCP 工具的 JSON Schema 定义
+// schema.cpp — MCP 工具的 JSON Schema 定义（对外工具清单的唯一事实源）
 #include "schema.h"
+
+#include <iostream>
 
 namespace gg {
 
@@ -11,7 +13,12 @@ static json prop(const std::string& type, const std::string& desc,
         try {
             json e = json::parse("{" + extra + "}");
             for (auto it = e.begin(); it != e.end(); ++it) p[it.key()] = it.value();
-        } catch (...) {}
+        } catch (...) {
+            /* extra 是开发期硬编码的 JSON 片段，解析失败说明这里写错了。
+             * 静默忽略会让 schema 丢掉 enum 之类的约束，AI 调用时看不出可选值，
+             * 而且没有任何迹象 —— 开发期的笔误必须当场喊出来。 */
+            std::cerr << "[schema] bad extra json (ignored): " << extra << "\n";
+        }
     }
     return p;
 }

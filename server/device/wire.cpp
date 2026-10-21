@@ -507,6 +507,9 @@ int AgentClient::call(uint16_t cmd, const json& params, json* out) {
             last_error = msg;
             return code;
         } catch (...) {
+            /* agentd 回了 ERR 帧，但负载不是合法 JSON 或字段类型不对。
+             * 静默返回 INTERNAL 会让上层只看到「内部错误」，查不出是协议错位。 */
+            last_error = "agentd returned an unparsable error frame";
             return GGERR_INTERNAL;
         }
     }
