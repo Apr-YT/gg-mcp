@@ -16,7 +16,9 @@
 | [CODE_REFACTOR.md](engineering/CODE_REFACTOR.md) | search.c 等模块的历史重构指南。 |
 | [OPTIMIZATION_SUMMARY.md](engineering/OPTIMIZATION_SUMMARY.md) | 2026-08-22 优化工作总结；文首有 08-28 更正声明，**部分声明不实，以更正声明为准**。 |
 | [CHECKPOINT_REVIEW_REPORT.md](engineering/CHECKPOINT_REVIEW_REPORT.md) | 2026-08-27 检查点审查报告；文首有历史快照声明，**勿当现状**。 |
-| [RWPROC33_ADAPTER.md](engineering/RWPROC33_ADAPTER.md) | rwProcMem33 驱动接口适配：命令枚举、请求结构、硬件断点与构建要点。 |
+| [DRIVER_MATRIX.md](engineering/DRIVER_MATRIX.md) | **驱动通道能力矩阵**：四型驱动各自的通道与降级行为、状态值判定依据、`ST_KO_HOOK` 假阳性的成因、工具×驱动依赖。判断「驱动到底好不好」先看这份。 |
+| [CODE_REVIEW_2026-10-21.md](engineering/CODE_REVIEW_2026-10-21.md) | 2026-10-21 全量代码审查：通信层加固（wire 鉴权）、内存边界修复、静态分析与真机验证记录。 |
+| [RWPROC33_ADAPTER.md](engineering/RWPROC33_ADAPTER.md) | rwProcMem33 驱动接口适配：命令枚举、请求结构、硬件断点与构建要点；§十一 跨内核复用 prebuilt、§十二 rwproc 全扫崩内核的实测证据。 |
 | [HWBP_CRASH_HELP.md](engineering/HWBP_CRASH_HELP.md) | hwBreakpointProc_module 静默挂死排查记录（已解决：命令枚举错位），同类内核挂死可复用其排查法。 |
 | [TOOLCHAIN.md](engineering/TOOLCHAIN.md) | 本机工具链实况（NDK r30 / capstone 5.0.1 / MinGW），跨平台构建 agentd 的可复制步骤。 |
 | [DEVICE_STATUS_6.12.69.md](engineering/DEVICE_STATUS_6.12.69.md) | 内核 6.12.69 设备上的部署与运行状态报告（2026-08-22 快照）。 |
