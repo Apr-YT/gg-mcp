@@ -40,11 +40,17 @@ ISOLATED_CFG = os.path.join(ROOT, "build", "pc", "_smoke_isolated.json")
 
 
 def _write_isolated_cfg():
-    try:
-        with open(CFG, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-    except Exception:  # 配置缺失/损坏时用最小集合，冒烟测试不依赖它
-        cfg = {}
+    # configs/gg-ghost.json 自 a20fe00 起是**部署生成物**，仓库里只有 example。
+    # 冒烟测试不该因为"还没部署"就跑不了：优先读真实配置，缺失时退到 example，
+    # 都没有就用最小集合（agent_port 反正会被强制成 9）。
+    cfg = {}
+    for cand in (CFG, os.path.join(ROOT, "configs", "gg-ghost.example.json")):
+        try:
+            with open(cand, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            break
+        except Exception:
+            cfg = {}
     cfg["transport"] = "stdio"
     cfg["agent_port"] = 9   # discard：connect 必然被拒，走 NO_DEVICE 分支
     os.makedirs(os.path.dirname(ISOLATED_CFG), exist_ok=True)
@@ -161,9 +167,10 @@ def main():
     if not os.path.exists(EXE):
         print("[FAIL] %s not found - run scripts\\build_pc.bat first" % EXE)
         return 1
+    # configs/gg-ghost.json 是部署生成物（a20fe00 起不入库），缺失不算失败：
+    # 本脚本用隔离配置启动 server，缺少真实配置时退到 example / 最小集合。
     if not os.path.exists(CFG):
-        print("[FAIL] %s not found" % CFG)
-        return 1
+        print("[info] %s not found (deploy-generated) - using an isolated config" % CFG)
 
     print("=== GG-MCP stdio end-to-end smoke ===")
     print("exe: %s" % EXE)
