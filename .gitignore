@@ -8,6 +8,9 @@ build/*
 *.o
 *.obj
 
+# 部署生成物：由 scripts/deploy.ps1 写入（含设备 wire_key，绝不能入库）
+configs/gg-ghost.json
+
 # 设备端部署目录
 *.kpm
 
