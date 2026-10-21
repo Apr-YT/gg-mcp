@@ -148,24 +148,48 @@ int send_full(int fd, const void *buf, size_t len) {
     return 0;
 }
 
+/* 出站帧全局串行：事件广播线程与各连接线程会同时往**同一个 fd** 写
+ * （广播写事件、handler 写响应），没有这把锁时两个线程的 header/payload
+ * 会交错，接收端按长度读必然错位。g_clients_mtx 只保护注册表，不是发送锁。 */
+static pthread_mutex_t g_send_mtx = PTHREAD_MUTEX_INITIALIZER;
+
 int send_frame(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
                       char *payload, size_t plen) {
+    /* 与接收侧同一个上限：超限帧发出去只会被 PC 端判为非法帧并断开连接，
+     * 不如在这里明确失败（也避免 plen 被截断成 uint32）。 */
+    if (plen > GGWM_MAX_PAYLOAD) {
+        log_msg("send_frame: payload %zu exceeds GGWM_MAX_PAYLOAD %u",
+                plen, (unsigned)GGWM_MAX_PAYLOAD);
+        return -1;
+    }
     gg_wire_header_t h;
     h.magic = GGWM_MAGIC;
     h.ver = GGWM_VERSION;
     h.cmd = cmd;
     h.seq = seq;
-    /* 负载混淆: 滚动 XOR（防被动嗅探一眼看穿）, 置 GGWF_ENC 让对端解密。
-     * payload 原地改写（调用方均为 malloc 缓冲: send_ok/send_err/broadcast_event）。 */
+    /* ⚠️ 负载混淆必须作用在**副本**上，不能原地改写调用者缓冲：
+     * broadcast_event 会把同一份 payload 依次发给多个订阅者，XOR 又是自反的，
+     * 原地改会让第 2 个订阅者收到明文、却仍带 GGWF_ENC 标志（解码后即乱码）。 */
+    char *enc = NULL;
     if (plen && payload) {
-        gg_xor_payload((unsigned char *)payload, plen);
+        enc = malloc(plen);
+        if (!enc) {
+            log_msg("send_frame: oom allocating %zu-byte payload copy", plen);
+            return -1;
+        }
+        memcpy(enc, payload, plen);
+        gg_xor_payload((unsigned char *)enc, plen);
         flags |= GGWF_ENC;
     }
     h.flags = flags;
     h.payload_len = (uint32_t)plen;
-    if (send_full(fd, &h, sizeof(h)) < 0) return -1;
-    if (plen && send_full(fd, payload, plen) < 0) return -1;
-    return 0;
+    pthread_mutex_lock(&g_send_mtx);
+    int rc = 0;
+    if (send_full(fd, &h, sizeof(h)) < 0) rc = -1;
+    else if (plen && send_full(fd, enc, plen) < 0) rc = -1;
+    pthread_mutex_unlock(&g_send_mtx);
+    free(enc);
+    return rc;
 }
 
 void send_ok(int fd, uint16_t cmd, uint32_t seq, cJSON *res) {
@@ -173,6 +197,11 @@ void send_ok(int fd, uint16_t cmd, uint32_t seq, cJSON *res) {
     g_last_resp_ok = 1;
     g_last_resp_set = 1;
     snprintf(g_last_resp, sizeof(g_last_resp), "%s", s ? s : "{}");
+    if (!s) {
+        /* 序列化失败（OOM）：原实现继续 strlen(NULL) → 在错误处理里再崩一次 */
+        send_err(fd, cmd, seq, GGERR_INTERNAL, "response serialization failed");
+        return;
+    }
     send_frame(fd, cmd, seq, GGWF_RESP, s, strlen(s));
     free(s);
 }
@@ -187,6 +216,14 @@ void send_err(int fd, uint16_t cmd, uint32_t seq, int code, const char *msg) {
     g_last_resp_ok = 0;
     g_last_resp_set = 1;
     snprintf(g_last_resp, sizeof(g_last_resp), "%s", s ? s : "{}");
+    if (!s) {
+        /* 连错误帧都序列化不出来：发一个静态最小负载。send_frame 不改写调用者
+         * 缓冲，所以这里可以安全传字符串字面量。 */
+        static const char kFallback[] = "{\"e\":{\"code\":12,\"message\":\"serialization failed\"}}";
+        send_frame(fd, cmd, seq, GGWF_RESP | GGWF_ERR, (char *)kFallback, sizeof(kFallback) - 1);
+        cJSON_Delete(root);
+        return;
+    }
     send_frame(fd, cmd, seq, GGWF_RESP | GGWF_ERR, s, strlen(s));
     free(s);
     cJSON_Delete(root);
@@ -665,7 +702,11 @@ static void h_attach(int fd, uint32_t seq, cJSON *p) {
         }
     }
     free(arr);
-    freeze_start(&g_eng.freeze, pid);
+    /* 冻结线程是可选能力：创建失败不该让 attach 整体失败，但必须留痕，
+     * 否则冻结静默失效、调用方以为已生效 */
+    if (freeze_start(&g_eng.freeze, pid) != 0)
+        log_msg("freeze thread start failed (errno=%d %s) - freeze unavailable",
+                errno, strerror(errno));
 
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "pid", pid);
@@ -964,8 +1005,14 @@ static void h_disassemble(int fd, uint32_t seq, cJSON *p) {
 }
 
 static void h_watch(int fd, uint32_t seq, cJSON *p) {
-    const char *op = cJSON_GetObjectItem(p, "op") ?
-        cJSON_GetObjectItem(p, "op")->valuestring : "set";
+    cJSON *opj = cJSON_GetObjectItem(p, "op");
+    /* 字段存在但不是字符串时 valuestring 为 NULL，后面 strcmp(NULL, ...) 直接崩 */
+    if (opj && !cJSON_IsString(opj)) {
+        send_err(fd, GGCMD_WATCH, seq, GGERR_BAD_REQUEST,
+                 "op must be a string (set|clear|poll|...)");
+        return;
+    }
+    const char *op = opj ? opj->valuestring : "set";
     cJSON *r = cJSON_CreateObject();
     if (strcmp(op, "set") == 0) {
         /* 首次使用时探测一次模块的命令码基准，而不是一律拒绝：

@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <sys/types.h>
 #include "driver.h"
 
@@ -27,7 +28,8 @@ typedef struct gg_freeze {
     pid_t        pid;
     gg_freeze_entry_t entries[GG_FREEZE_MAX];
     size_t       count;
-    volatile int running;   /* 跨线程可见性: freeze_loop 无锁轮询, volatile 防编译器缓存寄存器 */
+    _Atomic int running;    /* 跨线程可见性: freeze_loop 轮询、freeze_stop 置 0，用原子读避免数据竞争 */
+    int          thread_started;  /* 线程确实创建成功才允许 join —— 否则会 join 一个未初始化的 pthread_t */
     void        *mtx;       /* pthread_mutex_t* */
     void        *thread;    /* pthread_t* */
 } gg_freeze_t;

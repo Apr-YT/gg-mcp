@@ -64,10 +64,8 @@ static void *search_worker_main(void *arg) {
         while (len > 0) {
             size_t rd = len > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)len;
             ssize_t got;
-            if (w->mode == 2)
-                got = driver_read(d, w->pid, addr, chunk + carry, rd);
-            else
-                got = driver_read(d, w->pid, addr, chunk, rd);
+            /* 所有模式都读进 chunk+carry：跨块匹配需要把上一块尾部保留下来 */
+            got = driver_read(d, w->pid, addr, chunk + carry, rd);
             if (got <= 0) {
                 carry = 0;
                 uint64_t adv = gg_fault_advance(addr, len, rd, &fail_streak);
@@ -77,37 +75,46 @@ static void *search_worker_main(void *arg) {
             fail_streak = 0;
             rd = (size_t)got;
             if (w->mode == 0) {
-                /* exact: 首字节 memchr 预筛 */
+                /* exact: 首字节 memchr 预筛 + carry 跨块（原实现只在单块内扫
+                 * i+sz<=rd，起始于块尾、剩余字节在下一块的匹配会整条漏掉） */
+                size_t total = carry + rd;
                 const uint8_t first = w->pat[0];
-                for (size_t i = 0; i + (size_t)sz <= rd; ) {
-                    const uint8_t *hit = memchr(chunk + i, first, rd - i - (size_t)sz + 1);
+                for (size_t i = 0; i + (size_t)sz <= total; ) {
+                    const uint8_t *hit = memchr(chunk + i, first, total - i - (size_t)sz + 1);
                     if (!hit) break;
                     size_t off = (size_t)(hit - chunk);
                     if (memcmp(hit, w->pat, (size_t)sz) == 0) {
-                        if (w_push(w, addr + off) < 0) { free(chunk); return NULL; }
+                        if (w_push(w, addr - carry + off) < 0) { free(chunk); return NULL; }
                         found++;
                     }
                     i = off + 1;
                 }
+                size_t keep = total >= (size_t)sz ? (size_t)sz - 1 : total;
+                if (keep) memmove(chunk, chunk + total - keep, keep);
+                carry = keep;
             } else if (w->mode == 1) {
+                size_t total = carry + rd;
                 if (w->vtype == VT_BYTE || w->vtype == VT_WORD ||
                     w->vtype == VT_DWORD || w->vtype == VT_QWORD) {
-                    for (size_t i = 0; i + (size_t)sz <= rd; i++) {
+                    for (size_t i = 0; i + (size_t)sz <= total; i++) {
                         uint64_t v = read_bits(chunk + i, w->vtype);
                         if (v >= w->ilo && v <= w->ihi) {
-                            if (w_push(w, addr + i) < 0) { free(chunk); return NULL; }
+                            if (w_push(w, addr - carry + i) < 0) { free(chunk); return NULL; }
                             found++;
                         }
                     }
                 } else {
-                    for (size_t i = 0; i + (size_t)sz <= rd; i++) {
+                    for (size_t i = 0; i + (size_t)sz <= total; i++) {
                         double v = read_as_double(chunk + i, w->vtype);
                         if (v >= w->dlo && v <= w->dhi) {
-                            if (w_push(w, addr + i) < 0) { free(chunk); return NULL; }
+                            if (w_push(w, addr - carry + i) < 0) { free(chunk); return NULL; }
                             found++;
                         }
                     }
                 }
+                size_t keep = total >= (size_t)sz ? (size_t)sz - 1 : total;
+                if (keep) memmove(chunk, chunk + total - keep, keep);
+                carry = keep;
             } else {
                 /* aob: carry 缓冲跨块匹配 */
                 size_t total = carry + rd;
