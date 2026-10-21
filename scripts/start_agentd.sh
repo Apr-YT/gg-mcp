@@ -7,8 +7,11 @@
 #   - 端口 19100 → 34127（非常见高位）
 #   - 进程名伪装 lmkd（agentd 内部 prctl + 清 argv），pgrep/pkill 按名失效
 #     → 改用 PID 文件管理
-DIR=/data/adb/vendor_security
-BIN=$DIR/dspbridge
+# 部署目录必须与 scripts/deploy.ps1 的 $DevDir 一致（/data/adb/GG-Ghost），
+# 二进制在设备上伪装成 gdm。此前这里写的是 vendor_security/dspbridge，
+# 与 deploy 脚本推的位置完全不同 —— 表现为 stop/start 全部返回 1、agentd 起不来。
+DIR=/data/adb/GG-Ghost
+BIN=$DIR/gdm
 PORT=34127
 LOG=$DIR/agentd.log
 PIDFILE=$DIR/agentd.pid
@@ -22,7 +25,7 @@ KO_STRICT=1
 #   dev   : /dev 节点 + ioctl 0x7e1a/0x7e1b（通用布局, 填 DEV_PATH）
 #   qx    : Aloha 开源 QX9-10（隐藏进程自动发现 + 建节点, 填 QX_KEY）
 #   rwproc: abcz316/rwProcMem33（proc read 33B 头协议, 开源; 填 RWPROC_MEM_KEY/BP_KEY）
-KO_TYPE=rwproc
+KO_TYPE=hook
 DEV_PATH=
 QX_KEY=
 # rwProcMem33 两模块的 proc 节点 auth key（与编译模块时的 CONFIG_PROC_NODE_AUTH_KEY 一致;
@@ -30,6 +33,11 @@ QX_KEY=
 RWPROC_MEM_KEY=e84523d7b60d5d341a7c4d1861773ecd
 RWPROC_BP_KEY=dce3771681d4c7a143d5d06b7d32548e
 # 若用 dev 型, 填节点路径: DEV_PATH=/dev/your_ko_dev
+
+# wire 握手密钥文件（0600, 仅 root 可读）。存在即启用鉴权：
+# 设备上普通 App 即使能连 127.0.0.1:$PORT，没有密钥也无法调用任何 root 级命令。
+# 首次启动自动生成；PC 端需配置同一值（deploy.ps1 会自动拉取并写入 configs）。
+WIRE_KEY_FILE=$DIR/wire.key
 
 is_running() {
     [ -f "$PIDFILE" ] || return 1
@@ -50,6 +58,17 @@ case "$1" in
     [ -x "$BIN" ] || { echo "[FAIL] $BIN 不存在或不可执行 (adb push 会重置权限, 先 chmod 755)"; exit 1; }
     if is_running; then echo "agentd 已在运行 (pid $(cat $PIDFILE))"; exit 0; fi
     ARGS="--port $PORT --driver $KO_TYPE"
+    # wire 握手密钥：文件不存在则生成 32 字节随机 hex（0600，root only）
+    if [ ! -s "$WIRE_KEY_FILE" ]; then
+        mkdir -p "$DIR" 2>/dev/null
+        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$WIRE_KEY_FILE"
+        chmod 600 "$WIRE_KEY_FILE"
+    fi
+    if [ -s "$WIRE_KEY_FILE" ]; then
+        ARGS="$ARGS --wire-key-file $WIRE_KEY_FILE"
+    else
+        echo "[WARN] $WIRE_KEY_FILE 不可用, agentd 将以无鉴权模式启动"
+    fi
     if [ "$KO_TYPE" = "qx" ]; then
         [ -n "$QX_KEY" ] && ARGS="$ARGS --qx-key $QX_KEY"
     elif [ "$KO_TYPE" = "rwproc" ]; then

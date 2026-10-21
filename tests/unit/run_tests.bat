@@ -29,6 +29,14 @@ g++ -std=c++17 -O2 -Wall -I"%ROOT%" -I"%ROOT%\third_party" -I"%ROOT%\shared" ^
   "%ROOT%\server\device\wire.cpp" -lws2_32
 if errorlevel 1 ( echo [FAIL] test_session build & exit /b 1 )
 
+rem results_get_page paging guard: the bulk segment reader must respect the
+rem caller's limit. Search hits are mostly contiguous addresses, so without
+rem that bound a single small-page read overruns out_addrs/out_values.
+gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
+  -o "%ROOT%\build\pc\test_results_page.exe" "%ROOT%\tests\unit\test_results_page.c" ^
+  "%ROOT%\agentd\search.c"
+if errorlevel 1 ( echo [FAIL] test_results_page build & exit /b 1 )
+
 gcc -O2 -Wall -I"%ROOT%" -o "%ROOT%\build\pc\test_elfsym.exe" ^
   "%ROOT%\tests\unit\test_elfsym.c" "%ROOT%\agentd\elfsym.c"
 if errorlevel 1 ( echo [FAIL] test_elfsym build & exit /b 1 )
@@ -45,6 +53,9 @@ if errorlevel 1 ( echo [FAIL] test_wire_io & exit /b 1 )
 echo === test_session ===
 "%ROOT%\build\pc\test_session.exe"
 if errorlevel 1 ( echo [FAIL] test_session & exit /b 1 )
+echo === test_results_page ===
+"%ROOT%\build\pc\test_results_page.exe"
+if errorlevel 1 ( echo [FAIL] test_results_page & exit /b 1 )
 echo === test_elfsym ===
 if exist "%ROOT%\build\native\libKernelGg.so" (
   "%ROOT%\build\pc\test_elfsym.exe" "%ROOT%\build\native\libKernelGg.so" "%ROOT%\build\native\lib5_stub"

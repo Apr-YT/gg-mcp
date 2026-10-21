@@ -28,6 +28,18 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <stdarg.h>
+
+/* driver.c 引用的是 main.c 里的 log_msg；集成测试不链接 main.c，
+ * 这里补一个同签名实现（输出到 stderr，便于定位失败步骤）。 */
+void log_msg(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
+
 
 static int fails = 0;
 static pid_t g_child = -1;

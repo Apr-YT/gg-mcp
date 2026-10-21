@@ -116,6 +116,29 @@ bool read_request(tsock_t c, gg_wire_header_t* h, std::string* payload) {
     return recv_exact(c, &(*payload)[0], payload->size());
 }
 
+bool send_response(tsock_t c, uint16_t cmd, uint32_t seq, const std::string& body, uint32_t flags) {
+    gg_wire_header_t rh{};
+    rh.magic = GGWM_MAGIC;
+    rh.ver = GGWM_VERSION;
+    rh.cmd = cmd;
+    rh.seq = seq;
+    rh.flags = flags;
+    rh.payload_len = static_cast<uint32_t>(body.size());
+    if (!send_all(c, &rh, sizeof(rh))) return false;
+    return body.empty() || send_all(c, body.data(), body.size());
+}
+
+/* 握手：客户端建立连接后第一帧必然是 GGCMD_AUTH（未认证只放行 PING/AUTH）。
+ * 每个用例必须先把它应答掉，否则业务帧还没轮到就已经 auth 超时。
+ * 协议加鉴权后这是硬前提，漏掉会让整个文件恒失败。 */
+bool serve_auth(tsock_t c) {
+    gg_wire_header_t req{};
+    std::string pl;
+    if (!read_request(c, &req, &pl)) return false;
+    if (req.cmd != GGCMD_AUTH) return false;
+    return send_response(c, req.cmd, req.seq, "{\"r\":{\"authed\":true}}", GGWF_RESP);
+}
+
 // 假对端的客户端参数：指向临时端口，io 预算调小以便用例快速收敛。
 gg::AgentClient::Config peer_cfg(int port, int io_ms) {
     gg::AgentClient::Config cfg;
@@ -143,6 +166,7 @@ int main() {
         std::thread th([&] {
             tsock_t c = peer.accept_one();
             if (c == TSOCK_INVALID) return;
+            if (!serve_auth(c)) { TSOCK_CLOSE(c); return; }   // 协议要求：先握手才轮到业务帧
             gg_wire_header_t req{};
             std::string pl;
             if (read_request(c, &req, &pl)) {
@@ -175,6 +199,7 @@ int main() {
         std::thread th([&] {
             tsock_t c = peer.accept_one();
             if (c == TSOCK_INVALID) return;
+            if (!serve_auth(c)) { TSOCK_CLOSE(c); return; }   // 协议要求：先握手才轮到业务帧
             gg_wire_header_t req{};
             std::string pl;
             read_request(c, &req, &pl);          // 请求收全，但一个响应字节都不发
@@ -203,6 +228,7 @@ int main() {
         std::thread th([&] {
             tsock_t c = peer.accept_one();
             if (c == TSOCK_INVALID) return;
+            if (!serve_auth(c)) { TSOCK_CLOSE(c); return; }   // 协议要求：先握手才轮到业务帧
             gg_wire_header_t req{};
             std::string pl;
             read_request(c, &req, &pl);
@@ -229,6 +255,7 @@ int main() {
         std::thread th([&] {
             tsock_t c = peer.accept_one();
             if (c == TSOCK_INVALID) return;
+            if (!serve_auth(c)) { TSOCK_CLOSE(c); return; }   // 协议要求：先握手才轮到业务帧
             gg_wire_header_t req{};
             std::string pl;
             read_request(c, &req, &pl);
@@ -260,6 +287,7 @@ int main() {
         std::thread th([&] {
             tsock_t c = peer.accept_one();
             if (c == TSOCK_INVALID) return;
+            if (!serve_auth(c)) { TSOCK_CLOSE(c); return; }   // 协议要求：先握手才轮到业务帧
             gg_wire_header_t req{};
             std::string pl;
             read_request(c, &req, &pl);
@@ -290,6 +318,7 @@ int main() {
         std::thread th([&] {
             tsock_t c = peer.accept_one();
             if (c == TSOCK_INVALID) return;
+            if (!serve_auth(c)) { TSOCK_CLOSE(c); return; }   // 协议要求：先握手才轮到业务帧
             gg_wire_header_t req{};
             std::string pl;
             read_request(c, &req, &pl);

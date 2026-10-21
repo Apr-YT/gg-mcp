@@ -57,7 +57,7 @@ jobs:
         shell: cmd
         run: tests\unit\run_tests.bat
 
-  # Job 3: agentd cross-compile check (NDK r27d), mirrors scripts/build_ndk.bat
+  # Job 3: agentd cross-compile check (NDK r30), mirrors scripts/build_ndk.bat
   build-agentd:
     runs-on: windows-latest
     steps:
@@ -66,14 +66,14 @@ jobs:
       - name: Set up Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
 
-      - name: Set up Android NDK r27d
+      - name: Set up Android NDK r30
         shell: pwsh
         run: |
-          $url = "https://dl.google.com/android/repository/android-ndk-r27d-windows.zip"
+          $url = "https://dl.google.com/android/repository/android-ndk-r30-windows.zip"
           Invoke-WebRequest -Uri $url -OutFile ndk.zip
           Expand-Archive -Path ndk.zip -DestinationPath .
           $wd = (Get-Location).Path
-          "NDK_DIR=$wd\android-ndk-r27d" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "NDK_DIR=$wd\android-ndk-r30" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build Capstone 5.0.1 for aarch64 (static)
         shell: cmd
@@ -101,3 +101,38 @@ jobs:
             build/agentd/gg-agentd
             build/native/libKernelGg.so
             build/native/lib5_stub
+
+  # Job 4: AddressSanitizer + UBSan on Linux.
+  # MinGW on Windows cannot run ASan, so this job exists to catch memory/UB
+  # classes the Windows unit-test job is blind to -- e.g. the results_get_page
+  # overrun fixed on 2026-10-21 would have been caught here.
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run with ASan + UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          set -euo pipefail
+          SAN="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all -Wall"
+          CXX_INC="-I third_party -I shared -I server"
+          C_INC="-I . -I agentd -I shared"
+
+          echo "== test_wire =="
+          g++ -std=c++17 $SAN $CXX_INC tests/unit/test_wire.cpp -o /tmp/t_wire
+          /tmp/t_wire
+
+          echo "== test_wire_io =="
+          g++ -std=c++17 $SAN $CXX_INC tests/unit/test_wire_io.cpp server/device/wire.cpp -o /tmp/t_wire_io -lpthread
+          /tmp/t_wire_io
+
+          echo "== test_results_page =="
+          gcc $SAN $C_INC tests/unit/test_results_page.c agentd/search.c -o /tmp/t_page
+          /tmp/t_page
+
+          echo "== test_search =="
+          gcc $SAN $C_INC tests/unit/test_search.c agentd/search.c -o /tmp/t_search
+          /tmp/t_search

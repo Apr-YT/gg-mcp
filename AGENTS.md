@@ -11,7 +11,7 @@
 server/    PC 端 gg-ghost-mcp（C++17）：MCP 协议 + 会话 + wire 客户端
 agentd/    设备端 gg-agentd（C, NDK arm64, root）：搜索/读写/冻结/监视 + 驱动对接
 native/    内核侧：hook.c（hook 型 KO）、lib5_stub.c（GG 核心加载桩）
-shared/    wire_protocol.h — PC/设备双端协议唯一事实源（20B 头 + JSON 负载）
+shared/    wire_protocol.h — PC/设备双端协议唯一事实源（20B 头 + JSON 负载；含 GGCMD_AUTH 握手）
 tests/     unit（posix_stub 可 PC 跑）/ integration / regression 三层
 scripts/   构建（build_pc.bat / build_ndk.bat / build_all.bat）、部署、测试、基准
 configs/   gg-ghost.json（serial/端口/KO 类型）
@@ -103,6 +103,10 @@ CI 三 job 重写（v4 + Windows 单测 + NDK 构建）；lint.bat 重写落地�
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
+- **wire 鉴权**（2026-10-21 起）：agentd 未认证的连接只放行 `PING`/`AUTH`，其余一律 `GGERR_PERM`。
+  密钥在设备端 `/data/adb/GG-Ghost/wire.key`（`0600`，首启自动生成 32 字节随机 hex），
+  通过 `--wire-key-file` 传入；PC 端 `configs/gg-ghost.json` 的 `wire_key` 必须与之一致，
+  `deploy.ps1` 会自动拉取并写回配置。**wire_key 与 KO 密钥同级别，不入库、不入对话、不贴日志。**
 - 敏感研究笔记（ACE/反作弊对抗）只放 `docs/research/`，不外发；驱动密钥、QX_KEY 等不入库不入对话
 - 设备端改动必须在真机过 itest（scripts/deploy.bat 部署后跑 tests/integration/run_itest.ps1）
 - 特征字符串纪律：agentd 二进制 strings 不得出现 GG-Ghost / gg-touch / GG_KO 等特征（历史提交 88d83cc、21b246d 有验证方法）
