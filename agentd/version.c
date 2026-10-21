@@ -101,6 +101,7 @@ int version_from_package(const char *pkg, char **out) {
         size_t len = (size_t)(end - eq);
         if (len == 0) continue;
         char *res = malloc(len + 1);
+        if (!res) break;   /* 分配失败：放弃本次解析（*out 仍为 NULL，调用方按失败处理） */
         memcpy(res, eq, len);
         res[len] = 0;
         *out = res;

@@ -77,8 +77,10 @@ public:
             return true;
         }
         json ok(const json& data) { return s->ok(data); }
-        int device_call(uint16_t cmd, const json& params, json* out) {
-            return s->device_call(cmd, params, out);
+        // 参数名用 req 而不是 params：后者会遮蔽同名成员（-Wshadow），
+        // 一旦某处写成 device_call(cmd, params, ...) 传的就是成员本身，语义容易看错。
+        int device_call(uint16_t cmd, const json& req, json* out) {
+            return s->device_call(cmd, req, out);
         }
         void relay_annotate(const std::string& op, const json& ann) {
             s->relay_annotate(op, ann);
@@ -89,7 +91,7 @@ public:
     };
 
 private:
-    int device_call(uint16_t cmd, const json& params, json* out);
+    int device_call(uint16_t cmd, const json& req, json* out);
 
     json ok(const json& data);                 // 成功结果包装
     json fail(int code, const std::string& msg);

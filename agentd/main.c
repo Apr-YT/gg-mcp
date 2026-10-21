@@ -1288,9 +1288,14 @@ static void h_pointer_scan(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_POINTER_SCAN, seq, GGERR_NO_SESSION, "no session"); return; }
     int type = parse_vt(p, VT_QWORD);
     size_t cap = cJSON_GetObjectItem(p, "cap") ? (size_t)cJSON_GetObjectItem(p, "cap")->valuedouble : 5000;
+    /* cap 直接来自客户端，必须钳制：否则 cap=1e9 会 malloc 数十 GB，
+     * 而 malloc 失败后原代码仍把 NULL 交给 pointer_scan 和下面的解引用。 */
+    if (cap == 0) cap = 5000;
+    if (cap > 100000) cap = 100000;
     if (g_eng.results.fuzzy_active) results_materialize(&g_eng.results);
 
     gg_pointer_hit_t *hits = malloc(cap * sizeof(gg_pointer_hit_t));
+    if (!hits) { send_err(fd, GGCMD_POINTER_SCAN, seq, GGERR_INTERNAL, "oom"); return; }
     size_t n = pointer_scan(&g_eng.drv, g_eng.session_pid,
                             g_eng.results.addrs, g_eng.results.count, type, hits, cap);
     cJSON *r = cJSON_CreateObject();

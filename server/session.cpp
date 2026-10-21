@@ -174,14 +174,14 @@ json Session::fail(int code, const std::string& msg) {
     return result;
 }
 
-int Session::device_call(uint16_t cmd, const json& params, json* out) {
-    int rc = client_.call(cmd, params, out);
+int Session::device_call(uint16_t cmd, const json& req, json* out) {
+    int rc = client_.call(cmd, req, out);
     // 只有「连接都没建立起来」才是干净失败：请求一个字节都没发出去，重放不会
     // 改变任何远端状态。发送失败 / 响应超时 / 读中断 都可能意味着远端已经执行过，
     // 盲目重放会让 gg_write、gg_set_results、gg_freeze 这类有副作用的命令跑两次。
     if (rc != 0 && client_.last_outcome == CallOutcome::ConnectFailed) {
         client_.close();
-        rc = client_.call(cmd, params, out);
+        rc = client_.call(cmd, req, out);
     }
     return rc;
 }

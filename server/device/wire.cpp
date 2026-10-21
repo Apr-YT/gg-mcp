@@ -299,13 +299,14 @@ int AgentClient::tcp_connect() {
 #endif
 
     if (rc != 0) {
-        GG_LOG(1, "[wire] connect failed: rc=%d err=%d\n", rc,
+        /* 平台错误码先取到局部变量再记日志：原写法把 #ifdef 塞进宏参数，
+         * g++ 能过但可读性差，静态分析工具也解析不了。 */
 #ifdef _WIN32
-                (int)WSAGetLastError()
+        const int last_err = (int)WSAGetLastError();
 #else
-                errno
+        const int last_err = errno;
 #endif
-        );
+        GG_LOG(1, "[wire] connect failed: rc=%d err=%d\n", rc, last_err);
         GG_CLOSE_SOCK(fd);
         return -1;
     }
