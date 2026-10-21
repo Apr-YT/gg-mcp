@@ -46,16 +46,22 @@
 gg_engine_t g_eng;
 gg_watch_t  g_watch;   /* 硬件断点监视（CE 式"什么访问了这个地址"） */
 
-/* 硬件断点默认关闭。当前设备上用的 hwBreakpointProc prebuilt 是**未修复版本**，
- * 实例化断点会打崩内核（不是 agentd 崩，是整机重启）：
- *   1) 命令码从 0 起始，而 driver.h 的 RWBP_CMD_* 按 1 起始发送
- *      → OPEN_PROCESS(1) 落到 CLOSE_PROCESS → put_pid((struct pid*)1) 解引用野指针
- *   2) 命中回调用 mutex 而非 raw_spinlock，在调试异常上下文里睡眠
- *      → scheduling while atomic
- * 证据：该 .ko 的重定位表含 put_pid / mutex_lock 且无 raw_spinlock；实测 itest 的
- * rwproc_hwbp_start 直接让设备重启（uptime 归零，pstore 空）。
- * 换用按 RWPROC33_ADAPTER.md 10.4 自编译的模块后，用 --hwbp 显式启用。 */
-static int g_hwbp_allowed = 0;
+/* 硬件断点：默认由运行时探测把关，不再无条件关闭。
+ *
+ * 历史：afei 的 hwBreakpointProc prebuilt 有两处致命缺陷 —— 命令码从 0 起始
+ * （driver.h 按 1 起始发，OPEN_PROCESS(1) 会落到 CLOSE_PROCESS →
+ * put_pid((struct pid*)1) 解引用野指针），命中回调用 mutex 而非 raw_spinlock
+ * （调试异常上下文里睡眠 → scheduling while atomic）。实测一调
+ * rwproc_hwbp_start 就整机重启。
+ *
+ * 现在用 scripts/build_hwbp_ko.sh 自编译并修好四条缺陷（含执行断点命中后
+ * 不挪位导致的无限重复触发），deploy.ps1 会自动用它覆盖 prebuilt。
+ * 探测见下方 g_hwbp_probe。 */
+static int g_hwbp_allowed = 0;   /* --hwbp：跳过探测强制启用（自担风险） */
+/* 模块命令码基准探测结果：-1 未探测、0 不安全、1 可用。
+ * 自编译模块 GET_NUM_BRPS 返回 6；afei 的 0 起始 prebuilt 返回 4（那里
+ * cmd=3 其实是 GET_NUM_WRPS）。只有探到 6 才放行。 */
+static int g_hwbp_probe = -1;
 
 /* 最近一次响应存档（send_ok/send_err 写入，dispatch 的 cmd_end 事件使用）。
  * X3: 改为线程局部——每连接线程独立，快速通道（PING/KERNEL_STATUS 等无锁
@@ -957,13 +963,23 @@ static void h_watch(int fd, uint32_t seq, cJSON *p) {
         cJSON_GetObjectItem(p, "op")->valuestring : "set";
     cJSON *r = cJSON_CreateObject();
     if (strcmp(op, "set") == 0) {
-        if (!g_hwbp_allowed) {
-            /* 拦住，比让用户点一下就重启设备好。原因见 g_hwbp_allowed 的定义处。 */
+        /* 首次使用时探测一次模块的命令码基准，而不是一律拒绝：
+         * 自编译模块 cmd=3 -> GET_NUM_BRPS 返回 6，可以安全使用；
+         * afei 的 0 起始 prebuilt 在同一条命令上返回 4，它发 INST 会把
+         * put_pid 打到用户态整数上直接崩内核。--hwbp 可跳过探测（自担风险）。 */
+        if (g_hwbp_probe < 0) {
+            int probe = rwproc_hwbp_probe(&g_eng.drv);
+            g_hwbp_probe = (probe == 6) ? 1 : 0;
+            log_msg("hwbp probe: GET_NUM_BRPS=%d (expect 6) -> %s",
+                    probe, g_hwbp_probe ? "usable" : "refused");
+        }
+        if (!g_hwbp_allowed && !g_hwbp_probe) {
             cJSON_Delete(r);
             send_err(fd, GGCMD_WATCH, seq, GGERR_DEGRADED,
-                     "hwbp disabled: the hwBreakpointProc module in use is an unfixed build "
-                     "(0-based cmd enum + mutex in hit callback); INST panics the kernel. "
-                     "Rebuild it per RWPROC33_ADAPTER.md 10.4, then start agentd with --hwbp");
+                     "hwbp unavailable: the hwBreakpointProc module in use has a 0-based "
+                     "command enum (probe GET_NUM_BRPS did not return 6), so INST would "
+                     "panic the kernel. Deploy the self-built module "
+                     "(scripts/build_hwbp_ko.sh), or force with agentd --hwbp");
             return;
         }
         if (g_eng.session_pid <= 0) {

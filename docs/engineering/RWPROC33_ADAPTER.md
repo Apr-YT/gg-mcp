@@ -579,10 +579,60 @@ adb shell su -c 'dmesg | grep -E "hwbp:|register_user_hw_breakpoint" | tail -20'
 
 **行为变化提醒**：
 - SUSPEND/RESUME 语义 = 暂停/恢复"记录"（不断点硬件），返回值 0/成功。
-- X 执行断点 = 一次性（命中后硬件槽 E 位清除），W/R/RW 监视点可重复命中。
+- X 执行断点：**不是一次性** —— 见下方 10.4.1 的纠正。W/R/RW 监视点可重复命中。
 - proc 节点不再隐藏（`/proc/dce3771681d4c7a143d5d06b7d32548e/...` 可见）。
 
+### 10.4.1 本机落地（2026-10-21）：补第四条缺陷，纠正「X 断点一次性」
+
+上面 §10.4 是 2026-08-17 在 Linux Mint VM 里做的修复记录。本机（myron / 6.12.69）
+的实际情况有两点要补正 —— 完整记录见 `DRIVER_MATRIX.md` §4.5。
+
+**一、仓库里的 `.ko` 不是修好的那份。** `build/ko/hwBreakpointProc_6.12.69.ko`
+（afei prebuilt）是上游原版编的：枚举 0 起始、回调用 mutex + cvector、
+`DETAIL` 返回条目数而非字节数 —— §10.4 列的三条一条都没修。所以本机必须自编译，
+不能直接用它。`scripts/build_hwbp_ko.sh` 负责重建，`deploy.ps1` 自动覆盖部署。
+
+**二、清 E 位不能替代单步挪位 —— 这是第四条缺陷。**
+§10.4 的「X 执行断点 = 一次性（命中后清 E 位）」在本机实测站不住：
+perf 框架仍认为该 event 有效，命中回调返回后会把断点重新写回 BCR，
+于是 PC 停在断点指令上**反复触发**。实测现象是目标进程卡在 `R` 状态、CPU 满载，
+不崩机但也回不来（`kill -9` 才停）。
+
+不能用 `CONFIG_MODIFY_HIT_NEXT_MODE` 解：它的
+`arm64_move_bp_to_next_instruction` 调 perf 的 `modify_user_hw_breakpoint`，
+会拿 mutex，在调试异常上下文里必然 `scheduling while atomic`。
+
+正解是在回调里**直接写 BVR**：
+
+```c
+/* 首命中：记录后把断点挪到 pc+4，让原指令能执行 */
+set_bp_addr_directly(&hi->original_attr, hi->is_32bit_task, regs->pc, regs->pc + 4);
+/* 在 pc+4 再命中：挪回原地址，这一次不记录 */
+set_bp_addr_directly(&hi->original_attr, hi->is_32bit_task, ng->bp_addr, hi->original_attr.bp_addr);
+```
+
+`set_bp_addr_directly` 只做 `read_wb_reg` / `write_wb_reg` 找槽位改地址，
+不碰 perf 框架。数据断点命中时 PC 会正常前进，不需要挪位，只记录。
+
+**三、`struct module` 必须是 1600 字节，只有完整 GKI 树能做到。**
+vanilla 6.12 = 1280、vanilla 换 GKI 的 `module.h` = 1344，都不够。
+设备真值 1600 从两处独立获得：能正常加载的 `rwProcMem_6.12.69.ko` 的
+`.gnu.linkonce.this_module` 段，以及设备 BTF 里 `struct module` 的 size。
+用完整 `android16-6.12` 源码 + 设备真值 config 才能对上（差的那 256 字节受
+GKI 特有 CONFIG 影响，不是换头文件能补的）。
+
+**四、版本表为空不影响加载。** 没编过 `vmlinux` 就没有 `Module.symvers`，
+`__versions` / `__version_ext_crcs` 为空，实测仍能 insmod 并正常工作 ——
+内核按名字解析未定义符号，空版本表只警告不拒绝。附带修掉上游 modpost 的
+空表缺陷（会生成 `static const char x[] = ;`）。
+
+**五、部署时的隐藏坑。** `CONFIG_HIDE_BY_DEFAULT` 把模块从内核链表摘除，于是
+`rmmod` 永久失败（换模块只能重启），且 `insmod` 同名模块**不会被拒** ——
+后加载的会顶掉前一个的 `/proc/<KEY>` 节点。判断当前跑的是哪版：
+发 `cmd=3`，返回 6 是自编译版，返回 4 是 afei 的 0 起始版。
+
 ---
+
 
 ## 十一、跨内核复用 prebuilt（6.12.23 → 6.12.69，2026-10-21 验证）
 

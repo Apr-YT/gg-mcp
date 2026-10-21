@@ -169,9 +169,41 @@ int main(void) {
     CHECK(after != 0x99999999u, "unfreeze -> value changes again");
     freeze_stop(&fz);
 
-    /* 7) 硬件断点不在此测：当前 hwBreakpointProc prebuilt 是未修复版，
-     *    INST 会打崩内核（详见 driver_matrix / driver.h 的 g_hwbp_allowed 注释）。
-     *    换成自编译模块并用 --hwbp 启动 agentd 后，才可在此加回测试。 */
+    /* 7) 硬件断点：注册 / 查询 / 卸载
+     *
+     * 先探测模块的命令码基准：自编译模块 GET_NUM_BRPS(3) 返回执行断点槽数
+     * （本机 6）；afei 的 prebuilt 是 0 起始枚举，同一条命令实际是
+     * GET_NUM_WRPS，返回 4 —— 对它发 INST 会把 put_pid 打到用户态整数上
+     * 直接崩内核。所以探不到 6 就跳过，绝不上手。
+     *
+     * 这里只覆盖 注册/查询/卸载 三个环节，不制造命中：命中路径（含单步挪位）
+     * 由 dev 用的自命中探针单独验证，集成测试不碰执行断点的触发。 */
+    {
+        int brps = rwproc_hwbp_probe(&drv);
+        if (brps != 6) {
+            printf("  [skip] hwbp: 模块命令码基准不符 (GET_NUM_BRPS=%d, 期望 6)\n", brps);
+        } else {
+            /* 对自身代码段某处设写监视点：不会命中，只验证通道 */
+            static volatile uint32_t hw_guard = 0x11223344u;
+            uint64_t bp_id = 0;
+            int st = rwproc_hwbp_start(&drv, (pid_t)getpid(), (uint64_t)(uintptr_t)&hw_guard,
+                                       HW_BP_TYPE_W, 4, &bp_id);
+            printf("  hwbp start -> %d (bp_id=0x%llx)\n", st, (unsigned long long)bp_id);
+            CHECK(st == 0 && bp_id != 0, "hwbp INST returns bp id");
+
+            if (st == 0) {
+                rwproc_hwbp_hit_item_t hits[2];
+                int real = -1;
+                int g = rwproc_hwbp_get_hits(&drv, bp_id, hits, 2, &real);
+                printf("  hwbp get_hits -> %d (real=%d)\n", g, real);
+                CHECK(g == 0 && real >= 0, "hwbp GET_HIT_COUNT works");
+
+                int s2 = rwproc_hwbp_stop(&drv, bp_id);
+                printf("  hwbp stop -> %d\n", s2);
+                CHECK(s2 == 0, "hwbp UNINST succeeds");
+            }
+        }
+    }
 
     results_clear(&res);
     driver_close(&drv);

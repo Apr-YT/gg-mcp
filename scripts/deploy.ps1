@@ -115,6 +115,23 @@ if (-not $SkipKo) {
         # adb shell 仍无法直接 push 到 $DevDir/ko/。改走 /data/local/tmp 中转 + su 复制。
         New-Item -ItemType Directory -Force -Path "$Stage\ko" | Out-Null
         foreach ($f in $koFiles) { Copy-Item $f.FullName "$Stage\ko\" -Force }
+        # 硬件断点模块必须用自编译版（scripts/build_hwbp_ko.sh 产出）。
+        # build\ko\ 里那份是 afei 的 prebuilt：命令枚举从 0 起始、命中回调用
+        # mutex + cvector，加载后一发 INST 就把整机打崩（put_pid 收到用户态整数）。
+        # 两者模块名与 vermagic 完全相同，用同名覆盖，install_ko.sh 的
+        # 内核版本匹配逻辑不受影响。
+        $selfHwbp = "$Root\build\ko_built\hwbp_selfbuilt_6.12.69.ko"
+        if (Test-Path $selfHwbp) {
+            Copy-Item $selfHwbp "$Stage\ko\hwBreakpointProc_6.12.69.ko" -Force
+            Write-Host "  硬件断点模块: 使用自编译版（覆盖 afei prebuilt）" -ForegroundColor DarkYellow
+        } else {
+            # 没有自编译版就干脆不部署 hwbp：afei 那份的枚举从 0 起始、回调用 mutex，
+            # 留着只会在探测时被拒（功能不可用），而且重复 insmod 同名模块会顶掉
+            # proc 节点，排查起来很绕。宁缺勿滥。
+            Remove-Item "$Stage\ko\hwBreakpointProc_6.12.69.ko" -Force -ErrorAction SilentlyContinue
+            Write-Host "  跳过硬件断点模块（gg_watch_* 将不可用）" -ForegroundColor Yellow
+            Write-Host "  需要时先执行: bash scripts/build_hwbp_ko.sh（WSL，需完整 GKI 源码树）" -ForegroundColor Yellow
+        }
         # 中转目录也要先清：它跨次保留，旧文件会被一起 cp 过去
         Adb-Sh "rm -rf $TmpDir/ko" | Out-Null
         Adb-Sh "mkdir -p $TmpDir/ko" | Out-Null

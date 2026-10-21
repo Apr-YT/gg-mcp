@@ -156,6 +156,10 @@ int rwproc_hwbp_start(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int le
  * ids 返回句柄数组（cap 个）, *count 返回实际注册数。一次调用全覆盖, 不依赖用户态枚举线程。 */
 int rwproc_hwbp_start_all(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int len,
                           uint64_t *ids, int cap, int *count);
+/* 探测断点模块的命令码基准：GET_NUM_BRPS(3) 返回执行断点槽数。
+ * 我们的构建返回 6；0 起始的旧模块会返回 4（那条其实是 GET_NUM_WRPS）。*/
+int rwproc_hwbp_probe(gg_driver_t *d);
+
 int rwproc_hwbp_get_hits(gg_driver_t *d, uint64_t bp_id,
                          rwproc_hwbp_hit_item_t *out, int cap, int *real);
 int rwproc_hwbp_stop(gg_driver_t *d, uint64_t bp_id);

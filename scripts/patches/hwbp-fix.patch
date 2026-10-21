@@ -30,7 +30,7 @@ index 13980ea..8c2db97 100644
  static void * x_kmalloc(size_t size, gfp_t flags) {
  	/* ★6.12 适配：本内核 CONFIG_SLAB_BUCKETS=y，没有裸 __kmalloc 可链接，
 diff --git a/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.c b/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.c
-index a1e47b0..864b911 100644
+index a1e47b0..a4d297a 100644
 --- a/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.c
 +++ b/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.c
 @@ -18,8 +18,18 @@ struct ioctl_request {
@@ -69,7 +69,49 @@ index a1e47b0..864b911 100644
  }
  
  #ifdef CONFIG_MODIFY_HIT_NEXT_MODE
-@@ -88,7 +96,8 @@ static void hwbp_hit_user_info_callback(struct perf_event *bp,
+@@ -85,10 +93,50 @@ static void hwbp_hit_user_info_callback(struct perf_event *bp,
+ /*
+  * Handle hitting a HW-breakpoint.
+  */
++/* 在回调里改断点地址：只读写调试寄存器，绝不调用 perf 框架 API。
++ * perf 的 modify_user_hw_breakpoint 会拿 mutex，而本函数运行在
++ * ARM64 调试异常上下文（中断已关），走 perf API 必然 scheduling while atomic。
++ * 返回 false 表示没找到槽位（地址已被改走）。 */
++static bool set_bp_addr_directly(const struct perf_event_attr *attr, bool is_32bit_task,
++                                 uint64_t cur_addr, uint64_t new_addr) {
++	int i, max_slots, val_reg, slot = -1;
++
++	if (!attr)
++		return false;
++	switch (attr->bp_type) {
++	case HW_BREAKPOINT_R:
++	case HW_BREAKPOINT_W:
++	case HW_BREAKPOINT_RW:
++		val_reg = AARCH64_DBG_REG_WVR;
++		max_slots = getCpuNumWrps();
++		break;
++	case HW_BREAKPOINT_X:
++		val_reg = AARCH64_DBG_REG_BVR;
++		max_slots = getCpuNumBrps();
++		break;
++	default:
++		return false;
++	}
++	(void)is_32bit_task;
++
++	for (i = 0; i < max_slots; i++) {
++		if (read_wb_reg(val_reg, i) == cur_addr) {
++			slot = i;
++			break;
++		}
++	}
++	if (slot < 0)
++		return false;
++
++	write_wb_reg(val_reg, slot, new_addr);
++	return true;
++}
++
  static void hwbp_handler(struct perf_event *bp,
  	struct perf_sample_data *data,
  	struct pt_regs *regs) {
@@ -79,7 +121,7 @@ index a1e47b0..864b911 100644
  	uint64_t hook_pc;
  	printk_debug(KERN_INFO "hw_breakpoint HIT!!!!! bp:%px, pc:%px, id:%d\n", bp, regs->pc, bp->id);
  
-@@ -98,12 +107,13 @@ static void hwbp_handler(struct perf_event *bp,
+@@ -98,38 +146,47 @@ static void hwbp_handler(struct perf_event *bp,
  		return;
  	}
  
@@ -93,13 +135,58 @@ index a1e47b0..864b911 100644
 +		if (hwbp_handle_info->sample_hbp != bp)
  			continue;
 -		}
+-#ifdef CONFIG_MODIFY_HIT_NEXT_MODE
+-		if(hwbp_handle_info->next_instruction_attr.bp_addr != regs->pc) {
+-			// first hit
+-			bool should_toggle = true;
+-			hwbp_hit_user_info_callback(bp, data, regs, hwbp_handle_info);
+-			if(!hwbp_handle_info->is_32bit_task) {
+-				if(arm64_move_bp_to_next_instruction(bp, regs->pc + 4, &hwbp_handle_info->original_attr, &hwbp_handle_info->next_instruction_attr)) {
+-					should_toggle = false;
 +		if (hwbp_handle_info->suspended)   /* 已暂停：只跳过记录 */
 +			break;
- #ifdef CONFIG_MODIFY_HIT_NEXT_MODE
- 		if(hwbp_handle_info->next_instruction_attr.bp_addr != regs->pc) {
- 			// first hit
-@@ -129,7 +139,7 @@ static void hwbp_handler(struct perf_event *bp,
- #endif
++		if (hwbp_handle_info->original_attr.bp_type == HW_BREAKPOINT_X) {
++			/* 执行断点：命中时 PC 仍停在断点指令上，原指令还没执行。
++			 * perf 认为 event 仍然有效，会把断点写回硬件，于是同一条指令
++			 * 被反复触发 —— 必须把断点临时挪到 pc+4，等原指令执行完、
++			 * 在 pc+4 再次命中时再挪回来。全程只读写调试寄存器。 */
++			if (hwbp_handle_info->next_instruction_attr.bp_addr == 0) {
++				/* 首次命中：先记录，再挪到 pc+4 */
++				hwbp_hit_user_info_callback(bp, data, regs, hwbp_handle_info);
++				if (set_bp_addr_directly(&hwbp_handle_info->original_attr,
++				                         hwbp_handle_info->is_32bit_task,
++				                         regs->pc, regs->pc + 4)) {
++					hwbp_handle_info->next_instruction_attr.bp_addr = regs->pc + 4;
++				} else {
++					/* 挪不动就禁用断点：宁可少记录，也不能把进程锁死 */
++					toggle_bp_registers_directly(&hwbp_handle_info->original_attr,
++					                             hwbp_handle_info->is_32bit_task, 0);
++				}
++			} else {
++				/* 第二次命中（pc+4）：挪回原地址，这一次不记录 */
++				if (set_bp_addr_directly(&hwbp_handle_info->original_attr,
++				                         hwbp_handle_info->is_32bit_task,
++				                         hwbp_handle_info->next_instruction_attr.bp_addr,
++				                         hwbp_handle_info->original_attr.bp_addr)) {
++					hwbp_handle_info->next_instruction_attr.bp_addr = 0;
+ 				}
+-			}
+-			if(should_toggle) {
+-				toggle_bp_registers_directly(&hwbp_handle_info->original_attr, hwbp_handle_info->is_32bit_task, 0);
+ 			}
+ 		} else {
+-			// second hit
+-			if(!arm64_recovery_bp_to_original(bp, &hwbp_handle_info->original_attr, &hwbp_handle_info->next_instruction_attr)) {
+-				toggle_bp_registers_directly(&hwbp_handle_info->next_instruction_attr, hwbp_handle_info->is_32bit_task, 0);
+-			}
++			/* 数据断点：访问已经发生，PC 会照常前进，只需记录 */
++			hwbp_hit_user_info_callback(bp, data, regs, hwbp_handle_info);
+ 		}
+-#else
+-		hwbp_hit_user_info_callback(bp, data, regs, hwbp_handle_info);
+-		toggle_bp_registers_directly(&hwbp_handle_info->original_attr, hwbp_handle_info->is_32bit_task, 0);
+-#endif
++		break;
  	}
  	
 -	mutex_unlock(&g_hwbp_handle_info_mutex);
@@ -107,7 +194,7 @@ index a1e47b0..864b911 100644
  }
  
  
-@@ -182,6 +192,7 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
+@@ -182,6 +239,7 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
  	pid_t pid_val;
  	struct task_struct *task;
  	struct HWBP_HANDLE_INFO hwbp_handle_info = { 0 };
@@ -115,7 +202,7 @@ index a1e47b0..864b911 100644
  	printk_debug(KERN_INFO "CMD_INST_PROCESS_HWBP\n");
  	printk_debug(KERN_INFO "proc_pid_struct *:%px\n", proc_pid_struct);
  	printk_debug(KERN_INFO "proc_virt_addr :%px\n", proc_virt_addr);
-@@ -217,10 +228,23 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
+@@ -217,10 +275,23 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
  		printk_debug(KERN_INFO "register_user_hw_breakpoint failed: %d\n", ret);
  		return ret;
  	}
@@ -143,7 +230,7 @@ index a1e47b0..864b911 100644
  
  	if (x_copy_to_user((void*)buf, &hwbp_handle_info.sample_hbp, sizeof(uint64_t))) {
  		return -EINVAL;
-@@ -230,28 +254,29 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
+@@ -230,28 +301,29 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
  
  static ssize_t OnCmdUninstProcessHwbp(struct ioctl_request *hdr, char __user* buf) {
  	struct perf_event * sample_hbp = (struct perf_event *)hdr->param1;
@@ -188,7 +275,7 @@ index a1e47b0..864b911 100644
  	if(found) {
  		x_unregister_hw_breakpoint(sample_hbp);
  	}
-@@ -261,64 +286,50 @@ static ssize_t OnCmdUninstProcessHwbp(struct ioctl_request *hdr, char __user* bu
+@@ -261,64 +333,50 @@ static ssize_t OnCmdUninstProcessHwbp(struct ioctl_request *hdr, char __user* bu
  
  static ssize_t OnCmdSuspendProcessHwbp(struct ioctl_request *hdr, char __user* buf) {
  	struct perf_event * sample_hbp = (struct perf_event *)hdr->param1;
@@ -283,7 +370,7 @@ index a1e47b0..864b911 100644
  static ssize_t OnCmdGetHwbpHitCount(struct ioctl_request *hdr, char __user* buf) {
  	#pragma pack(1)
  	struct buf_layout {
-@@ -328,21 +339,22 @@ static ssize_t OnCmdGetHwbpHitCount(struct ioctl_request *hdr, char __user* buf)
+@@ -328,21 +386,22 @@ static ssize_t OnCmdGetHwbpHitCount(struct ioctl_request *hdr, char __user* buf)
  	#pragma pack()
  	struct perf_event *sample_hbp = (struct perf_event *)hdr->param1;
  	struct buf_layout user_data = {0};
@@ -313,7 +400,7 @@ index a1e47b0..864b911 100644
  	
  	printk_debug(KERN_INFO "user_data.hit_total_count:%zu\n", user_data.hit_total_count);
  	if (x_copy_to_user((void*)buf, &user_data, sizeof(user_data))) {
-@@ -354,37 +366,42 @@ static ssize_t OnCmdGetHwbpHitCount(struct ioctl_request *hdr, char __user* buf)
+@@ -354,37 +413,42 @@ static ssize_t OnCmdGetHwbpHitCount(struct ioctl_request *hdr, char __user* buf)
  static ssize_t OnCmdGetHwbpHitDetail(struct ioctl_request *hdr, char __user* buf) {
  	struct perf_event *sample_hbp = (struct perf_event *)hdr->param1;
  	size_t size = hdr->buf_size;
@@ -369,16 +456,16 @@ index a1e47b0..864b911 100644
 +			taken = size / sizeof(struct HWBP_HIT_ITEM);
 +		memcpy(tmp, hwbp_handle_info->hit_arr, taken * sizeof(struct HWBP_HIT_ITEM));
 +		break;
-+	}
+ 	}
+-	mutex_unlock(&g_hwbp_handle_info_mutex);
+-	return count;
 +	raw_spin_unlock_irqrestore(&g_hwbp_lock, flags);
 +
 +	if (taken &&
 +	    x_copy_to_user((void*)buf, tmp, taken * sizeof(struct HWBP_HIT_ITEM))) {
 +		vfree(tmp);
 +		return -EINVAL;
- 	}
--	mutex_unlock(&g_hwbp_handle_info_mutex);
--	return count;
++	}
 +	vfree(tmp);
 +	/* 返回**字节数**（read() 惯例）。原来返回条目数，而 agentd 用
 +	 * rsize / sizeof(item) 折算条目数 → 条数 < 312 时恒为 0，永远取不到命中。 */
@@ -386,7 +473,7 @@ index a1e47b0..864b911 100644
  }
  
  static ssize_t OnCmdSetHookPc(struct ioctl_request *hdr, char __user* buf) {
-@@ -515,39 +532,31 @@ static ssize_t hwBreakpointProc_read(struct file* filp,
+@@ -515,39 +579,31 @@ static ssize_t hwBreakpointProc_read(struct file* filp,
  }
  
  static void clean_hwbp(void) {
@@ -394,26 +481,6 @@ index a1e47b0..864b911 100644
 -	cvector wait_unregister_bp_arr = cvector_create(sizeof(struct perf_event *));
 -	if(!wait_unregister_bp_arr || !g_hwbp_handle_info_arr) {
 -		return;
--	}
--	mutex_lock(&g_hwbp_handle_info_mutex);
--	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
--		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
--		if(hwbp_handle_info->sample_hbp) {
--			cvector_pushback(wait_unregister_bp_arr, &hwbp_handle_info->sample_hbp);
--			hwbp_handle_info->sample_hbp = NULL;
--		}
--		if(hwbp_handle_info->hit_item_arr) {
--			cvector_destroy(hwbp_handle_info->hit_item_arr);
--			hwbp_handle_info->hit_item_arr = NULL;
--		}
--	}
--	cvector_destroy(g_hwbp_handle_info_arr);
--	g_hwbp_handle_info_arr = NULL;
--	mutex_unlock(&g_hwbp_handle_info_mutex);
--	
--	for (iter = cvector_begin(wait_unregister_bp_arr); iter != cvector_end(wait_unregister_bp_arr); iter = cvector_next(wait_unregister_bp_arr, iter)) {
--	  struct perf_event * bp = *(struct perf_event **)iter;
--	  x_unregister_hw_breakpoint(bp);
 +	struct perf_event *bps[HWBP_MAX_HANDLES];
 +	struct HWBP_HIT_ITEM *arrs[HWBP_MAX_HANDLES];
 +	int n = 0, i;
@@ -435,6 +502,26 @@ index a1e47b0..864b911 100644
 +		if (arrs[i])
 +			vfree(arrs[i]);
  	}
+-	mutex_lock(&g_hwbp_handle_info_mutex);
+-	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
+-		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
+-		if(hwbp_handle_info->sample_hbp) {
+-			cvector_pushback(wait_unregister_bp_arr, &hwbp_handle_info->sample_hbp);
+-			hwbp_handle_info->sample_hbp = NULL;
+-		}
+-		if(hwbp_handle_info->hit_item_arr) {
+-			cvector_destroy(hwbp_handle_info->hit_item_arr);
+-			hwbp_handle_info->hit_item_arr = NULL;
+-		}
+-	}
+-	cvector_destroy(g_hwbp_handle_info_arr);
+-	g_hwbp_handle_info_arr = NULL;
+-	mutex_unlock(&g_hwbp_handle_info_mutex);
+-	
+-	for (iter = cvector_begin(wait_unregister_bp_arr); iter != cvector_end(wait_unregister_bp_arr); iter = cvector_next(wait_unregister_bp_arr, iter)) {
+-	  struct perf_event * bp = *(struct perf_event **)iter;
+-	  x_unregister_hw_breakpoint(bp);
+-	}
 -	cvector_destroy(wait_unregister_bp_arr);
  }
 -
@@ -447,7 +534,7 @@ index a1e47b0..864b911 100644
  	return 0;
  }
  
-@@ -569,12 +578,12 @@ static int hwBreakpointProc_dev_init(void) {
+@@ -569,12 +625,12 @@ static int hwBreakpointProc_dev_init(void) {
  		return -EBADF;
  	}
  #endif
@@ -465,7 +552,7 @@ index a1e47b0..864b911 100644
  
  	g_hwBreakpointProc_devp = x_kmalloc(sizeof(struct hwBreakpointProcDev), GFP_KERNEL);
  	memset(g_hwBreakpointProc_devp, 0, sizeof(struct hwBreakpointProcDev));
-@@ -627,8 +636,6 @@ static void hwBreakpointProc_dev_exit(void) {
+@@ -627,8 +683,6 @@ static void hwBreakpointProc_dev_exit(void) {
  
  	clean_hwbp();
  	
@@ -475,7 +562,7 @@ index a1e47b0..864b911 100644
  	if(g_hwBreakpointProc_devp->proc_entry) {
  		proc_remove(g_hwBreakpointProc_devp->proc_entry);
 diff --git a/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.h b/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.h
-index 1682453..fbcc005 100644
+index 1682453..a2bd4e7 100644
 --- a/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.h
 +++ b/hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.h
 @@ -6,6 +6,9 @@
@@ -519,9 +606,17 @@ index 1682453..fbcc005 100644
  };
  
  struct hwBreakpointProcDev {
-@@ -93,7 +108,15 @@ struct HWBP_HANDLE_INFO {
+@@ -89,11 +104,21 @@ struct HWBP_HANDLE_INFO {
+ 	struct perf_event * sample_hbp;
+ 	struct perf_event_attr original_attr;
+ 	bool is_32bit_task;
+-#ifdef CONFIG_MODIFY_HIT_NEXT_MODE
++	/* 断点挪位状态：bp_addr 为 0 表示断点就在原地址；非 0 表示当前被
++	 * 临时挪到该地址（执行断点要跨过自身那条指令）。挪位改为直接写
++	 * BVR，不再依赖 CONFIG_MODIFY_HIT_NEXT_MODE（那条路走 perf API，
++	 * 在调试异常上下文里会拿 mutex 睡眠）。*/
  	struct perf_event_attr next_instruction_attr;
- #endif
+-#endif
  	size_t hit_total_count;
 -	cvector hit_item_arr;
 +	/* 命中缓冲：INST 时一次性 vmalloc MIN_LEN 条（进程上下文，可睡眠）；

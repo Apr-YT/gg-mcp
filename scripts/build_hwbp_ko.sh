@@ -1,117 +1,189 @@
 #!/bin/bash
-# build_hwbp_ko.sh — 在 WSL(Ubuntu) 里编译 hwBreakpointProc 模块
+# build_hwbp_ko.sh — 在 WSL(Ubuntu) 里编译 hwBreakpointProc 硬件断点模块
 #
-# 背景（2026-10-21）：afei 的 prebuilt 有两个致命缺陷，必须重编才能用硬件断点：
-#   1) 命令码从 0 起始，agentd/driver.h 按 1 起始发送 → cmd=1 落到 CLOSE_PROCESS
+# 为什么必须用完整 GKI 源码树：
+#   设备内核的 struct module 是 1600 字节（0x640）—— GKI 在末尾加了
+#   scmversion、无条件 sig_ok、4 个 ANDROID_KABI_RESERVE，且这些字段受
+#   GKI 特有的 CONFIG 影响，不是换个 module.h 就能补上的。
+#   vanilla 6.12 是 1280，单换 GKI 头到 1344，**只有完整 GKI 树 + 设备真值
+#   config 才对到 1600**。尺寸不符时 insmod 直接拒：
+#   ".gnu.linkonce.this_module section size must match the kernel's built
+#    struct module size at run time"
+#
+# 模块源码的三条缺陷（见 scripts/patches/hwbp-fix.patch）：
+#   1) 命令枚举从 0 起始，driver.h 按 1 起始发 → cmd=1 落到 CLOSE_PROCESS
 #      → put_pid((struct pid*)1) → 内核崩
-#   2) 命中回调用 mutex + cvector(vmalloc)，而它跑在 perf_event 溢出上下文
+#   2) 命中回调用 mutex + cvector(vmalloc)，跑在 perf_event 溢出上下文
 #      → scheduling while atomic
-# 修复见 scripts/patches/hwbp-fix.patch（枚举对齐 1 起始 + raw_spinlock + 预分配缓冲）。
+#   3) 执行断点命中后不把断点挪到下一条指令 → PC 原地反复触发，进程死循环
+#      （第 3 条已在回调里改为直接写 BVR 实现，不走会睡眠的 perf API）
 #
-# ★ 关键前提：**必须用 GKI(android16-6.12) 的内核树**，不能用 vanilla。
-#   vanilla 的 struct module 是 1280 字节，GKI 是 1344（多了 scmversion、
-#   无条件的 sig_ok、4 个 ANDROID_KABI_RESERVE），加载时报
-#   ".gnu.linkonce.this_module section size must match the kernel's built struct module size"。
-#   本脚本没给内核树时会退化为 vanilla + GKI 头（1344），**仅够验证语法**，
-#   加载仍会失败。
+# 前置（WSL Ubuntu）：
+#   apt install -y clang lld llvm flex bison bc libelf-dev libdw-dev \
+#                  build-essential kmod python3
+#   GKI 源码：
+#     curl -L -o /root/gki.tar.gz \
+#       https://github.com/aosp-mirror/kernel_common/archive/refs/heads/android16-6.12.tar.gz
+#     tar xzf /root/gki.tar.gz -C /root
+#   （android.googlesource.com 不通时这条直连可用，约 240MB / 3 分钟）
 #
 # 用法：
-#   bash build_hwbp_ko.sh /path/to/gki-kernel-tree     # 推荐
-#   bash build_hwbp_ko.sh                              # 退化模式（只验证能编译）
-#
-# 环境准备（一次性）：
-#   apt install -y clang lld llvm flex bison bc libssl-dev libelf-dev
-set -e
+#   bash scripts/build_hwbp_ko.sh [GKI源码树] [设备config]
+#   默认 GKI 树 /root/kernel_common-android16-6.12
+#   默认 config  /mnt/c/Windows/Temp/ggdeck_verify/device.config
+#   设备 config 取法（PowerShell）：
+#     adb exec-out "su -c 'cat /proc/config.gz'" > device_config.gz 然后解压
+set -u
 
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
-KSRC="${1:-}"
+KSRC="${1:-/root/kernel_common-android16-6.12}"
+DEVCONF="${2:-/mnt/c/Windows/Temp/ggdeck_verify/device.config}"
 SRC=/root/hwbp-src
-W=/mnt/c/Windows/Temp/ggdeck_verify
-WORK=/root/hwbp-build
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+OUT="$REPO/build/ko_built/hwbp_selfbuilt_6.12.69.ko"
 
-mkdir -p "$WORK"
+SUBLEVEL_WANT=69
+LOCALVERSION_WANT="-android16-6-4k"
 
-# ---------- 1) 取模块源码 + 打补丁 ----------
+[ -d "$KSRC" ] || { echo "FAIL: GKI 树不存在: $KSRC"; exit 1; }
+[ -f "$DEVCONF" ] || { echo "FAIL: 设备 config 不存在: $DEVCONF"; exit 1; }
+
+# ---------- 1) 模块源码 ----------
 echo "=== 1) 准备模块源码 ==="
-rm -rf "$SRC"
-mkdir -p "$SRC"
 MODDIR="$REPO/build/rwProcMem33/hwBreakpointProcModule/hwBreakpointProc_module"
-if [ -d "$MODDIR" ] && [ -f "$REPO/scripts/patches/hwbp-fix.patch" ]; then
-    cp "$MODDIR"/*.c "$MODDIR"/*.h "$SRC"/
-    # 若源码已是打过补丁的状态，patch 会失败，这里容忍
-    (cd "$REPO/build/rwProcMem33" && git apply --reverse --check "$REPO/scripts/patches/hwbp-fix.patch" >/dev/null 2>&1) \
-        && echo "源码已含补丁" \
-        || (cd "$REPO/build/rwProcMem33" && git apply "$REPO/scripts/patches/hwbp-fix.patch" && \
-            cp "$MODDIR"/*.c "$MODDIR"/*.h "$SRC"/ && echo "已应用补丁")
-else
-    echo "缺少模块源码或补丁，退出"; exit 1
-fi
-
+[ -d "$MODDIR" ] || { echo "FAIL: 找不到模块源码 $MODDIR"; exit 1; }
+rm -rf "$SRC"; mkdir -p "$SRC"
+cp "$MODDIR"/*.c "$MODDIR"/*.h "$SRC"/ || { echo "FAIL: 复制源码失败"; exit 1; }
 cat > "$SRC/Makefile" <<'MK'
 obj-m += hwBreakpointProc_module.o
-# clang 18 比 afei 用的版本严格：cvector.h 里两个非 static 函数触发
+# clang 18 比 afei 用的版本严格：cvector.h 里两个非 static 函数会触发
 # -Wmissing-prototypes（内核把警告当错误），只在编译单元关掉。
 ccflags-y += -Wno-missing-prototypes -Wno-unused-function
 MK
+echo "  源文件: $(ls "$SRC" | tr '\n' ' ')"
 
-# ---------- 2) 内核树 ----------
-if [ -z "$KSRC" ]; then
-    KSRC=/root/linux-6.12
-    if [ ! -d "$KSRC" ]; then
-        echo "=== 2) 下载 vanilla 6.12（清华镜像）==="
-        (cd /root && curl -sL -o linux-6.12.tar.xz \
-            https://mirrors.tuna.tsinghua.edu.cn/kernel/v6.x/linux-6.12.tar.xz && \
-            tar xf linux-6.12.tar.xz)
-    fi
-    echo "!! 使用 vanilla 树：struct module=1280，与设备(1344)不符，编出来只能验证语法"
+# ---------- 2) 配置内核树 ----------
+echo "=== 2) 配置内核树（设备真值 config）==="
+cd "$KSRC" || exit 1
+cp "$DEVCONF" .config
 
-    echo "=== 3) 设备 config + arm64 配置 ==="
-    # 设备 config 由 `adb exec-out "su -c 'cat /proc/config.gz'" | gunzip` 得到
-    if [ -f "$W/device.config" ]; then
-        cp "$W/device.config" "$KSRC/.config"
-    else
-        echo "缺少设备 config（先导出 /proc/config.gz 解压到 $W/device.config）"; exit 1
-    fi
-    cd "$KSRC"
-    # 必须 ARCH=arm64，否则 olddefconfig 按 x86 解释设备 config 丢掉 CONFIG_ARM64
-    make ARCH=arm64 CC=clang LLVM=1 olddefconfig 2>&1 | tail -2
-
-    # vermagic 对齐设备真值：6.12.69-android16-6-4k
-    #   6.12.69 ← Makefile 的 SUBLEVEL；-android16-6-4k ← CONFIG_LOCALVERSION
-    sed -i 's/^SUBLEVEL = 0$/SUBLEVEL = 69/' Makefile
-    sed -i 's|^CONFIG_LOCALVERSION=.*$|CONFIG_LOCALVERSION="-android16-6-4k"|' .config
-    sed -i 's|^CONFIG_LOCALVERSION_AUTO=.*$|# CONFIG_LOCALVERSION_AUTO is not set|' .config
-    make ARCH=arm64 CC=clang LLVM=1 syncconfig 2>&1 | tail -2
-    make ARCH=arm64 CC=clang LLVM=1 modules_prepare -j"$(nproc)" 2>&1 | tail -3
-
-    # GKI 的 module.h + android_kabi.h（让 struct module 变成 1344）
-    if [ -f "$W/gki_module.h" ] && [ -f "$W/gki_android_kabi.h" ]; then
-        cp "$KSRC/include/linux/module.h" "$KSRC/include/linux/module.h.vanilla" 2>/dev/null || true
-        cp "$W/gki_module.h" "$KSRC/include/linux/module.h"
-        cp "$W/gki_android_kabi.h" "$KSRC/include/linux/android_kabi.h"
-        make ARCH=arm64 CC=clang LLVM=1 modules_prepare -j"$(nproc)" 2>&1 | tail -2
-    fi
+# vermagic 必须与设备一致。设备 uname -r 带 git hash 与 ABO 编号
+# （6.12.69-android16-6-g43b5ab7e247d-abogki561813157-4k），但内核的
+# vermagic 比较只认到 -android16-6-4k —— 实测 afei 那份能正常加载的模块
+# 就是这个串，说明比对该后缀之外的差异是放宽的。
+# 这里用 SUBLEVEL + LOCALVERSION 直接产出真值，不做二进制改串
+# （新串更长，塞不进原字符串空间）。
+sed -i "s/^SUBLEVEL = .*/SUBLEVEL = $SUBLEVEL_WANT/" Makefile
+sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
+if grep -q '^CONFIG_LOCALVERSION=' .config; then
+    sed -i "s|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"$LOCALVERSION_WANT\"|" .config
 else
-    echo "=== 2) 使用指定内核树: $KSRC ==="
-    if [ ! -f "$KSRC/include/generated/utsrelease.h" ]; then
-        echo "该树还没 prepare，先 modules_prepare ..."
-        (cd "$KSRC" && make ARCH=arm64 CC=clang LLVM=1 modules_prepare -j"$(nproc)")
-    fi
+    echo "CONFIG_LOCALVERSION=\"$LOCALVERSION_WANT\"" >> .config
 fi
 
-# ---------- 4) 编译 ----------
-echo
-echo "=== 4) 编译模块 ==="
-cd "$SRC"
-make -C "$KSRC" ARCH=arm64 CC=clang LLVM=1 M="$SRC" KBUILD_MODPOST_WARN=1 modules 2>&1 \
-    | grep -vE '^WARNING: modpost: "' | tail -12
+# GKI 的 CONFIG_UNUSED_KSYMS_WHITELIST 指向 AOSP 发布的 prebuilt
+# abi_symbollist.raw（不在源码树里），modpost 还额外要一份
+# protected_module_names_list。两者都只影响"哪些符号被导出"，
+# 不改变 struct module 布局、也不影响 module_layout 的 CRC，所以关掉/留空。
+sed -i 's/^CONFIG_TRIM_UNUSED_KSYMS=y/# CONFIG_TRIM_UNUSED_KSYMS is not set/' .config
+sed -i 's/^CONFIG_UNUSED_KSYMS_WHITELIST=.*/# CONFIG_UNUSED_KSYMS_WHITELIST is not set/' .config
+: > "$KSRC/protected_module_names_list"
 
-echo
-echo "=== 5) 产物 ==="
-KO="$SRC/hwBreakpointProc_module.ko"
-ls -l "$KO"
-echo -n "vermagic: "; strings "$KO" | grep -m1 vermagic= | sed 's/vermagic=//'
-echo -n "this_module 段: "; llvm-objdump -h "$KO" | awk '/linkonce.this_module/ {print $3; exit}'
-echo
-echo "设备期望的 vermagic: 6.12.69-android16-6-4k SMP preempt mod_unload modversions aarch64"
-echo "（this_module 需与设备内核的 sizeof(struct module) 一致，否则 insmod 报 section size mismatch）"
+grep -E "^VERSION =|^PATCHLEVEL =|^SUBLEVEL =" Makefile | head -3 | sed 's/^/  /'
+
+make ARCH=arm64 LLVM=1 olddefconfig 2>&1 | tail -3
+echo "  kernel.release: $(cat include/config/kernel.release 2>/dev/null)"
+
+for k in CONFIG_ARM64 CONFIG_MODULES CONFIG_MODVERSIONS CONFIG_EXTENDED_MODVERSIONS CONFIG_CFI_CLANG; do
+    grep -E "^$k=|^# $k is not set" .config | head -1 | sed 's/^/  /'
+done
+
+# ---------- 3) modpost 空版本表兜底 ----------
+# 内核树没编过 vmlinux 就没有 Module.symvers，模块引用的内核符号全是
+# undefined，于是 __version_ext_names 为空列表，上游 modpost 会生成
+# `static const char x[] = ;` —— C 语法错误。补一个空串兜底。
+if grep -q '_any_ext_name' scripts/mod/modpost.c; then
+    echo "=== 3) modpost 空版本表补丁已在 ==="
+else
+    echo "=== 3) 给 modpost 打空版本表兜底 ==="
+    python3 - "$KSRC" <<'PY'
+import io, sys
+p = sys.argv[1] + '/scripts/mod/modpost.c'
+s = io.open(p, encoding='utf-8').read()
+old = (
+    '\tlist_for_each_entry(s, &mod->unresolved_symbols, list) {\n'
+    '\t\tif (!s->module)\n'
+    '\t\t\tcontinue;\n'
+    '\t\tif (!s->crc_valid)\n'
+    '\t\t\t/*\n'
+    '\t\t\t * We already warned on this when producing the crc\n'
+    '\t\t\t * table.\n'
+    '\t\t\t * We need to skip its name too, as the indexes in\n'
+    '\t\t\t * both tables need to align.\n'
+    '\t\t\t */\n'
+    '\t\t\tcontinue;\n'
+    '\t\tbuf_printf(b, "\\t\\"%s\\\\0\\"\\n", s->name);\n'
+    '\t}\n'
+    '\tbuf_printf(b, ";\\n");\n'
+)
+new = (
+    '\t{\n'
+    '\t\tbool _any_ext_name = false;\n'
+    '\t\tlist_for_each_entry(s, &mod->unresolved_symbols, list) {\n'
+    '\t\t\tif (!s->module)\n'
+    '\t\t\t\tcontinue;\n'
+    '\t\t\tif (!s->crc_valid)\n'
+    '\t\t\t\tcontinue;\n'
+    '\t\t\tbuf_printf(b, "\\t\\"%s\\\\0\\"\\n", s->name);\n'
+    '\t\t\t_any_ext_name = true;\n'
+    '\t\t}\n'
+    '\t\tif (!_any_ext_name)\n'
+    '\t\t\tbuf_printf(b, "\\t\\"\\"\\n");\n'
+    '\t}\n'
+    '\tbuf_printf(b, ";\\n");\n'
+)
+if old not in s:
+    print('  modpost 补丁点未匹配，跳过（若编译报 `= ;` 再手工处理）')
+    sys.exit(0)
+io.open(p, 'w', encoding='utf-8', newline='').write(s.replace(old, new, 1))
+print('  已打补丁')
+PY
+fi
+
+# ---------- 4) modules_prepare ----------
+echo "=== 4) modules_prepare ==="
+make ARCH=arm64 LLVM=1 modules_prepare -j"$(nproc)" 2>&1 | tail -4
+
+# ---------- 5) 编译模块 ----------
+# KBUILD_MODPOST_WARN=1：没有 Module.symvers，符号必然被报 undefined。
+# 这不影响加载 —— 内核按名字解析未定义符号，版本表为空时只警告不拒绝
+# （已于 2026-10-21 在 6.12.69 真机实测 insmod 成功、断点可用）。
+# 要拿到真正的 CRC 表则必须完整编译内核树（耗时且需精确版本匹配）。
+echo "=== 5) 编译模块 ==="
+make ARCH=arm64 LLVM=1 KBUILD_MODPOST_WARN=1 M="$SRC" modules -j"$(nproc)" 2>&1 \
+    | grep -E "error|CC \[M\]|LD \[M\]|MODPOST" | head -8
+
+MOD="$SRC/hwBreakpointProc_module.ko"
+[ -f "$MOD" ] || { echo "FAIL: 未产出 .ko"; exit 1; }
+
+# ---------- 6) 校验并导出 ----------
+echo "=== 6) 产物校验 ==="
+mkdir -p "$REPO/build/ko_built"
+cp "$MOD" "$OUT"
+ls -l "$OUT" | awk '{print "  "$5" bytes  "$9}'
+echo "  vermagic: $(strings "$MOD" | grep -m1 vermagic)"
+echo "  this_module 段（设备真值应为 640 = 1600 字节）:"
+llvm-objdump -h "$MOD" | grep -E "\.gnu\.linkonce\.this_module" | sed 's/^/    /'
+echo "  版本段（为空属正常，见第 5 步说明）:"
+llvm-objdump -h "$MOD" | grep -E "__versions|__version_ext" | sed 's/^/    /'
+
+SIZE=$(llvm-objdump -h "$MOD" | awk '/\.gnu\.linkonce\.this_module/ {print $3; exit}')
+if [ "$SIZE" != "00000640" ]; then
+    echo ""
+    echo "  警告: this_module 段为 0x$SIZE，设备要求 0x640（1600 字节）。"
+    echo "        多半是 GKI 树不完整或没用设备真值 config，insmod 会被拒。"
+    exit 1
+fi
+
+echo ""
+echo "完成: $OUT"
+echo "部署: deploy.ps1 会自动用它覆盖 build/ko/ 里的 afei prebuilt"

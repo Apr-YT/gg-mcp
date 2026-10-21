@@ -395,9 +395,29 @@ int rwproc_hwbp_start(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int le
     }
     uint64_t id = 0;
     memcpy(&id, rwproc_buf + RWPROC_HDR_SZ, sizeof(id));
-    if (!id) { set_err(d, "rwbp INST returned null bp id"); return -1; }
+    if (!id) {
+        rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_CLOSE_PROCESS, handle, 0, 0, NULL, 0);
+        set_err(d, "rwbp INST returned null bp id");
+        return -1;
+    }
+    /* 注册完成后立刻释放进程句柄：perf_event 已绑定到 task，模块后续按
+     * bp_id 操作，不再需要 struct pid 引用。不释放则每个断点泄漏一个
+     * 内核 pid 引用，反复 watch 会累积。 */
+    rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_CLOSE_PROCESS, handle, 0, 0, NULL, 0);
     if (bp_id) *bp_id = id;
     return 0;
+}
+
+/* 探测断点模块的命令码基准。
+ * 我们的构建：CMD_GET_NUM_BRPS = 3，返回本机执行断点槽数（实测 ARM64 = 6）。
+ * afei 的 prebuilt 用 0 起始枚举，同一条 cmd=3 实际是 GET_NUM_WRPS，返回 4。
+ * 只发这一条只读命令 —— 0 起始下 cmd=4 才是 INST，绝不能拿去探测。 */
+int rwproc_hwbp_probe(gg_driver_t *d) {
+    if (d->rwproc_bp_fd < 0) return -1;
+    ssize_t r = rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_GET_NUM_BRPS,
+                            0, 0, 0, NULL, 0);
+    if (r < 0) return -1;
+    return (int)r;
 }
 
 int rwproc_hwbp_get_hits(gg_driver_t *d, uint64_t bp_id,
@@ -441,39 +461,37 @@ int rwproc_hwbp_start_all(gg_driver_t *d, pid_t pid, uint64_t addr, int type, in
     if (len <= 0) len = 4;
     if (count) *count = 0;
     if (!ids || cap <= 0) { set_err(d, "rwbp start_all bad args"); return -1; }
-    uint64_t handle = 0;
-    ssize_t r = rwproc_call_ex(d, d->rwproc_bp_fd, RWBP_CMD_OPEN_PROCESS,
-                               (uint64_t)pid, 0, 0, NULL, 0, sizeof(uint64_t));
-    if (r < 0) return -1;
-    if (r != 0) {
+
+    /* 逐线程注册。驱动侧没有 CMD_INST_PROCESS_HWBP_ALL(13) 的实现，
+     * 而 for_each_thread 在内核里遍历线程的锁风险高；这里在用户态枚举
+     * /proc/<pid>/task，对每个线程走一次已验证可靠的 OPEN -> INST -> CLOSE。
+     * perf_event 是 per-task 的，任务切换时硬件槽位自动换装，
+     * 不受每 CPU 断点槽数限制，效果与驱动内批量注册等价。 */
+    char dir[64];
+    snprintf(dir, sizeof(dir), "/proc/%d/task", (int)pid);
+    DIR *dp = opendir(dir);
+    if (!dp) {
         snprintf(d->last_error, sizeof(d->last_error),
-                 "rwbp CMD_OPEN_PROCESS(pid=%d) failed: %lld", (int)pid, (long long)r);
-        return -1;
-    }
-    memcpy(&handle, rwproc_buf + RWPROC_HDR_SZ, sizeof(handle));
-    if (!handle) { set_err(d, "rwbp CMD_OPEN_PROCESS null handle"); return -1; }
-    /* INST_ALL: 返回区 = 4B 注册数 + N*8B 句柄数组 */
-    ssize_t r2 = rwproc_call_ex(d, d->rwproc_bp_fd, RWBP_CMD_INST_PROCESS_HWBP_ALL,
-                                handle, addr, RWBP_PARAM3(len, type), NULL, 0,
-                                sizeof(int) + (size_t)cap * sizeof(uint64_t));
-    if (r2 < 0) {
-        rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_CLOSE_PROCESS, handle, 0, 0, NULL, 0);
-        return -1;
-    }
-    if (r2 != 0) {
-        snprintf(d->last_error, sizeof(d->last_error),
-                 "rwbp CMD_INST_ALL failed: %lld", (long long)r2);
-        rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_CLOSE_PROCESS, handle, 0, 0, NULL, 0);
+                 "rwbp start_all: cannot open %s: %s", dir, strerror(errno));
         return -1;
     }
     int n = 0;
-    memcpy(&n, rwproc_buf + RWPROC_HDR_SZ, sizeof(n));
-    if (n < 0) n = 0;
-    if (n > cap) n = cap;
-    if (n > 0)
-        memcpy(ids, rwproc_buf + RWPROC_HDR_SZ + sizeof(int),
-               (size_t)n * sizeof(uint64_t));
+    struct dirent *de;
+    while ((de = readdir(dp)) != NULL && n < cap) {
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+        pid_t tid = (pid_t)atoi(de->d_name);
+        uint64_t id = 0;
+        /* 单个线程失败不致命：线程可能刚退出，或该 task 已被释放 */
+        if (rwproc_hwbp_start(d, tid, addr, type, len, &id) != 0) continue;
+        ids[n++] = id;
+    }
+    closedir(dp);
     if (count) *count = n;
+    if (n == 0) {
+        snprintf(d->last_error, sizeof(d->last_error),
+                 "rwbp start_all: no thread registered for pid %d", (int)pid);
+        return -1;
+    }
     return 0;
 }
 

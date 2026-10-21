@@ -79,83 +79,119 @@
 现状：agentd 自带引擎直接经 rwproc33 读写，**不需要 GG 本体**。
 wire 命令码 28/29 保留占位（见 `PROTOCOL.md`），旧客户端调用得到明确错误。
 
-## 4.5 硬件断点不可用（2026-10-21 实测，会崩内核）
+## 4.5 硬件断点（2026-10-21 打通，自编译模块 + 运行时探测）
 
-`hwBreakpointProc_6.12.69.ko`（afei prebuilt）**不能用**：`rwproc_hwbp_start` 会让设备重启。
+**结论：可用**。afei 的 prebuilt 会崩内核，自编译模块（`scripts/build_hwbp_ko.sh`）
+加载后 `gg_watch_*` 全链路正常，`deploy.ps1` 会自动用它覆盖 prebuilt。
 
-**现象**：itest 跑到 `rwproc_hwbp_start` 时设备掉线（adb `device not found`），
-恢复后 `uptime` 归零、`sys.boot.reason=reboot`、`pstore` 为空（无 ramoops）。
-连该函数内的第一行 `printf` 都没输出 —— 崩在 OPEN_PROCESS 或 INST 内部。
+### 4.5.1 崩内核的原始现象
 
-**两条独立证据（静态）**：
+用 afei 的 `hwBreakpointProc_6.12.69.ko` 时，`rwproc_hwbp_start` 直接让设备重启：
+adb `device not found` → 恢复后 `uptime` 归零、`sys.boot.reason=reboot`、`pstore` 空
+（无 ramoops）。连该函数内第一行 `printf` 都没输出 —— 崩在 OPEN_PROCESS / INST 内部。
 
-| 证据 | 说明 |
-|---|---|
-| 重定位表含 `put_pid` / `find_get_pid` | OPEN_PROCESS 用 `find_get_pid` 取 `struct pid*`，CLOSE 用 `put_pid` 释放。若模块命令码 **0 起始**而我们按 1 起始发，`cmd=1`（以为 OPEN）会落到 CLOSE_PROCESS → `put_pid((struct pid*)1)` 解引用野指针 → 内核崩。 |
-| 只有 `mutex_lock`，**没有** `raw_spinlock` | `RWPROC33_ADAPTER.md` §10.4 记录的修复版是「固定槽位数组 + raw_spinlock」，因为命中回调运行在 ARM64 调试异常上下文（中断/抢占关闭），用 mutex 会 `scheduling while atomic`。这份 prebuilt 用的是 mutex → 是**修复前**版本。 |
+### 4.5.2 四条缺陷（都是 afei prebuilt 里的，源码逐一对应）
 
-即使把命令码改对让 INST 通过，命中回调仍会在原子上下文里睡眠而崩。所以**不要试图
-通过改 `RWBP_CMD_*` 去凑**。
-
-**当前处理**：`g_hwbp_allowed` 默认 0，`gg_watch_set` 直接返回 `GGERR_DEGRADED`
-并说明原因；要启用需 `agentd --hwbp`（仅在换用自编译模块后）。四个 `gg_watch_*`
-因此处于「保留但默认不可用」状态。
-
-### 4.6 源码已定位，缺陷共三处（2026-10-21 晚）
-
-源码在 `build/rwProcMem33/hwBreakpointProcModule/hwBreakpointProc_module/`（afei 仓库）。
-读源码后确认：**afei 的 prebuilt 是上游原版编译的，下面三条一个都没修**。
+源码在 `build/rwProcMem33/hwBreakpointProcModule/hwBreakpointProc_module/`
+（`hwbp_proc.c` 是死代码，Makefile 只编主 `.c`）。
 
 | # | 位置 | 缺陷 | 后果 |
 |---|---|---|---|
-| 1 | `hwBreakpointProc_module.h` 的 `enum` | 首项 `CMD_OPEN_PROCESS` **无赋值 → 从 0 起**，而 `rwProcMem_module.h` 是 `CMD_INIT_DEVICE_INFO = 1`；agentd 的 `RWBP_CMD_*` 按 1 起始发 | `cmd=1`（以为 OPEN）落到 `CLOSE_PROCESS` → `put_pid((struct pid*)1)` 解引用野指针 → **整机重启**（实测就是这一步） |
-| 2 | `hwbp_proc.c` / `hwBreakpointProc_module.c` 的 `hwbp_handler` | perf_event 溢出回调（ARM64 调试异常，中断/抢占关闭）里 `mutex_lock` + `cvector_pushback`（内部 vmalloc） | `scheduling while atomic` → 命中时挂死。即使修好①，命中那一刻照样崩 |
-| 3 | `OnCmdGetHwbpHitDetail` | 返回**条目数**，而 `driver.c` 按 `rsize / sizeof(item)` 折算条目数 | 条数 < 312 时恒为 0 → **永远取不到命中**（这条此前没被发现） |
+| 1 | `hwBreakpointProc_module.h` 的 `enum` | 首项 `CMD_OPEN_PROCESS` **无赋值 → 从 0 起**，而 `rwProcMem_module.h` 是 `CMD_INIT_DEVICE_INFO = 1`；agentd 的 `RWBP_CMD_*` 按 1 起始发 | `cmd=1`（以为 OPEN）落到 `CLOSE_PROCESS` → `put_pid((struct pid*)1)` 解引用野指针 → **整机重启** |
+| 2 | `hwbp_handler` | perf_event 溢出回调（ARM64 调试异常，中断/抢占关闭）里 `mutex_lock` + `cvector_pushback`（内部 vmalloc） | `scheduling while atomic`。修好①之后命中那一刻照样崩 |
+| 3 | `OnCmdGetHwbpHitDetail` | 返回**条目数**，而 `driver.c` 按 `rsize / sizeof(item)` 折算 | 条数 < 312 时恒为 0 → **永远取不到命中** |
+| 4 | `hwbp_handler` 的执行断点分支 | 命中后只 `toggle_bp_registers_directly(enable=0)`，但 perf 仍认为 event 有效、会把断点写回硬件 | PC 停在断点指令上**无限重复触发**：进程卡在 R 状态、CPU 满载，不崩机但也回不来 |
 
-作者自己也写过这个差异（`AFEI_CHANGES.md` 第 3 条）："rwProcMem 首项显式 `=1` ⇒ UNHIDE=15；
-hwBreakpointProc 首项从 0 起 ⇒ =12" —— 他知道，但只用来算自己的命令号，没对齐成 1 起始。
+作者自己在 `AFEI_CHANGES.md` 第 3 条写过枚举基准差异（"rwProcMem 首项显式 `=1` ⇒
+UNHIDE=15；hwBreakpointProc 首项从 0 起 ⇒ =12"），但只用来算自己的命令号，没对齐。
 
-**已完成的修复**（`scripts/patches/hwbp-fix.patch`，4 文件 +195/−155）：
+### 4.5.3 修复
 
-- 枚举改 `CMD_OPEN_PROCESS = 1`，`CMD_UNHIDE_KERNEL_MODULE` 挪到 14，13 让给
-  `CMD_INST_PROCESS_HWBP_ALL`（watch.c 用的批量注册，避免撞号）
-- 句柄表 `cvector` → 固定 16 槽静态数组（UNINST 用 swap-remove）；
-  命中缓冲改 INST 时一次性 `vmalloc` 的固定数组，回调内只 `memcpy`
-- `struct mutex` → `raw_spinlock_t`；`COUNT`/`DETAIL` 的 `copy_to_user` 挪到锁外
-  （会缺页睡眠）；`DETAIL` 返回字节数
-- `CONFIG_MODIFY_HIT_NEXT_MODE` / `CONFIG_ANTI_PTRACE_DETECTION_MODE` 关闭
-  （前者让回调改断点属性、后者接管已废弃的 mutex+cvector），
-  `SUSPEND/RESUME` 改为句柄 `suspended` 标志
+模块源码的三处（`scripts/patches/hwbp-fix.patch`）：
 
-**编译环境（已在本机 WSL 打通）**：`scripts/build_hwbp_ko.sh`。
-Ubuntu 24.04 + clang 18/lld/flex/bison + Linux 6.12 源码，用设备真值 config
-（`/proc/config.gz`，8162 行）以 `ARCH=arm64` 配置，vermagic 通过
-`SUBLEVEL=69` + `CONFIG_LOCALVERSION="-android16-6-4k"` 直接产出设备真值。
-改后的源码编译通过（332KB）。
+- 枚举改 `CMD_OPEN_PROCESS = 1`，`UNHIDE` 挪到 14，13 让给批量注册位
+- 句柄表 `cvector` → 固定 16 槽数组（UNINST 用 swap-remove）；命中缓冲改 INST 时
+  一次性 `vmalloc` 的固定数组，回调内只 `memcpy`
+- `struct mutex` → `raw_spinlock_t`；`COUNT`/`DETAIL` 的 `copy_to_user` 挪到锁外；
+  `DETAIL` 返回字节数
 
-**当前卡点：`struct module` 尺寸**。vanilla 6.12 是 **1280** 字节；GKI 是 **1344**
-（多 `scmversion`、无条件的 `sig_ok`、4×`ANDROID_KABI_RESERVE`）。用设备 config 也不够 ——
-GKI 的改动不在 config 里。insmod 报：
+第 4 条（死循环）不能用 `CONFIG_MODIFY_HIT_NEXT_MODE` 解：它的
+`arm64_move_bp_to_next_instruction` 走 perf 的 `modify_user_hw_breakpoint`，
+会拿 mutex，在调试异常上下文里必然 `scheduling while atomic`。改为回调内**直接写
+BVR** 实现两段式挪移：首次命中记录后把断点挪到 `pc+4` 让原指令执行，在 `pc+4`
+再命中时挪回原地址（这一次不记录）。数据断点不需要挪位，只记录。
+
+`CONFIG_MODIFY_HIT_NEXT_MODE` / `CONFIG_ANTI_PTRACE_DETECTION_MODE` 保持关闭；
+`SUSPEND/RESUME` 改为句柄 `suspended` 标志。
+
+### 4.5.4 `struct module` 尺寸：必须用完整 GKI 树
+
+| 树 | this_module | 能否加载 |
+|---|---|---|
+| vanilla 6.12 + 设备 config | 1280 (0x500) | ❌ |
+| vanilla + 换成 GKI 的 `module.h`/`android_kabi.h` | 1344 (0x540) | ❌ |
+| **完整 GKI (`android16-6.12`) + 设备真值 config** | **1600 (0x640)** | ✅ |
+
+设备真值 1600 是从能正常加载的 `rwProcMem_6.12.69.ko` 的
+`.gnu.linkonce.this_module` 段读出的，也与设备 BTF（`/sys/kernel/btf/vmlinux`）
+里 `struct module` 的 size 一致 —— 两条独立来源互相印证。
+
+差的那 256 字节不是"换个头文件"能补的：GKI 在末尾加了 `scmversion`、无条件
+`sig_ok`、4×`ANDROID_KABI_RESERVE`，而这些字段受 GKI 特有 CONFIG 影响
+（`dyndbg_info`、`kunit_*` 等），只有完整 GKI 树让 `olddefconfig` 认全设备 config 才对得上。
+
+vermagic 用 `SUBLEVEL=69` + `CONFIG_LOCALVERSION="-android16-6-4k"` 直接产出，
+不做二进制改串。设备 `uname -r` 带 git hash 与 ABO 编号
+（`…-g43b5ab7e247d-abogki561813157-4k`），但内核的 vermagic 比较放宽到该后缀 ——
+afei 那份能正常加载的模块 vermagic 就是 `6.12.69-android16-6-4k`，与本构建一致。
+
+### 4.5.5 版本表为空不影响加载
+
+内核树没编过 `vmlinux` 就没有 `Module.symvers`，模块引用的内核符号全是 undefined，
+`__versions` / `__version_ext_crcs` 为空。实测**仍能 insmod 并正常工作** ——
+内核按名字解析未定义符号，版本表为空时只警告不拒绝。
+
+顺带修掉上游 modpost 的空表缺陷：`__version_ext_names` 为空列表时会生成
+`static const char x[] = ;`（C 语法错误）。`build_hwbp_ko.sh` 自动打这个兜底补丁。
+
+要拿到真正的 CRC 表则必须完整编译内核树（且需与设备 6.12.69 精确对应的源码），
+目前不需要。
+
+### 4.5.6 命令码基准的运行时探测
+
+`agentd` 不再无条件拒绝 `gg_watch_set`，而是首次调用时探测一次：
 
 ```
-module hwBreakpointProc_module: .gnu.linkonce.this_module section size
-must match the kernel's built struct module size at run time
+cmd=3 (GET_NUM_BRPS) → 自编译模块返回 6（执行断点槽数）
+                     → afei 的 0 起始模块返回 4（那条实际是 GET_NUM_WRPS）
 ```
 
-已把 GKI 的 `include/linux/module.h` + `android_kabi.h`（单文件下载，28KB+6KB）替换进
-vanilla 树，尺寸从 1280 变成 **1344**，但仍被拒 —— 说明设备内核与当前 GKI 分支
-（android16-6.12）的 `struct module` 还有差异，需要**完整 GKI 源码树**而不是单换头文件。
+只有探到 6 才放行；否则返回 `GGERR_DEGRADED` 并说明原因。**绝不探测 `cmd=4`** ——
+0 起始枚举下那是 `INST_PROCESS_HWBP`，参数全零属高危路径。
+`agentd --hwbp` 可跳过探测（自担风险）。
 
-**下一步（唯一可靠路径）**：
+### 4.5.7 部署与验证（2026-10-21 实测）
 
-1. 取完整 GKI 源码：`android.googlesource.com/kernel/common` 的 `android16-6.12`，
-   或 GitHub 镜像 `aosp-mirror/kernel_common`（本机经 ghfast 代理下 tarball 会
-   在 42MB 处断流且不支持 Range 续传，需要换网络或用 `git clone --depth 1`）。
-2. `ARCH=arm64 olddefconfig` + `modules_prepare`（用设备 config）。
-3. 打 `scripts/patches/hwbp-fix.patch` 后编译。
-4. 真机 `insmod` 应能看到 `proc 节点`；再逐步 `gg_watch_set` → 写触发 → `gg_watch_poll`。
+- `deploy.ps1` 用 `build/ko_built/hwbp_selfbuilt_6.12.69.ko` 覆盖
+  `build/ko/hwBreakpointProc_6.12.69.ko` 后再推送 —— 两者模块名与 vermagic 相同，
+  `install_ko.sh` 的内核版本匹配逻辑不受影响
+- 全链路实测（pid 16310 的写监视点，`type=2 len=4`）：
+  `watch_set` → `bps=1`；3 秒后 `watch_poll` → `hits=64 list=64`，
+  每条带 `pc`、模块归属（`probe_loop + 0x3e5f0`）与 pc±16 反汇编；`watch_clear` → `active=false`
+- 自命中断点验证（对自身函数设 X 断点后调用）：首次 `total=1`，再次调用 `total=2`
+  —— 说明单步挪位正确、断点不会失效也不会死循环
+- `run_itest.ps1` → **ITEST ALL PASS**，含 `hwbp INST / GET_HIT_COUNT / UNINST` 三项
+  （itest 先探测，探不到 6 就跳过，不会把设备打崩）
 
-在此之前，`gg_watch_*` 保持默认禁用（返回 `DEGRADED`）。
+### 4.5.8 一个必须知道的坑：隐藏模块会允许重复加载同名模块
+
+`CONFIG_HIDE_BY_DEFAULT` 会把模块从内核链表里摘除（`list_del_init`），于是：
+
+- `rmmod` 永久失败 —— 换模块只能**重启设备**
+- `insmod` 同名模块**不会被拒**，后加载的会 `remove_proc_subtree` 顶掉前一个的
+  `/proc/<KEY>` 节点 —— 表现为"明明部署了新版，`cmd=3` 却返回 4"
+
+排查手法：`cmd_probe` 发 `cmd=3` 看返回 6 还是 4。
 
 ## 5. 本机实测（2026-10-21）
 

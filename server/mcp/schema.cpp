@@ -227,8 +227,10 @@ static const std::vector<ToolDef>& build() {
              "对目标进程某地址设置硬件写监视点（rwproc33 hwbp 模块，CE 式「什么访问了这个地址」）。"
              "设置成功后可监视目标代码对该地址的访问，用 gg_watch_poll 取命中（含 pc 与寄存器），"
              "据此定位写者指令 → 反查权威变量。\n"
-             "⚠️ 当前 hwBreakpointProc prebuilt 是未修复版本（命令码 0 起始 + 命中回调用 mutex），"
-             "INST 会打崩内核；agentd 默认拒绝本操作并返回 DEGRADED。",
+             "依赖自编译的 hwBreakpointProc 模块（scripts/build_hwbp_ko.sh 产出，"
+             "由 deploy.ps1 自动部署）。agentd 首次调用时会探测模块命令码基准："
+             "afei 那份 prebuilt 是 0 起始枚举且回调用 mutex，发 INST 会打崩内核，"
+             "探测不通过则返回 DEGRADED 并说明原因。",
              json{
                  {"addr", prop("string", "要监视的地址（十六进制 0x...）")},
                  {"type", prop("integer", "断点类型：1=读 2=写(默认) 3=读写 4=执行")},
@@ -241,7 +243,7 @@ static const std::vector<ToolDef>& build() {
              json::object(), json::array()),
         tool("gg_watch_inject",
              "调试：手动构造一条命中（pc/fp/sp/lr）走完整 enrich 管道（模块/回溯/反汇编），"
-             "用于断点不可用环境验证日志格式",
+             "用于在没有真实命中时校验日志与反汇编格式",
              json{
                  {"pc", prop("string", "命中 pc（十六进制）")},
                  {"fp", prop("string", "frame pointer x29（十六进制，回溯起点）")},
