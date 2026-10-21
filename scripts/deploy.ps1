@@ -119,11 +119,14 @@ if (-not $SkipKo) {
     Write-Host "[2/6] 加载 KO 内核驱动" -ForegroundColor Yellow
     $koFiles = Get-ChildItem "$Root\build\ko" -Filter *.ko -ErrorAction SilentlyContinue
     if ($koFiles) {
-        # ko/ 可能被历史部署(root)占用, adb shell 用户无写权限 → 先提权放开
-        Adb-Sh "su -c ""chmod -R 777 $DevDir"""
+        # 同 [1/6]：/data/adb 是 root 0700，chmod 子目录没用（父目录不可穿），
+        # adb shell 仍无法直接 push 到 $DevDir/ko/。改走 /data/local/tmp 中转 + su 复制。
         New-Item -ItemType Directory -Force -Path "$Stage\ko" | Out-Null
         foreach ($f in $koFiles) { Copy-Item $f.FullName "$Stage\ko\" -Force }
-        foreach ($f in $koFiles) { Adb-Cmd "push" "$Stage\ko\$($f.Name)" "$DevDir/ko/" }
+        Adb-Sh "mkdir -p $TmpDir/ko" | Out-Null
+        foreach ($f in $koFiles) { Adb-Cmd "push" "$Stage\ko\$($f.Name)" "$TmpDir/ko/" }
+        Adb-Sh "su -c ""cp $TmpDir/ko/*.ko $DevDir/ko/""" | Out-Null
+        Adb-Sh "su -c ""chmod 644 $DevDir/ko/*.ko""" | Out-Null
         Adb-Sh "su -c ""sh $DevDir/install_ko.sh""" | ForEach-Object { Write-Host "  $_" }
     } else {
         Write-Host "  build\ko\ 下没有 .ko 文件，跳过加载。"

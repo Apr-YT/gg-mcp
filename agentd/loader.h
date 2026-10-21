@@ -44,6 +44,10 @@ int loader_load(gg_ggdir_t *g, const char *pattern, int strict);
 /* 校验运行中的 GG 进程是否已注入 hook（扫描 /proc 下各进程 maps 找 libKernelGg.so）。 */
 int loader_verify_hook(const gg_ggdir_t *g);
 
+/* 覆盖资源目录（lib5_stub / libKernelGg.so 所在），供调试或测试指向临时目录。
+ * 生产路径由编译期 AGENTD_ASSETS_DIR 决定（/data/adb/GG-Ghost），不要调用。 */
+void loader_set_assets_dir(const char *dir);
+
 /* 卸载：恢复原库。 */
 int loader_restore(gg_ggdir_t *g);
 

@@ -25,7 +25,7 @@ KO_STRICT=1
 #   dev   : /dev 节点 + ioctl 0x7e1a/0x7e1b（通用布局, 填 DEV_PATH）
 #   qx    : Aloha 开源 QX9-10（隐藏进程自动发现 + 建节点, 填 QX_KEY）
 #   rwproc: abcz316/rwProcMem33（proc read 33B 头协议, 开源; 填 RWPROC_MEM_KEY/BP_KEY）
-KO_TYPE=hook
+KO_TYPE=rwproc
 DEV_PATH=
 QX_KEY=
 # rwProcMem33 两模块的 proc 节点 auth key（与编译模块时的 CONFIG_PROC_NODE_AUTH_KEY 一致;

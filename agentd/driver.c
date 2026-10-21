@@ -727,12 +727,19 @@ static int ko_insmod(const char *path) {
 }
 
 static int ko_in_modules(const char *modname) {
+    if (!modname || !*modname) return 0;
     FILE *f = fopen("/proc/modules", "r");
     if (!f) return 0;
     char line[512];
+    size_t ml = strlen(modname);
     int found = 0;
     while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, modname, strlen(modname)) == 0) { found = 1; break; }
+        if (strncmp(line, modname, ml) != 0) continue;
+        /* 必须校验名字边界：/proc/modules 每行是 "<name> <size> <refcnt> ..."。
+         * 只比较前缀会把 "gg" 误判成 "gg2"/"ggx" 已加载，进而跳过 insmod，
+         * 后续 open 节点失败，报出来的却是"节点不存在"这种南辕北辙的错误。 */
+        char next = line[ml];
+        if (next == ' ' || next == '\t' || next == '\n' || next == '\0') { found = 1; break; }
     }
     fclose(f);
     return found;

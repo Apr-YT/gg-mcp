@@ -13,7 +13,21 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define AGENTD_ASSETS_DIR "/data/adb/vendor_security"   /* 桩与 hook 库存放处 */
+/* 桩与 hook 库存放处。必须与 deploy.ps1 的 $DevDir / start_agentd.sh 的 DIR 一致：
+ * 三处原本各不相同（vendor_security vs GG-Ghost vs local/tmp/ggmcp），
+ * 导致 loader_load 找不到 lib5_stub 而返回 GGERR_INTERNAL，GG 核心加载必然失败。
+ * 允许 -D 覆盖，便于单测指向临时目录。 */
+#ifndef AGENTD_ASSETS_DIR
+#define AGENTD_ASSETS_DIR "/data/adb/GG-Ghost"
+#endif
+
+/* 资源目录（桩与 hook 库所在）。默认是编译期常量；
+ * loader_set_assets_dir 仅供单元测试指向临时目录，运行时路径不要调用。 */
+static const char *g_assets_dir = AGENTD_ASSETS_DIR;
+
+void loader_set_assets_dir(const char *dir) {
+    if (dir && *dir) g_assets_dir = dir;
+}
 
 /* hook 驱动协议环境（由 main 在驱动对接后设置，loader_load 写入 lib5_hook.conf） */
 static char g_hook_proto[16] = "hook";
@@ -244,8 +258,8 @@ int loader_load(gg_ggdir_t *g, const char *pattern, int strict) {
 
     char stub_src[GG_DIR_MAX + 64];
     char hook_src[GG_DIR_MAX + 64];
-    snprintf(stub_src, sizeof(stub_src), "%s/lib5_stub", AGENTD_ASSETS_DIR);
-    snprintf(hook_src, sizeof(hook_src), "%s/libKernelGg.so", AGENTD_ASSETS_DIR);
+    snprintf(stub_src, sizeof(stub_src), "%s/lib5_stub", g_assets_dir);
+    snprintf(hook_src, sizeof(hook_src), "%s/libKernelGg.so", g_assets_dir);
     if (!file_exists(stub_src) || !file_exists(hook_src)) return -GGERR_INTERNAL;
 
     char orig_path[GG_DIR_MAX + 32];
