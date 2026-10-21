@@ -232,6 +232,32 @@ int main(void) {
         results_clear(&r);
     }
 
+    /* === 9z) exact/range 跨 256KB 块边界（2026-10-21 审查 A8 回归）===
+     * 值起始于块末尾、剩余字节落在下一块。旧实现只在单块内扫 i+sz<=rd，
+     * 这条匹配会整条漏掉（aob 早就有 carry 缓冲，exact/range 没有）。 */
+    mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + (1u << 20));
+    {
+        uint64_t v64 = 0x1122334455667788ull;
+        uint64_t hit = TEST_MEM_BASE + GG_SEARCH_CHUNK - 4;   /* 8 字节里 4 字节跨块 */
+        memcpy(g_mem + (hit - TEST_MEM_BASE), &v64, 8);
+        results_init(&r, 0);
+        int64_t n = search_exact(NULL, 0, &r, VT_QWORD, v64, 0);
+        check(n == 1, "9z) 跨块 exact: QWORD 骑在 256KB 边界仍命中");
+        check(results_has(&r, hit), "9z) 跨块 exact: 命中地址正确");
+        results_clear(&r);
+    }
+    mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + (1u << 20));
+    {
+        uint32_t v32 = 0xCAFEBABEu;
+        uint64_t hit = TEST_MEM_BASE + GG_SEARCH_CHUNK - 2;   /* 4 字节里 2 字节跨块 */
+        memcpy(g_mem + (hit - TEST_MEM_BASE), &v32, 4);
+        results_init(&r, 0);
+        int64_t n = search_range(NULL, 0, &r, VT_DWORD,
+                                 (double)0xCAFEBABEu, (double)0xCAFEBABEu, 0);
+        check(n >= 1 && results_has(&r, hit), "9z) 跨块 range: 边界上的值仍命中");
+        results_clear(&r);
+    }
+
     /* === 9) fuzzy 快照上限截断（GG_FUZZY_MAX_BYTES=256MB） === */
     mem_reset(); g_nregions = 0;
     region_add(TEST_MEM_BASE, TEST_MEM_BASE + (300ull << 20));   /* 300MB region */
