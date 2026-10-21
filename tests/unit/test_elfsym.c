@@ -179,30 +179,30 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* 3) 真实 ELF 交叉验证（argv 提供路径时） */
+    /* 3) 真实 ELF 交叉验证（argv 提供路径时）
+       ⚠️ 不要断言符号的绝对地址。libKernelGg.so 每次重编布局都会变（syscall 历史上在 0x1908，
+       2026-10-21 设备端构建链打通后重编为 0x860），断言绝对值会让测试随构建产物随机变红。
+       这里只校验 elfsym_nearest 的核心不变量：delta == 查询偏移 - 符号值。 */
     for (int i = 1; i < argc; i++) {
         const char *path = argv[i];
         printf("== %s ==\n", path);
         int rc = elfsym_nearest(path, 0x1908, name, sizeof(name), &val, &delta, &kind);
         check(rc >= -1 && rc <= 1, "rc in {-1,0,1} (无崩溃)");
-        if (!(rc == 1 && strcmp(name, "syscall") == 0)) {
-            printf("    (此文件符号表不含 syscall@0x1908: rc=%d name=%s — 跳过针对该文件的断言)\n",
+        if (!(rc == 1 && kind == ELFSYM_FUNC)) {
+            printf("    (0x1908 处无 FUNC 符号: rc=%d name=%s — 跳过针对该文件的断言)\n",
                    rc, name[0] ? name : "(none)");
             continue;
         }
-        /* 命中：offset = 符号值 0x1908（libKernelGg.so 的 syscall） */
-        check(rc == 1 && strcmp(name, "syscall") == 0 && delta == 0 && kind == ELFSYM_FUNC,
-              "offset=0x1908 -> syscall delta=0 FUNC");
-        if (rc == 1) printf("    got: name=%s val=0x%llx delta=0x%llx kind=%d\n",
-                            name, (unsigned long long)val, (unsigned long long)delta, kind);
-        /* 符号内部偏移 */
-        rc = elfsym_nearest(path, 0x1908 + 0x100, name, sizeof(name), &val, &delta, &kind);
-        check(rc == 1 && strcmp(name, "syscall") == 0 && delta == 0x100,
-              "offset=0x1a08 -> syscall delta=0x100");
-        /* 符号之后 */
-        rc = elfsym_nearest(path, 0x2000, name, sizeof(name), &val, &delta, &kind);
-        check(rc == 1 && strcmp(name, "syscall") == 0 && delta == 0x2000 - 0x1908,
-              "offset=0x2000 -> syscall delta=0xf8");
+        uint64_t base = val;
+        char base_name[128];
+        snprintf(base_name, sizeof(base_name), "%s", name);
+        check(delta == 0x1908 - base, "delta == 查询偏移 - 符号值");
+        printf("    got: name=%s val=0x%llx delta=0x%llx kind=%d\n",
+               name, (unsigned long long)val, (unsigned long long)delta, kind);
+        /* 符号内部偏移：仍命中同一符号，delta 等于相对位移 */
+        rc = elfsym_nearest(path, base + 0x100, name, sizeof(name), &val, &delta, &kind);
+        check(rc == 1 && strcmp(name, base_name) == 0 && delta == 0x100,
+              "符号内部 +0x100 -> 同一符号 delta=0x100");
         /* 符号之前（无定义符号覆盖） */
         rc = elfsym_nearest(path, 0x100, name, sizeof(name), &val, &delta, &kind);
         printf("    offset=0x100 -> rc=%d (0 = 无最近符号, 符合预期)\n", rc);
