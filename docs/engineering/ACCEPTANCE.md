@@ -25,10 +25,12 @@
 
 ## 4. 需真机环境验证（⬜ → 已勾选部分 ✅ 2026-08-16 真机）
 
-- [ ] **KO 加载**：`ko/` 下的 .ko 经 insmod 加载成功，`gg_kernel_status` 显示 `ko_module/ko_file/ko_version`（qx 型为自动发现，不涉及 insmod）
-- [ ] **hook 型 KO**：`state=ko-hook`，搜索走内核 hook 的 process_vm_readv
-- [x] **dev 型 / qx 型 KO**：`state=kernel-driver`，ioctl 0x801/0x802 读写正常（真机 QX 通道验证 ✅）
-- [ ] **版本容错实测**：ko/ 下 6.12.1 与 6.12.9 两个同族 KO 均可选加载；6.13.0 strict 拒绝
+- [x] **KO 加载**（2026-10-21）：`install_ko.sh` 按 `uname -r` 只 insmod 版本匹配的 `.ko`；
+      `gg_kernel_status` 返回 `ko_module=rwproc33`（agentd 不参与 insmod）
+- [x] **rwproc33 通道**：`state=kernel-driver (rwproc33)`，proc 节点 33 字节头协议读写正常
+- [x] **同名模块多版本并存**：6.12.23 / 6.12.69 两套产物同目录，脚本只加载匹配的那套
+      （6.12.69 已真机验证；6.12.23 待 6.12.23 设备确认）
+- [x] ~~hook 型 / dev 型 / qx 型 KO~~：**三型已于 2026-10-21 删除**，只保留 rwproc33
 - [x] **引擎集成**：`tests/integration/itest`（搜索→读→写→冻结→解冻 全链路）**ALL PASS** ✅
 - [x] **64 位进程 attach + 搜索**：登山赛车 `com.fingersoft.hillclimb.noncmcc`（arm64）attach → module_base(libgame.so)
       → hex_dump 读 ELF 头 `7f454c46` → 模糊搜索 init/refine → 精确搜索 `0x464c457f` 命中 5256 处 ✅（修复 process_is_64bit 误判后）
@@ -57,5 +59,5 @@ powershell -ExecutionPolicy Bypass -File tests\integration\run_itest.ps1
 rem 5) 启动 PC MCP 服务器（HTTP）
 build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json --transport http --port 8788
 rem   然后 curl POST /mcp 调 gg_kernel_status 验证:
-rem     hook 型 → state=ko-hook   /   dev 型 → state=kernel-driver
+rem     期望 state=kernel-driver (rwproc33)
 ```

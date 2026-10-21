@@ -24,27 +24,52 @@ AI agent ──MCP(JSON-RPC)──▶ gg-ghost-mcp ──wire 二进制帧──
 
 ## 3. KO 驱动加载与通道（核心）
 
-**只加载 KO，不依赖 KPM/KPatch-Next。** 加载流程（agentd 启动时）：
+**只加载 KO，不依赖 KPM/KPatch-Next。** 当前只有 **rwproc33** 一个后端
+（hook / dev / qx 三型已于 2026-10-21 删除，原因见 `DRIVER_MATRIX.md` §6）。
+
+### 3.1 加载与 agentd 解耦
+
+insmod 由 `scripts/install_ko.sh` 负责，agentd 启动时只做对接：
 
 ```
-1. 扫描 ko/ 目录的 .ko 文件
-2. 版本族匹配（ko_version_pattern，默认 6.12.*）选择文件
-   —— 同族补丁号任意均可加载（driverX_6.12.1.ko / 6.12.9.ko / 6.12.123.ko）
-3. setenforce 0（社区 KO 普遍需要 SELinux permissive）
-4. insmod <path>，/proc/modules 验证
-5. dev 型: 按 /proc/misc 自动 mknod /dev/<name>（主 10, 次号查表）→ open + ioctl
+install_ko.sh（部署时执行）
+1. uname -r 取 x.y.z
+2. 只 insmod 文件名版本匹配的那份（<module>_<x.y.z>.ko）
+   两套产物并存：6.12.23（afei prebuilt）/ 6.12.69（本地改 vermagic + CRC）
+3. setenforce 0（临时）→ insmod → 恢复 Enforcing
+
+agentd 启动
+1. 按 --rwproc-key / --rwproc-bp-key open /proc/<key>/<key> 两个节点
+   （key 为空时扫描 /proc 找「目录名 == 内文件名」的节点）
+2. CMD_INIT_DEVICE_INFO（必须首个命令）
+3. driver_self_test：open 自身 + 回环读 → 通过则 state=ST_DRIVER
 ```
 
-两类后端：
-- **hook 型**（默认）：内核 hook `process_vm_readv/writev` → 用户态零协议，直接调用
-  `process_vm_readv` 即由 KO 服务。自检状态 `ST_KO_HOOK`（`state=ko-hook`）。
-- **dev 型**：`open /dev/xxx` + `ioctl(0x7e1a读/0x7e1b写, {u32 pid; u32 pad; u64 addr; u64 buf; u64 size})`。
-  自检状态 `ST_DRIVER`（`state=kernel-driver`）。
-- **qx 型**（Aloha 开源 QX9-10）：隐藏进程持有已删除节点 → `/proc/<pid>/fd/3` 取主次号 →
-  `mknod /dev/ggqx` → `open` → `init_key(0x800)`；读写 `0x801/0x802`（COPY_MEMORY 自然对齐），
-  模块基址 `0x803`。自检状态 `ST_DRIVER`（`state=kernel-driver`）。协议详见 docs/engineering/PROTOCOL.md。
+### 3.2 通道协议（33 字节头 + 数据区）
 
-降级链：KO 通道 → `process_vm_readv` → `/proc/<pid>/mem`，任一层失败自动切换，`kernel_status` 标记状态。
+```
+read(fd, buf, 33 + data_size)   一次完成「提交请求 + 收回结果」
+buf[0..32]   请求头（cmd / param1-3 / buf_size），packed
+buf[33..]    数据区；读内存时是内核回写的结果
+```
+
+**关键**：`read()` 的 count 必须 ≥ `33 + 期望回写量`。请求负载长度（`buf_size`）
+与回写长度并不总是相等 —— `OPEN_PROCESS` 发 0 字节负载却要收回 8 字节 handle，
+count 只给 33 会让内核写不进去，随后的 `memcpy(buf+33, 8)` 拿到的是上一次请求的
+残留数据。`driver.c` 用 `rwproc_call_ex(..., resp_cap)` 把这两个长度分开。
+
+### 3.3 失败即报错，不降级
+
+没有 `process_vm_readv` 回落。通道不可用时 `kernel_status` 返回
+`state=4 (unavailable)`，读写直接报错 —— 既避免语义不一致，也避免可被反作弊
+检测的越界读取。
+
+### 3.4 `is_force=0` 的代价
+
+不翻转 PTE，只读 PTE 有效的页。因此**已被回收的文件页读不到**（KO 返回 0 字节），
+活跃页正常。这是为规避「翻转 PTE 与目标进程活跃页竞争导致内核崩溃」而选的行为，
+代价是偶发读空 —— `gg_read_bytes` 在 `bytes: 0` 时返回 `note` 说明原因。
+详见 `RWPROC33_ADAPTER.md` §十二。
 
 ## 4. 引擎职责划分（关键决策）
 

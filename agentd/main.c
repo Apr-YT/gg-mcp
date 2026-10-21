@@ -46,6 +46,17 @@
 gg_engine_t g_eng;
 gg_watch_t  g_watch;   /* 硬件断点监视（CE 式"什么访问了这个地址"） */
 
+/* 硬件断点默认关闭。当前设备上用的 hwBreakpointProc prebuilt 是**未修复版本**，
+ * 实例化断点会打崩内核（不是 agentd 崩，是整机重启）：
+ *   1) 命令码从 0 起始，而 driver.h 的 RWBP_CMD_* 按 1 起始发送
+ *      → OPEN_PROCESS(1) 落到 CLOSE_PROCESS → put_pid((struct pid*)1) 解引用野指针
+ *   2) 命中回调用 mutex 而非 raw_spinlock，在调试异常上下文里睡眠
+ *      → scheduling while atomic
+ * 证据：该 .ko 的重定位表含 put_pid / mutex_lock 且无 raw_spinlock；实测 itest 的
+ * rwproc_hwbp_start 直接让设备重启（uptime 归零，pstore 空）。
+ * 换用按 RWPROC33_ADAPTER.md 10.4 自编译的模块后，用 --hwbp 显式启用。 */
+static int g_hwbp_allowed = 0;
+
 /* 最近一次响应存档（send_ok/send_err 写入，dispatch 的 cmd_end 事件使用）。
  * X3: 改为线程局部——每连接线程独立，快速通道（PING/KERNEL_STATUS 等无锁
  * 执行）与锁内引擎操作不再共享同一 buffer，消除跨线程数据竞争。 */
@@ -946,6 +957,15 @@ static void h_watch(int fd, uint32_t seq, cJSON *p) {
         cJSON_GetObjectItem(p, "op")->valuestring : "set";
     cJSON *r = cJSON_CreateObject();
     if (strcmp(op, "set") == 0) {
+        if (!g_hwbp_allowed) {
+            /* 拦住，比让用户点一下就重启设备好。原因见 g_hwbp_allowed 的定义处。 */
+            cJSON_Delete(r);
+            send_err(fd, GGCMD_WATCH, seq, GGERR_DEGRADED,
+                     "hwbp disabled: the hwBreakpointProc module in use is an unfixed build "
+                     "(0-based cmd enum + mutex in hit callback); INST panics the kernel. "
+                     "Rebuild it per RWPROC33_ADAPTER.md 10.4, then start agentd with --hwbp");
+            return;
+        }
         if (g_eng.session_pid <= 0) {
             cJSON_Delete(r);
             send_err(fd, GGCMD_WATCH, seq, GGERR_NO_SESSION, "no session");
@@ -1707,6 +1727,7 @@ static void print_usage(const char *argv0) {
         "           [--rwproc-bp-key <key>]       # rwproc33 断点模块 proc 节点 auth key\n"
         "           [--wire-key <hex>]            # wire 握手密钥（PC 端须配置同一值）\n"
         "           [--wire-key-file <path>]      # 从文件读握手密钥（推荐：0600 权限，仅 root 可读）\n"
+        "           [--hwbp]                      # 启用硬件断点（当前 KO 的模块会崩内核，勿开）\n"
         "           [--log /path/log] [--safe] [--shell]\n",
         argv0);
 }
@@ -1758,6 +1779,7 @@ int main(int argc, char **argv) {
             snprintf(logpath_buf, sizeof(logpath_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--safe") == 0) g_eng.safe_mode = 1;
         else if (strcmp(argv[i], "--shell") == 0) g_eng.shell_enabled = 1;
+        else if (strcmp(argv[i], "--hwbp") == 0) g_hwbp_allowed = 1;
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;

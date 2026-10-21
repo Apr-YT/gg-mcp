@@ -217,9 +217,11 @@ static const std::vector<ToolDef>& build() {
 
         // ---- 硬件断点监视（CE 式"什么访问了这个地址"） ----
         tool("gg_watch_set",
-             "对目标进程某地址设置硬件写监视点（QX 驱动硬件断点，CE 式「什么访问了这个地址」）。"
-             "之后游戏代码写入该地址时会触发捕获，用 gg_watch_poll 取命中（含 pc 与寄存器），"
-             "据此定位写者指令 → 反查权威变量（如金币本体）。",
+             "对目标进程某地址设置硬件写监视点（rwproc33 hwbp 模块，CE 式「什么访问了这个地址」）。"
+             "设置成功后可监视目标代码对该地址的访问，用 gg_watch_poll 取命中（含 pc 与寄存器），"
+             "据此定位写者指令 → 反查权威变量。\n"
+             "⚠️ 当前 hwBreakpointProc prebuilt 是未修复版本（命令码 0 起始 + 命中回调用 mutex），"
+             "INST 会打崩内核；agentd 默认拒绝本操作并返回 DEGRADED。",
              json{
                  {"addr", prop("string", "要监视的地址（十六进制 0x...）")},
                  {"type", prop("integer", "断点类型：1=读 2=写(默认) 3=读写 4=执行")},

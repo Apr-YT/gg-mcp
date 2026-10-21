@@ -20,6 +20,9 @@ PIDFILE=$DIR/agentd.pid
 # 后端只有 rwproc33 一种（hook / dev / qx 三型已于 2026-10-21 删除）。
 # KO 的 insmod 与版本选择由 install_ko.sh 负责，agentd 不参与加载。
 KO_TYPE=rwproc
+# 注意：硬件断点（gg_watch_*）默认关闭。当前 hwBreakpointProc prebuilt 是未修复版本，
+# 实例化断点会让整机重启（证据见 docs/engineering/DRIVER_MATRIX.md）。
+# 换成按 RWPROC33_ADAPTER.md 10.4 自编译的模块后，才在 ARGS 里加 --hwbp。
 # rwProcMem33 两模块的 proc 节点 auth key（与编译模块时的 CONFIG_PROC_NODE_AUTH_KEY 一致;
 # 留空则 agentd 自动扫描 /proc, 但节点被隐藏时扫描不到, 建议显式填写）
 RWPROC_MEM_KEY=e84523d7b60d5d341a7c4d1861773ecd

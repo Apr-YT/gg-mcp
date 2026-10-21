@@ -168,6 +168,11 @@ int main(void) {
     printf("  value after unfreeze+120ms: 0x%x\n", after);
     CHECK(after != 0x99999999u, "unfreeze -> value changes again");
     freeze_stop(&fz);
+
+    /* 7) 硬件断点不在此测：当前 hwBreakpointProc prebuilt 是未修复版，
+     *    INST 会打崩内核（详见 driver_matrix / driver.h 的 g_hwbp_allowed 注释）。
+     *    换成自编译模块并用 --hwbp 启动 agentd 后，才可在此加回测试。 */
+
     results_clear(&res);
     driver_close(&drv);
 

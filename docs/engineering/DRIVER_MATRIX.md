@@ -79,6 +79,32 @@
 现状：agentd 自带引擎直接经 rwproc33 读写，**不需要 GG 本体**。
 wire 命令码 28/29 保留占位（见 `PROTOCOL.md`），旧客户端调用得到明确错误。
 
+## 4.5 硬件断点不可用（2026-10-21 实测，会崩内核）
+
+`hwBreakpointProc_6.12.69.ko`（afei prebuilt）**不能用**：`rwproc_hwbp_start` 会让设备重启。
+
+**现象**：itest 跑到 `rwproc_hwbp_start` 时设备掉线（adb `device not found`），
+恢复后 `uptime` 归零、`sys.boot.reason=reboot`、`pstore` 为空（无 ramoops）。
+连该函数内的第一行 `printf` 都没输出 —— 崩在 OPEN_PROCESS 或 INST 内部。
+
+**两条独立证据（静态）**：
+
+| 证据 | 说明 |
+|---|---|
+| 重定位表含 `put_pid` / `find_get_pid` | OPEN_PROCESS 用 `find_get_pid` 取 `struct pid*`，CLOSE 用 `put_pid` 释放。若模块命令码 **0 起始**而我们按 1 起始发，`cmd=1`（以为 OPEN）会落到 CLOSE_PROCESS → `put_pid((struct pid*)1)` 解引用野指针 → 内核崩。 |
+| 只有 `mutex_lock`，**没有** `raw_spinlock` | `RWPROC33_ADAPTER.md` §10.4 记录的修复版是「固定槽位数组 + raw_spinlock」，因为命中回调运行在 ARM64 调试异常上下文（中断/抢占关闭），用 mutex 会 `scheduling while atomic`。这份 prebuilt 用的是 mutex → 是**修复前**版本。 |
+
+即使把命令码改对让 INST 通过，命中回调仍会在原子上下文里睡眠而崩。所以**不要试图
+通过改 `RWBP_CMD_*` 去凑**。
+
+**当前处理**：`g_hwbp_allowed` 默认 0，`gg_watch_set` 直接返回 `GGERR_DEGRADED`
+并说明原因；要启用需 `agentd --hwbp`（仅在换用自编译模块后）。四个 `gg_watch_*`
+因此处于「保留但默认不可用」状态。
+
+**要恢复硬件断点**：按 `RWPROC33_ADAPTER.md` §10 在 VM 里用 6.12 源码树重编
+`hwBreakpointProc_module`（枚举改 1 起始 + 回调改 raw_spinlock），再用 §11 的两步
+（vermagic + CRC）适配到本机。
+
 ## 5. 本机实测（2026-10-21）
 
 | 项 | 结果 |

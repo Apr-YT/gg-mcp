@@ -46,7 +46,7 @@ function Adb-Cmd {
     if ($LASTEXITCODE -ne 0) { throw "adb 失败: $($AdbArgs -join ' ')" }
 }
 
-Write-Host "== GG-MCP 部署（KO 驱动）==" -ForegroundColor Cyan
+Write-Host "== GG-MCP 部署（rwproc33）==" -ForegroundColor Cyan
 
 # 0) 设备检查（多设备且无 -Serial 时拒绝，避免误操作）
 # PS 5.1 会把 native 命令的 stderr（adb daemon 启动提示等）包装成终止性错误，
