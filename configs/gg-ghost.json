@@ -7,6 +7,8 @@
   "safe_mode": false,
   "shell_enabled": false,
   "result_cap": 100000,
+  "export_dir": "exports",
+  "max_save_bytes": 268435456,
   "gg": {
     "version_pattern": "101.*",
     "strict": true

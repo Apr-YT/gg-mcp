@@ -26,6 +26,8 @@ struct ServerConfig {
     bool shell_enabled = false;
     size_t result_cap = 100000;
     std::string annotations_file = "annotations.json";   // AI 标注库持久化路径
+    std::string export_dir = "exports";                  // save_to 落盘根目录：工具只能写到这里面
+    size_t max_save_bytes = 256u * 1024u * 1024u;        // 单次 save_to 读取总量上限
     bool print_events = false;      // 订阅 agentd 事件流并在 stderr 打印（悬浮窗监控调试）
 };
 
@@ -52,6 +54,27 @@ public:
         int norm_type(const json& t) { return s->norm_type(t); }
         int norm_region(const json& r) { return s->norm_region(r); }
         int norm_op(const json& o) { return s->norm_op(o); }
+
+        // 显式传入但非法的枚举值不能静默变成另一种合法操作：返回 false，
+        // 调用方必须 fail(GGERR_BAD_REQUEST)。字段缺失仍走默认值（兼容旧客户端）。
+        bool put_type(const json& t) {
+            int v = norm_type(t);
+            if (v < 0) return false;
+            params["type"] = v;
+            return true;
+        }
+        bool put_region(const json& r) {
+            int v = norm_region(r);
+            if (v < 0) return false;
+            params["region"] = v;
+            return true;
+        }
+        bool put_op(const json& o) {
+            int v = norm_op(o);
+            if (v < 0) return false;
+            params["op"] = v;
+            return true;
+        }
         json ok(const json& data) { return s->ok(data); }
         int device_call(uint16_t cmd, const json& params, json* out) {
             return s->device_call(cmd, params, out);

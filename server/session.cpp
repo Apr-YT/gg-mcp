@@ -8,12 +8,71 @@
 #include "session.h"
 
 #include <cctype>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
+
+#ifdef _WIN32
+#include <direct.h>
+#define GG_MKDIR(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define GG_MKDIR(p) ::mkdir((p), 0755)
+#endif
 
 namespace gg {
+
+// save_to 的落盘路径收敛：只接受 export_dir 下的相对路径。
+// 拒绝绝对路径、盘符、以及任何 `..` 段 —— 否则 MCP 工具调用方可以让服务端
+// 覆盖任意可写文件（配置、密钥、其它工程源码）。
+static bool resolve_save_path(const std::string& raw, const std::string& root, std::string* out) {
+    if (raw.empty() || raw.size() > 512) return false;
+    if (raw.find('\0') != std::string::npos) return false;
+    if (raw[0] == '/' || raw[0] == '\\') return false;         // 绝对路径
+    if (raw.size() >= 2 && raw[1] == ':') return false;        // 盘符
+    if (raw.find(':') != std::string::npos) return false;      // 备用数据流 / 盘符变体
+
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char c : raw) {
+        if (c == '/' || c == '\\') {
+            if (cur.empty()) return false;                     // 连续分隔符 / 空段
+            parts.push_back(cur);
+            cur.clear();
+        } else {
+            if (static_cast<unsigned char>(c) < 0x20) return false;   // 控制字符
+            cur += c;
+        }
+    }
+    if (!cur.empty()) parts.push_back(cur);
+    if (parts.empty()) return false;
+    for (const auto& p : parts) {
+        if (p == "." || p == "..") return false;               // 目录穿越
+    }
+
+    const std::string base = root.empty() ? std::string("exports") : root;
+    // 根目录本身不允许越出（配置里如果写了绝对路径那就按绝对路径建根，但工具侧只能相对它）
+    std::string full = base;
+    if (!full.empty() && full.back() != '/' && full.back() != '\\') full += '/';
+    for (size_t i = 0; i < parts.size(); i++) {
+        if (i) full += '/';
+        full += parts[i];
+    }
+    *out = full;
+    return true;
+}
+
+// 逐级创建目录（父目录部分，不含文件名）
+static void ensure_parent_dirs(const std::string& path) {
+    size_t pos = 0;
+    while ((pos = path.find('/', pos + 1)) != std::string::npos) {
+        std::string sub = path.substr(0, pos);
+        if (!sub.empty()) GG_MKDIR(sub.c_str());
+    }
+}
 
 Session::Session(ServerConfig cfg)
     : cfg_(std::move(cfg)),
@@ -53,15 +112,21 @@ json Session::fail(int code, const std::string& msg) {
 
 int Session::device_call(uint16_t cmd, const json& params, json* out) {
     int rc = client_.call(cmd, params, out);
-    if (rc == GGERR_NO_DEVICE) {
-        // 一次重连重试
+    // 只有「连接都没建立起来」才是干净失败：请求一个字节都没发出去，重放不会
+    // 改变任何远端状态。发送失败 / 响应超时 / 读中断 都可能意味着远端已经执行过，
+    // 盲目重放会让 gg_write、gg_set_results、gg_freeze 这类有副作用的命令跑两次。
+    if (rc != 0 && client_.last_outcome == CallOutcome::ConnectFailed) {
         client_.close();
         rc = client_.call(cmd, params, out);
     }
     return rc;
 }
 
+// 返回值约定：>=1 为合法枚举；-1 表示「显式传入但非法」。
+// 旧实现把未知值一律回落成 DWORD/ANONYMOUS/CHANGED，等于把「type 拼错了」
+// 静默变成「换个类型再搜一次」，调用方拿到的是另一个操作的结果。
 int Session::norm_type(const json& t) {
+    if (t.is_null()) return VT_DWORD;   // 未提供 → 默认 dword（保持兼容）
     if (t.is_string()) {
         const std::string s = t.get<std::string>();
         if (s == "byte" || s == "u8") return VT_BYTE;
@@ -71,41 +136,49 @@ int Session::norm_type(const json& t) {
         if (s == "float" || s == "f32") return VT_FLOAT;
         if (s == "double" || s == "f64") return VT_DOUBLE;
         if (s == "bytes" || s == "aob") return VT_BYTES;
+        return -1;
     }
     if (t.is_number_integer()) {
         int v = t.get<int>();
-        if (v >= VT_BYTE && v <= VT_DOUBLE) return v;
+        if (v >= VT_BYTE && v <= VT_BYTES) return v;
+        return -1;
     }
-    return VT_DWORD;
+    return -1;
 }
 
 int Session::norm_region(const json& r) {
+    if (r.is_null()) return REGION_ANONYMOUS;
     if (r.is_string()) {
         const std::string s = r.get<std::string>();
         if (s == "anonymous" || s == "anon") return REGION_ANONYMOUS;
         if (s == "writable") return REGION_WRITABLE;
         if (s == "all") return REGION_ALL;
+        return -1;
     }
     if (r.is_number_integer()) {
         int v = r.get<int>();
         if (v >= REGION_ANONYMOUS && v <= REGION_ALL) return v;
+        return -1;
     }
-    return REGION_ANONYMOUS;
+    return -1;
 }
 
 int Session::norm_op(const json& o) {
+    if (o.is_null()) return REFINE_CHANGED;
     if (o.is_string()) {
         const std::string s = o.get<std::string>();
         if (s == "increased" || s == "inc") return REFINE_INCREASED;
         if (s == "decreased" || s == "dec") return REFINE_DECREASED;
         if (s == "unchanged" || s == "same") return REFINE_UNCHANGED;
         if (s == "changed" || s == "diff") return REFINE_CHANGED;
+        return -1;
     }
     if (o.is_number_integer()) {
         int v = o.get<int>();
         if (v >= REFINE_INCREASED && v <= REFINE_CHANGED) return v;
+        return -1;
     }
-    return REFINE_CHANGED;
+    return -1;
 }
 
 json Session::local_status() {
@@ -155,27 +228,27 @@ json tool_module_list(Session::CallCtx& c, const json&) { return c.send(GGCMD_MO
 // ---- 搜索 ----
 json tool_search(Session::CallCtx& c, const json& a) {
     if (!a.contains("value")) return c.fail(GGERR_BAD_REQUEST, "value required");
-    c.params["type"] = c.norm_type(a.value("type", json()));
+    if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     c.params["value"] = a["value"];
-    c.params["region"] = c.norm_region(a.value("region", json()));
+    if (!c.put_region(a.value("region", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid region");
     return c.send(GGCMD_SEARCH);
 }
 json tool_search_unknown_init(Session::CallCtx& c, const json& a) {
-    c.params["type"] = c.norm_type(a.value("type", json()));
-    c.params["region"] = c.norm_region(a.value("region", json()));
+    if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
+    if (!c.put_region(a.value("region", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid region");
     return c.send(GGCMD_SEARCH_UNKNOWN_INIT);
 }
 json tool_search_refine(Session::CallCtx& c, const json& a) {
-    c.params["op"] = c.norm_op(a.value("op", json()));
+    if (!c.put_op(a.value("op", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid op");
     return c.send(GGCMD_SEARCH_REFINE);
 }
 json tool_search_range(Session::CallCtx& c, const json& a) {
     if (!a.contains("min") || !a.contains("max"))
         return c.fail(GGERR_BAD_REQUEST, "min and max required");
-    c.params["type"] = c.norm_type(a.value("type", json()));
+    if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     c.params["min"] = a["min"];
     c.params["max"] = a["max"];
-    c.params["region"] = c.norm_region(a.value("region", json()));
+    if (!c.put_region(a.value("region", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid region");
     return c.send(GGCMD_SEARCH_RANGE);
 }
 json tool_result_count(Session::CallCtx& c, const json&) { return c.send(GGCMD_RESULT_COUNT); }
@@ -192,34 +265,89 @@ json tool_clear_results(Session::CallCtx& c, const json&) { return c.send(GGCMD_
 json tool_read(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
     c.params["addr"] = a["addr"];
-    c.params["type"] = c.norm_type(a.value("type", json()));
+    if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     if (a.contains("force")) c.params["force"] = a["force"].get<int>();
     return c.send(GGCMD_READ);
 }
 json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / gg_hex_dump
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
     // 落盘模式（save_to）：server 自动分段循环读（agentd 单段上限 65536），
-    // 原始二进制写本地文件，只返回 {saved,size,segments,skipped}，不占对话带宽。
-    // 分段失败处补 0 保持文件长度 = len（位置对齐，后续拼接不串位）。
+    // 原始二进制写本地文件，只返回元信息，不占对话带宽。
+    // 三条硬约束：
+    //   1. 路径只能落在 cfg.export_dir 内（拒绝绝对路径 / 盘符 / `..`）；
+    //   2. len 与 addr 必须显式校验，解析失败不许静默变成默认值；
+    //   3. 分段失败补 0 保长度对齐，但结果必须带 complete=false 与缺失区间，
+    //      不能像旧实现那样一律报「成功 + 请求长度」。
     if (a.contains("save_to")) {
-        const std::string path = a["save_to"].get<std::string>();
-        long long len = a.value("len", 64);
-        if (len <= 0) len = 64;
+        if (!a["save_to"].is_string())
+            return c.fail(GGERR_BAD_REQUEST, "save_to must be a string");
+
+        std::string path;
+        if (!resolve_save_path(a["save_to"].get<std::string>(), c.cfg().export_dir, &path))
+            return c.fail(GGERR_BAD_REQUEST,
+                          "save_to rejected: relative path inside export_dir only");
+
+        // ---- len ----
+        long long len = 64;
+        if (a.contains("len")) {
+            const json& lj = a["len"];
+            if (lj.is_number_integer()) {
+                len = lj.get<long long>();
+            } else if (lj.is_string()) {
+                const std::string ls = lj.get<std::string>();
+                char* end = nullptr;
+                errno = 0;
+                long long v = strtoll(ls.c_str(), &end, 0);
+                len = (end == ls.c_str() || *end != '\0' || errno == ERANGE) ? -1 : v;
+            } else {
+                len = -1;
+            }
+        }
+        if (len <= 0) return c.fail(GGERR_BAD_REQUEST, "len must be a positive integer");
+        if (static_cast<unsigned long long>(len) > c.cfg().max_save_bytes)
+            return c.fail(GGERR_BAD_REQUEST, "len exceeds max_save_bytes limit");
+
+        // ---- addr ----
+        uint64_t addr = 0;
+        if (a["addr"].is_string()) {
+            const std::string as = a["addr"].get<std::string>();
+            char* end = nullptr;
+            errno = 0;
+            addr = strtoull(as.c_str(), &end, 0);
+            if (end == as.c_str() || *end != '\0' || errno == ERANGE)
+                return c.fail(GGERR_BAD_REQUEST, "addr is not a valid address");
+        } else if (a["addr"].is_number_unsigned()) {
+            addr = a["addr"].get<uint64_t>();
+        } else if (a["addr"].is_number_integer()) {
+            long long v = a["addr"].get<long long>();
+            if (v < 0) return c.fail(GGERR_BAD_REQUEST, "addr must not be negative");
+            addr = static_cast<uint64_t>(v);
+        } else {
+            return c.fail(GGERR_BAD_REQUEST, "addr must be a number or numeric string");
+        }
+        if (addr > UINT64_MAX - static_cast<uint64_t>(len))
+            return c.fail(GGERR_BAD_REQUEST, "addr + len overflows the address space");
+
         int force = a.contains("force") ? a["force"].get<int>() : 0;
-        std::string addr0 = a["addr"].is_string()
-                                ? a["addr"].get<std::string>()
-                                : std::to_string(a["addr"].get<long long>());
-        uint64_t addr = strtoull(addr0.c_str(), nullptr, 0);
-        FILE* f = fopen(path.c_str(), "wb");
-        if (!f) return c.fail(GGERR_BAD_REQUEST, "cannot open save_to: " + path);
+
+        // 先写 .part，全部段成功才改名 —— 避免中途失败把同名旧文件截断成半截数据。
+        ensure_parent_dirs(path);
+        const std::string tmp_path = path + ".part";
+        FILE* f = fopen(tmp_path.c_str(), "wb");
+        if (!f) return c.fail(GGERR_BAD_REQUEST, "cannot open save_to: " + tmp_path);
+
         const long long SEG = 65536;   // 与 agentd h_read_bytes 上限一致
-        size_t total = 0, segs = 0, skipped = 0;
-        json params;
+        unsigned long long file_len = 0, read_ok = 0;
+        int segs = 0;
+        int first_err = 0;
+        json missing = json::array();
+
         for (long long done = 0; done < len; done += SEG) {
             long long chunk = (len - done < SEG) ? (len - done) : SEG;
             char addr_buf[32];
             snprintf(addr_buf, sizeof(addr_buf), "0x%llx",
                      (unsigned long long)(addr + (uint64_t)done));
+            json params;
             params["addr"] = addr_buf;
             params["len"] = chunk;
             if (force) params["force"] = force;
@@ -229,18 +357,47 @@ json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / 
             if (rc == 0 && out.contains("hex") && out["hex"].is_string())
                 hex = out["hex"].get<std::string>();
             size_t n = hex.size() / 2;
-            if (n < (size_t)chunk) skipped++;
+            if (n > (size_t)chunk) n = (size_t)chunk;   // 防御远端返回超长
+            if (n < (size_t)chunk) {
+                if (!first_err && rc != 0) first_err = rc;
+                missing.push_back({{"offset", (unsigned long long)done},
+                                   {"len", (long long)((size_t)chunk - n)}});
+            }
             for (size_t i = 0; i < n; i++) {
                 unsigned int b;
                 if (sscanf(hex.c_str() + i * 2, "%2x", &b) != 1) b = 0;
                 fputc((int)b, f);
             }
-            for (size_t i = n; i < (size_t)chunk; i++) fputc(0, f);   // 失败段补 0
-            total += (size_t)chunk;
+            for (size_t i = n; i < (size_t)chunk; i++) fputc(0, f);   // 缺失段补 0
+            file_len += (unsigned long long)chunk;
+            read_ok += n;
             segs++;
         }
-        fclose(f);
-        json r{{"saved", path}, {"size", total}, {"segments", segs}, {"skipped", skipped}};
+
+        // 注意不能写 (fflush(f)==0 && fclose(f)==0)：短路会让 fclose 漏调用
+        bool write_ok = (fflush(f) == 0);
+        if (fclose(f) != 0) write_ok = false;
+
+        bool promoted = false;
+        if (write_ok && missing.empty()) {
+            std::remove(path.c_str());   // Windows 上 rename 覆盖已存在文件会失败
+            promoted = (std::rename(tmp_path.c_str(), path.c_str()) == 0);
+            if (!promoted) write_ok = false;
+        }
+
+        json r{{"saved", promoted ? path : tmp_path},
+               {"size", file_len},
+               {"read_ok", read_ok},
+               {"segments", segs},
+               {"complete", missing.empty() && write_ok}};
+        if (!missing.empty()) {
+            r["missing"] = missing;
+            r["missing_bytes"] = (unsigned long long)(file_len - read_ok);
+            if (first_err) r["first_error"] = first_err;
+            r["warning"] = "partial read: failed ranges were zero-filled; data is NOT complete";
+        }
+        if (!write_ok)
+            r["warning"] = "local write did not finish cleanly (flush/close/rename failed)";
         return c.ok(r);
     }
     c.params["addr"] = a["addr"];
@@ -267,13 +424,13 @@ json tool_write(Session::CallCtx& c, const json& a) {
         return c.fail(GGERR_BAD_REQUEST, "addr and value required");
     c.params["addr"] = a["addr"];
     c.params["value"] = a["value"];
-    c.params["type"] = c.norm_type(a.value("type", json()));
+    if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     return c.send(GGCMD_WRITE);
 }
 json tool_set_results(Session::CallCtx& c, const json& a) {
     if (!a.contains("values")) return c.fail(GGERR_BAD_REQUEST, "values required");
     c.params["values"] = a["values"];
-    c.params["type"] = c.norm_type(a.value("type", json()));
+    if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     return c.send(GGCMD_SET_RESULTS);
 }
 json tool_freeze(Session::CallCtx& c, const json& a) {
@@ -281,7 +438,7 @@ json tool_freeze(Session::CallCtx& c, const json& a) {
         return c.fail(GGERR_BAD_REQUEST, "addr and value required");
     c.params["addr"] = a["addr"];
     c.params["value"] = a["value"];
-    c.params["type"] = c.norm_type(a.value("type", json()));
+    if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     return c.send(GGCMD_FREEZE);
 }
 json tool_unfreeze(Session::CallCtx& c, const json& a) {
@@ -302,7 +459,7 @@ json tool_calc_offset(Session::CallCtx& c, const json& a) {
     return c.send(GGCMD_CALC_OFFSET);
 }
 json tool_pointer_scan(Session::CallCtx& c, const json& a) {
-    c.params["type"] = c.norm_type(a.value("type", json()));
+    if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     c.params["cap"] = a.value("cap", 5000);
     return c.send(GGCMD_POINTER_SCAN);
 }

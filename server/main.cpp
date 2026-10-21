@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <cstdlib>
 
 #include "../third_party/httplib.h"   // 先于 windows.h（winsock2 顺序）
 #include "../third_party/json.hpp"
@@ -34,32 +35,64 @@ static void print_banner(const ServerConfig& cfg) {
         "==============================================\n";
 }
 
-static bool load_config(const std::string& path, ServerConfig* cfg) {
+// 配置加载结果：文件缺失可以用默认值继续跑，但字段存在却类型/范围不合法
+// 必须直接失败 —— 静默回落默认值等于把「配错了」变成「配了个别的」。
+enum LoadResult { LOAD_OK = 0, LOAD_MISSING = 1, LOAD_INVALID = 2 };
+
+static LoadResult load_config(const std::string& path, ServerConfig* cfg) {
     std::ifstream f(path);
-    if (!f.is_open()) return false;
+    if (!f.is_open()) return LOAD_MISSING;
     json j;
     try {
         f >> j;
     } catch (...) {
-        return false;
+        std::cerr << "[GG-GHOST-MCP][FATAL] config is not valid JSON: " << path << "\n";
+        return LOAD_INVALID;
     }
-    cfg->transport = j.value("transport", cfg->transport);
-    cfg->http_port = j.value("http_port", cfg->http_port);
-    cfg->http_host = j.value("http_host", cfg->http_host);
-    cfg->http_token = j.value("http_token", cfg->http_token);
-    cfg->agent_port = j.value("agent_port", cfg->agent_port);
-    cfg->adb = j.value("adb", cfg->adb);
-    cfg->serial = j.value("serial", cfg->serial);
-    cfg->safe_mode = j.value("safe_mode", cfg->safe_mode);
-    cfg->shell_enabled = j.value("shell_enabled", cfg->shell_enabled);
-    cfg->print_events = j.value("print_events", cfg->print_events);
-    cfg->result_cap = j.value("result_cap", (int64_t)cfg->result_cap);
-    cfg->annotations_file = j.value("annotations_file", cfg->annotations_file);
-    if (j.contains("gg")) {
-        cfg->gg_version_pattern = j["gg"].value("version_pattern", cfg->gg_version_pattern);
-        cfg->gg_strict = j["gg"].value("strict", cfg->gg_strict);
+    if (!j.is_object()) {
+        std::cerr << "[GG-GHOST-MCP][FATAL] config root must be an object: " << path << "\n";
+        return LOAD_INVALID;
     }
-    return true;
+    try {
+        cfg->transport = j.value("transport", cfg->transport);
+        cfg->http_port = j.value("http_port", cfg->http_port);
+        cfg->http_host = j.value("http_host", cfg->http_host);
+        cfg->http_token = j.value("http_token", cfg->http_token);
+        cfg->agent_port = j.value("agent_port", cfg->agent_port);
+        cfg->adb = j.value("adb", cfg->adb);
+        cfg->serial = j.value("serial", cfg->serial);
+        cfg->safe_mode = j.value("safe_mode", cfg->safe_mode);
+        cfg->shell_enabled = j.value("shell_enabled", cfg->shell_enabled);
+        cfg->print_events = j.value("print_events", cfg->print_events);
+        cfg->result_cap = j.value("result_cap", (int64_t)cfg->result_cap);
+        cfg->annotations_file = j.value("annotations_file", cfg->annotations_file);
+        cfg->export_dir = j.value("export_dir", cfg->export_dir);
+        cfg->max_save_bytes = j.value("max_save_bytes", (int64_t)cfg->max_save_bytes);
+        if (j.contains("gg")) {
+            if (!j["gg"].is_object()) {
+                std::cerr << "[GG-GHOST-MCP][FATAL] config.gg must be an object\n";
+                return LOAD_INVALID;
+            }
+            cfg->gg_version_pattern = j["gg"].value("version_pattern", cfg->gg_version_pattern);
+            cfg->gg_strict = j["gg"].value("strict", cfg->gg_strict);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[GG-GHOST-MCP][FATAL] bad config field: " << e.what() << "\n";
+        return LOAD_INVALID;
+    }
+    if (cfg->http_port <= 0 || cfg->http_port > 65535) {
+        std::cerr << "[GG-GHOST-MCP][FATAL] http_port out of range: " << cfg->http_port << "\n";
+        return LOAD_INVALID;
+    }
+    if (cfg->agent_port <= 0 || cfg->agent_port > 65535) {
+        std::cerr << "[GG-GHOST-MCP][FATAL] agent_port out of range: " << cfg->agent_port << "\n";
+        return LOAD_INVALID;
+    }
+    if (cfg->max_save_bytes == 0) {
+        std::cerr << "[GG-GHOST-MCP][FATAL] max_save_bytes must be > 0\n";
+        return LOAD_INVALID;
+    }
+    return LOAD_OK;
 }
 
 static int run_stdio(Session& session, McpProtocol& proto) {
@@ -139,11 +172,17 @@ int main(int argc, char** argv) {
     }
 
     // 读配置文件，命令行参数随后覆盖（参数优先）
-    if (load_config(config_path, &cfg)) {
-        std::cerr << "[GG-GHOST-MCP] loaded config: " << config_path << "\n";
-    } else {
-        std::cerr << "[GG-GHOST-MCP] no config at " << config_path
-                  << " (using defaults)\n";
+    switch (load_config(config_path, &cfg)) {
+        case LOAD_OK:
+            std::cerr << "[GG-GHOST-MCP] loaded config: " << config_path << "\n";
+            break;
+        case LOAD_MISSING:
+            std::cerr << "[GG-GHOST-MCP] no config at " << config_path
+                      << " (using defaults)\n";
+            break;
+        case LOAD_INVALID:
+        default:
+            return 1;   // 已在 load_config 里打印具体原因
     }
 
     // 第二遍：应用其余命令行覆盖（跳过已处理的 --config）
@@ -151,7 +190,16 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--config" && i + 1 < argc) { ++i; continue; }
         else if (a == "--transport" && i + 1 < argc) cfg.transport = argv[++i];
-        else if (a == "--port" && i + 1 < argc) cfg.http_port = atoi(argv[++i]);
+        else if (a == "--port" && i + 1 < argc) {
+            const char* v = argv[++i];
+            char* end = nullptr;
+            long p = strtol(v, &end, 10);
+            if (end == v || *end != '\0' || p <= 0 || p > 65535) {
+                std::cerr << "[GG-GHOST-MCP][FATAL] --port must be 1..65535, got: " << v << "\n";
+                return 1;
+            }
+            cfg.http_port = static_cast<int>(p);
+        }
         else if (a == "--http-host" && i + 1 < argc) cfg.http_host = argv[++i];
         else if (a == "--token" && i + 1 < argc) cfg.http_token = argv[++i];
         else if (a == "--adb" && i + 1 < argc) cfg.adb = argv[++i];

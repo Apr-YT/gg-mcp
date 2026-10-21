@@ -14,6 +14,21 @@ g++ -std=c++17 -O2 -Wall -I"%ROOT%\third_party" -I"%ROOT%\shared" ^
   -o "%ROOT%\build\pc\test_wire.exe" "%ROOT%\tests\unit\test_wire.cpp"
 if errorlevel 1 ( echo [FAIL] test_wire build & exit /b 1 )
 
+rem comm-layer failure semantics: real sockets, fake peer on 127.0.0.1 drives
+rem AgentClient::call() -> no response / half frame / bad magic / bad version.
+g++ -std=c++17 -O2 -Wall -I"%ROOT%" -I"%ROOT%\third_party" -I"%ROOT%\shared" ^
+  -o "%ROOT%\build\pc\test_wire_io.exe" "%ROOT%\tests\unit\test_wire_io.cpp" ^
+  "%ROOT%\server\device\wire.cpp" -lws2_32
+if errorlevel 1 ( echo [FAIL] test_wire_io build & exit /b 1 )
+
+rem session enum guardrail: put_type / put_region / put_op reject explicit bad
+rem values (false, no default written) while missing fields still default.
+g++ -std=c++17 -O2 -Wall -I"%ROOT%" -I"%ROOT%\third_party" -I"%ROOT%\shared" ^
+  -o "%ROOT%\build\pc\test_session.exe" "%ROOT%\tests\unit\test_session.cpp" ^
+  "%ROOT%\server\session.cpp" "%ROOT%\server\annotations.cpp" ^
+  "%ROOT%\server\device\wire.cpp" -lws2_32
+if errorlevel 1 ( echo [FAIL] test_session build & exit /b 1 )
+
 gcc -O2 -Wall -I"%ROOT%" -o "%ROOT%\build\pc\test_elfsym.exe" ^
   "%ROOT%\tests\unit\test_elfsym.c" "%ROOT%\agentd\elfsym.c"
 if errorlevel 1 ( echo [FAIL] test_elfsym build & exit /b 1 )
@@ -24,6 +39,12 @@ if errorlevel 1 ( echo [FAIL] test_version & exit /b 1 )
 echo === test_wire ===
 "%ROOT%\build\pc\test_wire.exe"
 if errorlevel 1 ( echo [FAIL] test_wire & exit /b 1 )
+echo === test_wire_io ===
+"%ROOT%\build\pc\test_wire_io.exe"
+if errorlevel 1 ( echo [FAIL] test_wire_io & exit /b 1 )
+echo === test_session ===
+"%ROOT%\build\pc\test_session.exe"
+if errorlevel 1 ( echo [FAIL] test_session & exit /b 1 )
 echo === test_elfsym ===
 if exist "%ROOT%\build\native\libKernelGg.so" (
   "%ROOT%\build\pc\test_elfsym.exe" "%ROOT%\build\native\libKernelGg.so" "%ROOT%\build\native\lib5_stub"
