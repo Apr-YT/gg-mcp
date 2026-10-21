@@ -133,6 +133,40 @@ hook 型的常见情形是内核里已有 hook（开机脚本或别的途径加�
 
 `comm` 已变为 `'init'`（无 `\n`），`gg_kernel_status` 的 `error` 已为空。
 
+### 1.10 静态分析 + 畸形输入审计 — 已修 5 处
+
+**方法**（在 worktree `audit/full-2026-10-21` 上做，避免污染主工作区）：
+
+1. `cppcheck --enable=warning,performance,portability` 扫 `agentd/` `server/` `native/`
+2. 严格编译警告：`-Wshadow -Wcast-align -Wnull-dereference -Wdouble-promotion`
+3. 畸形输入探测：19 个用例直连 agentd（绕过 PC 层），验证不崩溃且都有明确响应
+
+**项目代码内真问题（已修）**
+
+| 位置 | 问题 | 后果 |
+|---|---|---|
+| `h_pointer_scan` | `cap` 直接取自客户端且无上限；`malloc` 失败未判空 | `cap=1e9` → 申请数十 GB；失败后仍把 NULL 交给 `pointer_scan` 并解引用 `hits[i]` |
+| `version.c:104` | `malloc(len+1)` 后直接 `memcpy` | 分配失败即段错误 |
+| `Session::device_call` | 形参 `params` 遮蔽同名成员（`-Wshadow`） | `device_call(cmd, params, ...)` 极易被误读成传成员 |
+| `wire.cpp` `GG_LOG` | 把 `#ifdef` 塞进宏参数 | g++ 能过，但工具无法解析、可读性差 |
+
+修复：`cap` 钳制 `[1, 100000]` + 分配失败返回 `GGERR_INTERNAL`；`malloc` 判空；形参改名 `req`；平台错误码先取局部变量。
+
+**误报（不修）**
+
+- `third_party/json.hpp`、`httplib.h` 的大量 `missingReturn` / `syntaxError`
+- `native/hook/hook.c:157` 的 `raw_syscall6`：aarch64 内联汇编（`register long x8 __asm__("x8")`），cppcheck 无法解析
+
+**畸形输入探测结果：19/19 全部有明确响应，agentd 进程无崩溃**
+
+```
+addr 是对象/数组/空串/0x 前缀/溢出/5000 字符超长  → 全部 BAD_REQUEST: invalid address argument
+缺 p 字段 / 非 JSON / 空数组 / 空对象            → BAD_REQUEST: payload must be {"p":{...}}
+len 负数/1e18/字符串、write 缺 value             → 走到 handler 的 session 检查（参数未被误判）
+```
+
+**验证**：PC（含 `-Wshadow/-Wcast-align`）与 agentd（NDK）均零警告编译；`run_tests.bat` 518 条断言全绿；部署后 `run_itest.ps1` **ITEST ALL PASS**。
+
 ## 二、高危项（本节已全部处理，保留分析供追溯）
 
 ### 2.1 agentd 无任何客户端鉴权 — ✅ 已修，见 §1.4
