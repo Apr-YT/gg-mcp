@@ -1,5 +1,9 @@
 # 构建产物
-build/
+build/*
+# 例外：KO 驱动是分发产物，随仓库走。
+# 两套 6.12.x 分别对应 K90(6.12.23) 与 myron(6.12.69)，vermagic 与符号 CRC 已按设备适配，
+# 生成/复用方法见 docs/engineering/RWPROC33_ADAPTER.md §十一。改动前先读那一节。
+!build/ko/
 *.exe
 *.o
 *.obj
