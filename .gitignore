@@ -21,6 +21,9 @@ build/*
 # 运行时数据/敏感
 annotations.json
 *.state
+# 部署时由 deploy.ps1 写入设备真值 wire_key（握手密钥）。
+# 入库模板是 configs/gg-ghost.example.json（wire_key 为空），首次部署复制生成。
+configs/gg-ghost.json
 
 # save_to 落盘目录（工具只能写到这里）
 exports/

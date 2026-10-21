@@ -13,7 +13,7 @@ agentd/    设备端 gg-agentd（C, NDK arm64, root）：搜索/读写/冻结/�
 shared/    wire_protocol.h — PC/设备双端协议唯一事实源（20B 头 + JSON 负载；含 GGCMD_AUTH 握手）
 tests/     unit（posix_stub 可 PC 跑）/ integration / regression 三层
 scripts/   构建（build_pc.bat / build_ndk.bat / build_all.bat）、部署、测试、基准
-configs/   gg-ghost.json（serial/端口/KO 类型）
+configs/   gg-ghost.example.json（模板，入库）；gg-ghost.json 由 deploy 生成、**不入库**
 tools/     辅助脚本（cfm_coord_read.py 等）
 docs/      engineering/（工程文档）+ research/（逆向研究笔记，仅限本仓），索引见 docs/README.md
 ```
@@ -112,6 +112,9 @@ CI 三 job 重写（v4 + Windows 单测 + NDK 构建）；lint.bat 重写落地�
   密钥在设备端 `/data/adb/GG-Ghost/wire.key`（`0600`，首启自动生成 32 字节随机 hex），
   通过 `--wire-key-file` 传入；PC 端 `configs/gg-ghost.json` 的 `wire_key` 必须与之一致，
   `deploy.ps1` 会自动拉取并写回配置。**wire_key 与 KO 密钥同级别，不入库、不入对话、不贴日志。**
+  因此 `configs/gg-ghost.json` **不进版本库**（已列入 `.gitignore`）：它是部署生成物，
+  入库的只有模板 `configs/gg-ghost.example.json`（`wire_key` 为空），首次部署由
+  `deploy.ps1` 从模板复制后再写入真值。曾经因为跟踪了它，21 个提交把真实 key 带进过历史。
 - 敏感研究笔记（ACE/反作弊对抗）只放 `docs/research/`，不外发；驱动密钥、QX_KEY 等不入库不入对话
 - 设备端改动必须在真机过 itest（scripts/deploy.bat 部署后跑 tests/integration/run_itest.ps1）
 - 特征字符串纪律：agentd 二进制 strings 不得出现 GG-Ghost / gg-touch / GG_KO 等特征（历史提交 88d83cc、21b246d 有验证方法）

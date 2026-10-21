@@ -178,7 +178,20 @@ if ($wireKey) {
         [System.IO.File]::WriteAllText($cfgPath, $jsonText, (New-Object System.Text.UTF8Encoding($false)))
         Write-Host "  已写入 configs\gg-ghost.json (wire_key 长度 $($wireKey.Length))"
     } else {
-        Write-Host "  警告: $cfgPath 不存在，请手动把该值写入配置 wire_key: $wireKey" -ForegroundColor DarkYellow
+        # configs\gg-ghost.json 是运行时生成物，不入库（见 .gitignore）：
+        # 它每次部署都会被写入本机的真实 wire_key，提交上去就是把密钥公开。
+        # 首次部署时从模板复制一份，再写入本次的 key。
+        $examplePath = Join-Path $Root "configs\gg-ghost.example.json"
+        if (Test-Path $examplePath) {
+            Copy-Item $examplePath $cfgPath -Force
+            $cfgObj = Get-Content $cfgPath -Raw | ConvertFrom-Json
+            $cfgObj | Add-Member -NotePropertyName wire_key -NotePropertyValue $wireKey -Force
+            $jsonText = $cfgObj | ConvertTo-Json -Depth 10
+            [System.IO.File]::WriteAllText($cfgPath, $jsonText, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Host "  已从模板生成 configs\gg-ghost.json 并写入 key (长度 $($wireKey.Length))"
+        } else {
+            Write-Host "  警告: $cfgPath 与模板 gg-ghost.example.json 均不存在，请手动写入 wire_key" -ForegroundColor DarkYellow
+        }
     }
 } else {
     Write-Host "  警告: 读取 $DevDir/wire.key 失败 — agentd 可能以【无鉴权】模式运行，本机任意进程可连端口" -ForegroundColor DarkYellow
