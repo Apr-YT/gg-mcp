@@ -107,6 +107,11 @@ void log_msg(const char *fmt, ...) {
 /* 严格解析地址字符串；失败返回 0。详见 engine_internal.h 的说明。 */
 int parse_u64_strict(const char *s, uint64_t *out) {
     if (!s || !*s) return 0;
+    /* strtoull 会把前导 '-' 按模运算吃掉（"-1" → 0xFFFFFFFFFFFFFFFF）且不设 ERANGE，
+     * 不拦就把写错的负地址当成一个巨大的合法地址。 */
+    const char *q = s;
+    while (*q == ' ' || *q == '\t') q++;
+    if (*q == '-') return 0;
     char *end = NULL;
     errno = 0;
     unsigned long long v = strtoull(s, &end, 0);
@@ -1122,11 +1127,22 @@ static void h_read(int fd, uint32_t seq, cJSON *p) {
     int type = parse_vt(p, VT_DWORD);
     if (type < 0) { send_err(fd, GGCMD_READ, seq, GGERR_BAD_REQUEST, "invalid " VT_HINT); return; }
     if (!as) { send_err(fd, GGCMD_READ, seq, GGERR_BAD_REQUEST, "addr required"); return; }
-    uint64_t addr = strtoull(as, NULL, 0);
     int sz = vt_size(type);
+    /* VT_BYTES 的 vt_size 是 0：拿它做单值读会以 0 长度调驱动，再把零初始化的 buf 当结果 */
+    if (sz <= 0) { send_err(fd, GGCMD_READ, seq, GGERR_BAD_REQUEST,
+                            "type bytes not supported for single-value read (use gg_read_bytes)"); return; }
+    uint64_t addr = strtoull(as, NULL, 0);
     uint8_t buf[8] = {0};
     ssize_t got = driver_read(&g_eng.drv, g_eng.session_pid, addr, buf, (size_t)sz);
     if (got < 0) { send_err(fd, GGCMD_READ, seq, GGERR_PERM, g_eng.drv.last_error); return; }
+    /* 短读不能当成功：buf 是零初始化的，1/4 字节会把"页读不到"报成"值是 0" */
+    if (got != (ssize_t)sz) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "short read: %lld of %d bytes (page not resident?)",
+                 (long long)got, sz);
+        send_err(fd, GGCMD_READ, seq, GGERR_INTERNAL, msg);
+        return;
+    }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "value", (double)read_bits(buf, type));
     cJSON_AddNumberToObject(r, "bytes", (double)got);
@@ -1137,8 +1153,11 @@ static void h_read(int fd, uint32_t seq, cJSON *p) {
 static void h_read_bytes(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_READ_BYTES, seq, GGERR_NO_SESSION, "no session"); return; }
     const char *as = cJSON_GetObjectItem(p, "addr") ? cJSON_GetObjectItem(p, "addr")->valuestring : NULL;
-    size_t len = cJSON_GetObjectItem(p, "len") ? (size_t)cJSON_GetObjectItem(p, "len")->valuedouble : 64;
+    double len_d = cJSON_GetObjectItem(p, "len") ? cJSON_GetObjectItem(p, "len")->valuedouble : 64;
     if (!as) { send_err(fd, GGCMD_READ_BYTES, seq, GGERR_BAD_REQUEST, "addr required"); return; }
+    /* len 走 double 再转 size_t：负数/0 会变成巨大值或 0 长度。必须先判范围再转。 */
+    if (!(len_d >= 1)) { send_err(fd, GGCMD_READ_BYTES, seq, GGERR_BAD_REQUEST, "len must be >= 1"); return; }
+    size_t len = (size_t)len_d;
     if (len > GG_SEARCH_CHUNK) len = GG_SEARCH_CHUNK;   /* 单次读上限 256KB（= RWPROC_MAX_IO） */
     uint64_t addr = strtoull(as, NULL, 0);
     uint8_t *buf = malloc(len);
@@ -1179,11 +1198,21 @@ static void h_write(int fd, uint32_t seq, cJSON *p) {
     int ok = 0;
     uint64_t value = parse_value_str(type, vs, &ok);
     if (!ok) { send_err(fd, GGCMD_WRITE, seq, GGERR_BAD_REQUEST, "bad value"); return; }
+    int sz = vt_size(type);
+    if (sz <= 0) { send_err(fd, GGCMD_WRITE, seq, GGERR_BAD_REQUEST,
+                            "type bytes not supported for single-value write"); return; }
     uint64_t addr = strtoull(as, NULL, 0);
     uint8_t buf[8];
     encode_value_local(type, value, buf);
-    ssize_t w = driver_write(&g_eng.drv, g_eng.session_pid, addr, buf, (size_t)vt_size(type));
+    ssize_t w = driver_write(&g_eng.drv, g_eng.session_pid, addr, buf, (size_t)sz);
     if (w < 0) { send_err(fd, GGCMD_WRITE, seq, GGERR_PERM, g_eng.drv.last_error); return; }
+    /* 短写必须报错：只判 <0 会把"只落进 2/4 字节"回报成成功，调用方以为改完了 */
+    if (w != (ssize_t)sz) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "short write: %lld of %d bytes", (long long)w, sz);
+        send_err(fd, GGCMD_WRITE, seq, GGERR_INTERNAL, msg);
+        return;
+    }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "bytes", (double)w);
     send_ok(fd, GGCMD_WRITE, seq, r);
@@ -1243,9 +1272,13 @@ static void h_freeze(int fd, uint32_t seq, cJSON *p) {
     int ok = 0;
     uint64_t value = parse_value_str(type, vs, &ok);
     if (!ok) { send_err(fd, GGCMD_FREEZE, seq, GGERR_BAD_REQUEST, "bad value"); return; }
+    int sz = vt_size(type);
+    /* vt_size(VT_BYTES)=0：冻结一个 0 长度的值只会让冻结线程空转，且表项永不清除 */
+    if (sz <= 0) { send_err(fd, GGCMD_FREEZE, seq, GGERR_BAD_REQUEST,
+                            "type bytes not supported for freeze"); return; }
     uint8_t buf[8];
     encode_value_local(type, value, buf);
-    if (freeze_add(&g_eng.freeze, strtoull(as, NULL, 0), buf, (size_t)vt_size(type)) < 0) {
+    if (freeze_add(&g_eng.freeze, strtoull(as, NULL, 0), buf, (size_t)sz) < 0) {
         send_err(fd, GGCMD_FREEZE, seq, GGERR_INTERNAL, "freeze table full");
         return;
     }

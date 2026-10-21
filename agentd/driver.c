@@ -27,6 +27,7 @@ void log_msg(const char *fmt, ...);
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,6 +100,17 @@ _Static_assert(sizeof(rwproc_hwbp_regs_t) == 288, "rwproc my_user_pt_regs must b
 
 static uint8_t rwproc_buf[RWPROC_HDR_SZ + RWPROC_MAX_IO];
 
+/* ⚠️ rwproc_buf 是**进程级共享**缓冲，不是每次调用一份。三处并发调用它：
+ *   1) 搜索 worker 线程池（search.c 的 search_worker_main，N 线程并行 driver_read）；
+ *   2) 冻结线程（freeze.c 的 freeze_loop，独立线程调 driver_write，只持 f->mtx，
+ *      不在 g_eng.mtx 覆盖范围内）；
+ *   3) 主线程的 handler（在 g_eng.mtx 内）。
+ * 只有 (3) 之间是串行的。请求写入 → read() → 结果拷出必须在同一临界区，
+ * 否则 A 线程刚 read 完还没拷走，B 线程的下一次 memset/read 就把结果覆盖掉：
+ * 表现为读到别的地址的数据、句柄错位、搜索命中值对不上。
+ * 删掉这把锁不是性能优化，是数据破坏。 */
+static pthread_mutex_t rwproc_mtx = PTHREAD_MUTEX_INITIALIZER;
+
 /* 通用调用: 往节点 fd 发一个请求。data 为 buf+33 处数据（可 NULL）。
  * 成功返回 read() 结果（>=0）；失败返回 -1 并置 last_error。
  *
@@ -107,10 +119,16 @@ static uint8_t rwproc_buf[RWPROC_HDR_SZ + RWPROC_MAX_IO];
  *   而请求负载长度（buf_size）与回写长度并不总是相等。OPEN_PROCESS 只发
  *   33 字节头（buf_size=0）却要收回 8 字节 handle —— 若 count 也只给 33，
  *   内核写不进去，随后的 memcpy(buf+33, 8) 取到的是上一次请求的残留数据。
- *   症状：读自身"成功"（残留碰巧有效），读别的进程返回 0 或 EFAULT。 */
+ *   症状：读自身"成功"（残留碰巧有效），读别的进程返回 0 或 EFAULT。
+ *
+ * out/out_cap: 结果拷出目标，**在锁内完成**。read() 返回 r>0 时拷 r 字节；
+ *   r==0（OPEN_PROCESS / INST_HWBP / HIT_COUNT 这类"成功但不报长度"的命令）
+ *   拷 out_cap 字节。r 超过 out_cap 视为协议错位，直接判失败而不是截断 ——
+ *   截断会把一次驱动异常伪装成"部分成功"。 */
 static ssize_t rwproc_call_ex(gg_driver_t *d, int fd, char cmd,
                               uint64_t p1, uint64_t p2, uint64_t p3,
-                              const void *data, size_t data_size, size_t resp_cap) {
+                              const void *data, size_t data_size, size_t resp_cap,
+                              void *out, size_t out_cap) {
     if (fd < 0) { set_err(d, "rwproc node not open"); return -1; }
     if (data_size > RWPROC_MAX_IO) {
         snprintf(d->last_error, sizeof(d->last_error),
@@ -119,6 +137,8 @@ static ssize_t rwproc_call_ex(gg_driver_t *d, int fd, char cmd,
     }
     if (resp_cap > RWPROC_MAX_IO) resp_cap = RWPROC_MAX_IO;
     size_t rd = RWPROC_HDR_SZ + (resp_cap > data_size ? resp_cap : data_size);
+    ssize_t r;
+    pthread_mutex_lock(&rwproc_mtx);
     rwproc_request_t *req = (rwproc_request_t *)rwproc_buf;
     /* 清到 rd：残留数据会被误当成内核回写的结果 */
     memset(rwproc_buf, 0, rd);
@@ -129,19 +149,32 @@ static ssize_t rwproc_call_ex(gg_driver_t *d, int fd, char cmd,
     req->buf_size = data_size;
     if (data && data_size) memcpy(rwproc_buf + RWPROC_HDR_SZ, data, data_size);
     errno = 0;
-    ssize_t r = read(fd, rwproc_buf, rd);
+    r = read(fd, rwproc_buf, rd);
     if (r < 0) {
         snprintf(d->last_error, sizeof(d->last_error),
                  "rwproc read(cmd=%d) failed: %s", (int)cmd, strerror(errno));
+        pthread_mutex_unlock(&rwproc_mtx);
         return -1;
     }
+    if (out) {
+        size_t n = (r > 0) ? (size_t)r : out_cap;
+        if (n > out_cap) {
+            snprintf(d->last_error, sizeof(d->last_error),
+                     "rwproc result overflow: got %zu, cap %zu (cmd=%d)",
+                     n, out_cap, (int)cmd);
+            pthread_mutex_unlock(&rwproc_mtx);
+            return -1;
+        }
+        if (n) memcpy(out, rwproc_buf + RWPROC_HDR_SZ, n);
+    }
+    pthread_mutex_unlock(&rwproc_mtx);
     return r;
 }
 
 static ssize_t rwproc_call(gg_driver_t *d, int fd, char cmd,
                            uint64_t p1, uint64_t p2, uint64_t p3,
                            const void *data, size_t data_size) {
-    return rwproc_call_ex(d, fd, cmd, p1, p2, p3, data, data_size, 0);
+    return rwproc_call_ex(d, fd, cmd, p1, p2, p3, data, data_size, 0, NULL, 0);
 }
 
 /* 打开 /proc/<key>/<key> 节点。key 为空时扫描 /proc 找"目录名==内文件名"的节点
@@ -269,16 +302,16 @@ int rwproc_open_process(gg_driver_t *d, pid_t pid, uint64_t *handle) {
         d->rwproc_handle = 0;
     }
     if (!d->rwproc_handle) {
+        uint64_t h = 0;
         ssize_t r = rwproc_call_ex(d, d->rwproc_mem_fd, RWPROC_CMD_OPEN_PROCESS,
-                                   (uint64_t)pid, 0, 0, NULL, 0, sizeof(uint64_t));
+                                   (uint64_t)pid, 0, 0, NULL, 0, sizeof(uint64_t),
+                                   &h, sizeof(h));
         if (r < 0) return -1;
         if (r != 0) {
             snprintf(d->last_error, sizeof(d->last_error),
                      "rwproc CMD_OPEN_PROCESS(pid=%d) failed: %lld", (int)pid, (long long)r);
             return -1;
         }
-        uint64_t h = 0;
-        memcpy(&h, rwproc_buf + RWPROC_HDR_SZ, sizeof(h));
         if (!h) {
             set_err(d, "rwproc CMD_OPEN_PROCESS returned null handle");
             return -1;
@@ -304,14 +337,11 @@ static ssize_t rwproc_read_mem(gg_driver_t *d, pid_t pid, uint64_t addr,
                                void *buf, size_t len) {
     if (len > RWPROC_MAX_IO) len = RWPROC_MAX_IO;
     if (rwproc_open_process(d, pid, NULL) != 0) return -1;
-    ssize_t r = rwproc_call(d, d->rwproc_mem_fd, RWPROC_CMD_READ_PROCESS_MEMORY,
-                            d->rwproc_handle, addr, 0 /* is_force */, NULL, len);
-    if (r < 0) return -1;
-    /* 防御：内核回写量不该超过我们申请的 len，超出就按 len 截断，
-     * 否则 memcpy 会溢出调用方的缓冲区。 */
-    if ((size_t)r > len) r = (ssize_t)len;
-    memcpy(buf, rwproc_buf + RWPROC_HDR_SZ, (size_t)r);
-    return r;
+    /* 结果拷出与长度校验都在 rwproc_call_ex 的临界区内完成：
+     * 在锁外按返回值 memcpy 会被别的线程的下一次请求覆盖，r>len 时还会写穿调用方缓冲。 */
+    return rwproc_call_ex(d, d->rwproc_mem_fd, RWPROC_CMD_READ_PROCESS_MEMORY,
+                          d->rwproc_handle, addr, 0 /* is_force */,
+                          NULL, len, len, buf, len);
 }
 
 static ssize_t rwproc_write_mem(gg_driver_t *d, pid_t pid, uint64_t addr,
@@ -370,19 +400,20 @@ int rwproc_hwbp_start(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int le
     uint64_t handle = 0;
     /* 断点模块的 OPEN_PROCESS 是独立句柄（与内存模块句柄不同） */
     ssize_t r = rwproc_call_ex(d, d->rwproc_bp_fd, RWBP_CMD_OPEN_PROCESS,
-                               (uint64_t)pid, 0, 0, NULL, 0, sizeof(uint64_t));
+                               (uint64_t)pid, 0, 0, NULL, 0, sizeof(uint64_t),
+                               &handle, sizeof(handle));
     if (r < 0) return -1;
     if (r != 0) {
         snprintf(d->last_error, sizeof(d->last_error),
                  "rwbp CMD_OPEN_PROCESS(pid=%d) failed: %lld", (int)pid, (long long)r);
         return -1;
     }
-    memcpy(&handle, rwproc_buf + RWPROC_HDR_SZ, sizeof(handle));
     if (!handle) { set_err(d, "rwbp CMD_OPEN_PROCESS null handle"); return -1; }
     /* INST: param3 = len | (type << 8) */
+    uint64_t id = 0;
     ssize_t r2 = rwproc_call_ex(d, d->rwproc_bp_fd, RWBP_CMD_INST_PROCESS_HWBP,
                                 handle, addr, RWBP_PARAM3(len, type), NULL, 0,
-                                sizeof(uint64_t));
+                                sizeof(uint64_t), &id, sizeof(id));
     if (r2 < 0) {
         rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_CLOSE_PROCESS, handle, 0, 0, NULL, 0);
         return -1;
@@ -393,8 +424,7 @@ int rwproc_hwbp_start(gg_driver_t *d, pid_t pid, uint64_t addr, int type, int le
         rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_CLOSE_PROCESS, handle, 0, 0, NULL, 0);
         return -1;
     }
-    uint64_t id = 0;
-    memcpy(&id, rwproc_buf + RWPROC_HDR_SZ, sizeof(id));
+    /* id 已由 rwproc_call_ex 在临界区内拷出（不能在这里再 memcpy 共享缓冲） */
     if (!id) {
         rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_CLOSE_PROCESS, handle, 0, 0, NULL, 0);
         set_err(d, "rwbp INST returned null bp id");
@@ -425,22 +455,20 @@ int rwproc_hwbp_get_hits(gg_driver_t *d, uint64_t bp_id,
     if (d->rwproc_bp_fd < 0) return -1;
     if (real) *real = 0;
     /* 命中数（模块返回 {hit_total_count, hit_item_arr_count} 到数据区） */
-    ssize_t r = rwproc_call_ex(d, d->rwproc_bp_fd, RWBP_CMD_GET_HWBP_HIT_COUNT,
-                               bp_id, 0, 0, NULL, 0, sizeof(uint64_t) * 2);
-    if (r < 0) return -1;
     uint64_t counts[2] = {0, 0};
-    memcpy(counts, rwproc_buf + RWPROC_HDR_SZ, sizeof(counts));
+    ssize_t r = rwproc_call_ex(d, d->rwproc_bp_fd, RWBP_CMD_GET_HWBP_HIT_COUNT,
+                               bp_id, 0, 0, NULL, 0, sizeof(uint64_t) * 2,
+                               counts, sizeof(counts));
+    if (r < 0) return -1;
     uint64_t avail = counts[1] ? counts[1] : counts[0];   /* 条目数 */
     if (avail == 0) return 0;
     int take = (int)(avail < (uint64_t)cap ? avail : (uint64_t)cap);
     if (take <= 0) return 0;
     size_t bytes = (size_t)take * sizeof(rwproc_hwbp_hit_item_t);
-    ssize_t r2 = rwproc_call(d, d->rwproc_bp_fd, RWBP_CMD_GET_HWBP_HIT_DETAIL,
-                             bp_id, 0, 0, NULL, bytes);
+    ssize_t r2 = rwproc_call_ex(d, d->rwproc_bp_fd, RWBP_CMD_GET_HWBP_HIT_DETAIL,
+                                bp_id, 0, 0, NULL, 0, bytes, out, bytes);
     if (r2 < 0) return -1;
     int got = (int)((size_t)r2 / sizeof(rwproc_hwbp_hit_item_t));
-    if (got > 0) memcpy(out, rwproc_buf + RWPROC_HDR_SZ,
-                        (size_t)got * sizeof(rwproc_hwbp_hit_item_t));
     if (real) *real = got;
     return 0;
 }
