@@ -65,6 +65,16 @@ static inline bool gg_is_sock_timeout() {
 }
 #endif
 
+// POSIX 上对端关闭后 send 会触发 SIGPIPE 直接终止进程（agentd 侧显式忽略了
+// SIGPIPE，PC 侧没有）。MSG_NOSIGNAL 让 send 返回 EPIPE，走正常的错误路径。
+#ifdef _WIN32
+#define GG_SEND_FLAGS 0
+#elif defined(MSG_NOSIGNAL)
+#define GG_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define GG_SEND_FLAGS 0
+#endif
+
 // 把单次阻塞操作的等待上限压到「离整体截止时间还剩多少毫秒」。
 // 这样即使对端持续吐无用帧，单个请求也不会超过 io_timeout_ms 的预算。
 static void gg_set_sock_timeout(int fd, int ms) {
@@ -198,10 +208,14 @@ int AgentClient::ensure_connected_locked() {
                 return !s.empty() && s.find_first_of(";&|`$<>()\"'\\") == std::string::npos;
             };
             auto serial_safe = [](const std::string& s) {
+                /* 空 serial 是合法配置，表示"单设备，adb 自动选择"，命令里不带 -s。
+                 * 原实现要求 !s.empty()，导致默认配置（serial=""）在直连失败后
+                 * 连 adb forward 回退都被拒（"serial rejected"）。 */
+                if (s.empty()) return true;
                 for (char ch : s)
                     if (!(isalnum((unsigned char)ch) || ch == '.' || ch == '-' || ch == ':' || ch == '_'))
                         return false;
-                return !s.empty();
+                return true;
             };
             std::string adb_bin = cfg_.adb;
             if (!adb_safe(adb_bin)) { last_error = "adb path rejected (unsafe chars): " + adb_bin; return GGERR_NO_DEVICE; }
@@ -236,8 +250,12 @@ int AgentClient::tcp_connect() {
     sa.sin_port = htons(static_cast<uint16_t>(cfg_.agent_port));
     inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
 
-    int rc = ::connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa));
+    /* connect 必须按平台各调用一次。原实现先在平台无关位置 connect 一次，
+     * POSIX 分支切非阻塞后又 connect 一次 —— 第一次若已成功，第二次返回
+     * EISCONN(106)，被判为连接失败，Linux/macOS 上客户端根本连不上。 */
+    int rc;
 #ifdef _WIN32
+    rc = ::connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa));
     if (rc != 0 && WSAGetLastError() == WSAEWOULDBLOCK) {
         fd_set w;
         FD_ZERO(&w);
@@ -266,7 +284,11 @@ int AgentClient::tcp_connect() {
 #define EINPROGRESS 115
 #endif
     int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        last_error = "fcntl(O_NONBLOCK) failed";
+        GG_CLOSE_SOCK(fd);
+        return -1;
+    }
     rc = ::connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa));
     if (rc != 0 && errno != EINPROGRESS) {
         rc = -1;
@@ -349,7 +371,7 @@ int AgentClient::write_frame(int fd, uint16_t cmd, uint32_t seq, const std::stri
         int wait = gg_remain_ms(deadline);
         if (wait <= 0) return -2;
         gg_set_sock_timeout(fd, wait);
-        int n = ::send(fd, p + off, static_cast<int>(sizeof(h) - off), 0);
+        int n = ::send(fd, p + off, static_cast<int>(sizeof(h) - off), GG_SEND_FLAGS);
         if (n > 0) { off += static_cast<size_t>(n); continue; }
         if (n < 0 && gg_is_eintr()) continue;   // 信号中断重试
         if (n < 0 && gg_is_sock_timeout()) return -2;
@@ -366,7 +388,7 @@ int AgentClient::write_frame(int fd, uint16_t cmd, uint32_t seq, const std::stri
         int wait = gg_remain_ms(deadline);
         if (wait <= 0) return -2;
         gg_set_sock_timeout(fd, wait);
-        int n = ::send(fd, enc.data() + off, static_cast<int>(enc.size() - off), 0);
+        int n = ::send(fd, enc.data() + off, static_cast<int>(enc.size() - off), GG_SEND_FLAGS);
         if (n > 0) { off += static_cast<size_t>(n); continue; }
         if (n < 0 && gg_is_eintr()) continue;
         if (n < 0 && gg_is_sock_timeout()) return -2;

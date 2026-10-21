@@ -1,8 +1,8 @@
 // main.cpp — gg-ghost-mcp：PC 端 C++ MCP 服务器入口
 //
 // 用法:
-//   gg-ghost-mcp --config configs/ggmcp.json --transport stdio
-//   gg-ghost-mcp --config configs/ggmcp.json --transport http --port 8788
+//   gg-ghost-mcp --config configs/gg-ghost.json --transport stdio
+//   gg-ghost-mcp --config configs/gg-ghost.json --transport http --port 8788
 //
 // stdio 传输：供 Claude Desktop / Claude Code 等本地 MCP 客户端。
 // http 传输：POST /mcp（Streamable HTTP 风格），供 Cline 等远程客户端。
@@ -141,7 +141,7 @@ static int run_http(Session& session, McpProtocol& proto, const ServerConfig& cf
 static void usage(const char* argv0) {
     std::cerr <<
         "GG-GHOST-MCP — PC 端 GameGuardian MCP 服务器\n"
-        "用法: " << argv0 << " [--config configs/ggmcp.json] [--transport stdio|http]\n"
+        "用法: " << argv0 << " [--config configs/gg-ghost.json] [--transport stdio|http]\n"
         "          [--port 8788] [--http-host 127.0.0.1] [--token <secret>]\n"
         "          [--adb <adb路径>] [--serial <设备序列号>]\n"
         "          [--print-events]  # 订阅 agentd 事件流并打印（悬浮窗监控调试）\n"
@@ -157,7 +157,9 @@ int main(int argc, char** argv) {
     SetConsoleOutputCP(65001);   // UTF-8 控制台输出
 #endif
 
-    std::string config_path = "configs/ggmcp.json";
+    /* 仓库里的配置叫 configs/gg-ghost.json；旧的 ggmcp.json 从未存在过，
+     * 用旧默认值会让不传 --config 的启动静默落回内置默认（transport=http 等）。 */
+    std::string config_path = "configs/gg-ghost.json";
     ServerConfig cfg;
 
     // 第一遍：仅解析 --config，确定实际配置文件路径

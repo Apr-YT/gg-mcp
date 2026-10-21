@@ -480,8 +480,21 @@ json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / 
 
         bool promoted = false;
         if (write_ok && missing.empty()) {
-            std::remove(path.c_str());   // Windows 上 rename 覆盖已存在文件会失败
+            /* 先按 POSIX 语义直接 rename（原子覆盖）。
+             * 失败再走 Windows 的 .bak 中转 —— 不能像旧实现那样先 std::remove(path)：
+             * 一旦 rename 失败，唯一的一份旧数据已经没了，与"写 .part 保护旧文件"的
+             * 初衷正好相反。 */
             promoted = (std::rename(tmp_path.c_str(), path.c_str()) == 0);
+            if (!promoted) {
+                const std::string bak_path = path + ".bak";
+                std::remove(bak_path.c_str());
+                bool had_old = (std::rename(path.c_str(), bak_path.c_str()) == 0);
+                if (had_old) {
+                    promoted = (std::rename(tmp_path.c_str(), path.c_str()) == 0);
+                    if (promoted) std::remove(bak_path.c_str());
+                    else std::rename(bak_path.c_str(), path.c_str());   // 回滚旧文件
+                }
+            }
             if (!promoted) write_ok = false;
         }
 

@@ -11,6 +11,9 @@
 #ifndef GG_WIRE_PROTOCOL_H
 #define GG_WIRE_PROTOCOL_H
 
+#include <stddef.h>   /* size_t —— 本头文件必须自包含: 只含 stdint.h 时,
+                       * 任何未先引入 stddef 的翻译单元都会在 gg_xor_payload 的
+                       * 签名上失败（Linux GCC: 'size_t' has not been declared）。 */
 #include <stdint.h>
 
 #ifdef __cplusplus
