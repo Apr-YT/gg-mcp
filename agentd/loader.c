@@ -168,7 +168,9 @@ gg_ggdir_t *loader_find_dirs(size_t *out_count, const char *pattern) {
         snprintf(files, sizeof(files), "%s/%s/files", base, de->d_name);
 
         /* 收集 files/ 下所有子目录 + files/ 自身 */
-        char cands[16][GG_DIR_MAX];
+        /* 容得下 "<files>/<dirent.d_name>"（512 + 255 + 2），否则 gcc 会报
+         * -Wformat-truncation；截断的路径指向别处，是静默错误来源。 */
+        char cands[16][GG_DIR_MAX + 260];
         int nc = 0;
         DIR *fdp = opendir(files);
         if (fdp) {
@@ -176,12 +178,14 @@ gg_ggdir_t *loader_find_dirs(size_t *out_count, const char *pattern) {
             while ((fde = readdir(fdp)) != NULL && nc < 16) {
                 if (fde->d_name[0] == '.') continue;
                 if (nc < 16) {
-                    snprintf(cands[nc++], GG_DIR_MAX, "%s/%s", files, fde->d_name);
+                    int n = snprintf(cands[nc], sizeof(cands[0]), "%s/%s", files, fde->d_name);
+                    /* 万一还是截断（files 已接近上限），宁可不收也不要拿半截路径去 opendir */
+                    if (n > 0 && (size_t)n < sizeof(cands[0])) nc++;
                 }
             }
             closedir(fdp);
             /* files/ 自身也作为候选（核心可能直接在 files/ 下） */
-            if (nc < 16) snprintf(cands[nc++], GG_DIR_MAX, "%s", files);
+            if (nc < 16) snprintf(cands[nc++], sizeof(cands[0]), "%s", files);
         }
 
         for (int c = 0; c < nc; c++) {
@@ -202,7 +206,21 @@ gg_ggdir_t *loader_find_dirs(size_t *out_count, const char *pattern) {
             }
             gg_ggdir_t *g = &arr[n++];
             memset(g, 0, sizeof(*g));
-            snprintf(g->dir, sizeof(g->dir), "%s", dir);
+            /* g->dir 定长 512。超长路径宁可丢弃也不能截断：
+             * 半截路径会让后续 opendir/替换装到错误位置。
+             * 下面已用返回���判断，截断时 n-- 丢弃；gcc 的 -Wformat-truncation
+             * 只看得到「源可能更长」，看不到这个检查，故在此局部抑制。 */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
+            {
+                int dn = snprintf(g->dir, sizeof(g->dir), "%s", dir);
+                if (dn < 0 || (size_t)dn >= sizeof(g->dir)) { n--; continue; }
+            }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
             snprintf(g->pkg, sizeof(g->pkg), "%s", de->d_name);
             g->has_lib5 = core != NULL;
             {
@@ -304,7 +322,7 @@ int loader_verify_hook(const gg_ggdir_t *g) {
     int found = 0;
     while ((de = readdir(dp)) != NULL && !found) {
         if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
-        char path[64];
+        char path[320];   /* "/proc/<pid>/maps"：dirent 的 d_name 最长 255，64 会截断 */
         snprintf(path, sizeof(path), "/proc/%s/maps", de->d_name);
         FILE *f = fopen(path, "r");
         if (!f) continue;
