@@ -653,5 +653,54 @@ python scripts/patch_ko_versions.py build/devmod/all build/ko/apr_dlkm.ko
 - 复用前提是**同 major.minor 分支**（都 android16-6.x）；跨分支（5.x ↔ 6.x）不要尝试。
 - 这套流程只解决"能用"，不等于"可维护"：真出问题仍要回到 §十 的源码树重编路径。
 
+---
+
+## 十二、⚠️ 已知故障：rwproc 全量搜索会导致内核崩溃（2026-10-21 实测）
+
+**现象**：rwproc 通道下对某些目标进程执行 `gg_search`（`region=anonymous` 全扫），
+**设备直接重启**（不是 agentd 崩溃）。agentd 日志停在收到 `cmd=27` 那一刻，
+无 tombstone、无 logcat、`pstore` 为空（该机未配置 ramoops，拿不到 panic 栈）。
+
+### 已排除
+
+| 假设 | 实验 | 结果 |
+|---|---|---|
+| `is_force=1` 翻转 PTE 与活跃页竞争 | 查代码 | `driver.c` 传的是 `0 /* is_force */`，不是这个 |
+| 用户态段错误/越界 | 查 tombstone / logcat | 无新 tombstone，无 crash 记录 → 不是用户态崩 |
+| 句柄泄漏 | 查 `rwproc_open_process` | 有缓存（`if (!d->rwproc_handle)` 才 open），不泄漏 |
+| 单次读长度过大 | 读 libc 前 4KB | 正常 |
+| 数据量过大 | 读整个 libc（1MB） | 正常，设备存活 |
+| 区域数量多 | pid 1 全 anonymous 搜索 | **正常**，设备存活 |
+
+### 当前定位
+
+**与"读哪个进程"有关，与"读多少"无关**：
+
+```
+pid 1   + region=anonymous 全扫 → count=0，设备存活（uptime 持续增长）
+sleep   + region=anonymous 全扫 → agentd 失联 → 设备重启（uptime 归零）
+```
+
+两者都是 rwproc 通道（`driver_state=1`）。差别只在目标进程的内存布局。
+
+### 高风险使用场景（务必注意）
+
+**不要用 rwproc 通道对真实游戏进程做全内存搜索**——真实进程的内存布局比 init 复杂得多，
+很可能命中同样的崩溃点。当前若要搜索，用其中一种：
+
+1. 切 `KO_TYPE=hook`（本机内核确有 hook，`state=ko-hook`），走 `process_vm_readv`，实测 search 正常；
+2. 或先用 `gg_search_range` 把范围限定在**确定已映射**的一块（如某模块内），逐个区域推进。
+
+### 下一步排查（需要 KO 源码）
+
+根因在 KO 的 ioctl 实现里（`gitee.com/wei-yetao/rwProcMem33-afei` 的 `rwProcMem_module`），
+不在 agentd 侧。方向：
+
+1. 用 `gg_search_range` 遍历 sleep 进程 maps 里的每个区域，二分定位到崩在哪一类
+   （`[vvar]` / `[vdso]` / `[stack]` / guard page / 设备映射 / `[anon:dalvik-*]`）；
+2. 拿到区域后对照 KO 源码看 `CMD_READ_PROCESS_MEMORY` 对该类 VMA 的处理；
+3. 若确认是 KO 缺陷且上游已修，换新版本 KO 重做 §十一 的两步适配。
+
+
 
 
