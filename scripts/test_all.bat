@@ -22,20 +22,18 @@ set "ROOT=%~dp0.."
 echo === GG-MCP test suite ===
 echo.
 
-echo [1/4] unit tests (build\pc\test_*.exe)...
-if not exist "%ROOT%\build\pc" (
-    echo [FAIL] %ROOT%\build\pc not found.
-    echo        Build the unit tests first: tests\unit\run_tests.bat
+echo [1/4] unit tests (delegated to tests\unit\run_tests.bat)...
+rem 2026-10-21 fix: this stage used to glob build\pc\test_*.exe and run whatever
+rem it found. That included stale binaries whose source had been deleted
+rem (test_ko_downgrade.exe survived after test_ko_downgrade.c was removed), so a
+rem run could "pass" on code that no longer exists. run_tests.bat is the single
+rem source of truth: it rebuilds every test it knows about, then runs them.
+if not exist "%ROOT%\tests\unit\run_tests.bat" (
+    echo [FAIL] tests\unit\run_tests.bat not found
     exit /b 1
 )
-set "RAN="
-for %%t in ("%ROOT%\build\pc\test_*.exe") do (
-    echo   --- %%~nxt ---
-    "%%~ft"
-    if errorlevel 1 ( echo [FAIL] %%~nxt & exit /b 1 )
-    set "RAN=1"
-)
-if not defined RAN ( echo [FAIL] no unit test binaries found in build\pc & exit /b 1 )
+call "%ROOT%\tests\unit\run_tests.bat"
+if errorlevel 1 ( echo [FAIL] unit tests & exit /b 1 )
 echo [OK] unit tests
 echo.
 
