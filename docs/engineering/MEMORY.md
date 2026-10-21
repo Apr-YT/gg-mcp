@@ -133,6 +133,6 @@ python scripts\patch_ko_versions.py build\devmod\all build\ko\X.ko
 > （`server/ida_client.*`、`tests/unit/test_ida_client.cpp` 已删除；`gg_resolve_symbol` 现为纯本地静态解析，
 > 响应不再含 `ida` 字段）。旧实现可从 git 历史恢复。
 - 本会话交付：gg_view_memory / gg_resolve_symbol(+IDA 预留) / gg_pointer_chain / rwproc33 后端全链路
-- 关键文件：agentd/{driver.c,main.c,watch.c,elfsym.c}, server/{ida_client.*,session.cpp}, docs/RWPROC33_ADAPTER.md
+- 关键文件：agentd/{driver.c,main.c,watch.c,elfsym.c}, server/{ida_client.*,session.cpp}, docs/engineering/RWPROC33_ADAPTER.md
 - 新工具脚本：scripts/{patch_ko_versions.py, extract_kernel.py, patch_module_layout_crc.py}
 - 设备当前（22:5x）：rwProcMem Live、agentd pid 19195 运行中、MCP 服务器后台任务运行中

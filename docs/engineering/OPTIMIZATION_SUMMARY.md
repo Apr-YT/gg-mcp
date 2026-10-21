@@ -333,8 +333,8 @@ git show 4e1f704:scripts/build_pc.bat  > scripts/build_pc.bat
 
 ## 📚 相关文档
 
-- `docs/ARCHITECTURE.md` - 架构文档
-- `docs/PROTOCOL.md` - 协议文档
+- `docs/engineering/ARCHITECTURE.md` - 架构文档
+- `docs/engineering/PROTOCOL.md` - 协议文档
 - ~~`design-system/gg-mcp/MASTER.md`~~（UI 线已下线，可从 git 历史 526d3ff 前恢复）
 - ~~`docs/FLOAT_WINDOW_UI_DESIGN.md`~~（UI 线已下线）
 

@@ -11,7 +11,7 @@
  *   4) rwproc33 型（abcz316/rwProcMem33, 开源）: 两个 LKM（rwProcMem_module +
  *      hwBreakpointProc_module），各自创建 /proc/<AUTH_KEY>/<AUTH_KEY> 节点，
  *      用 read() 系统调用走 33 字节头协议（非 ioctl）。
- *      详见 docs/RWPROC33_ADAPTER.md。
+ *      详见 docs/engineering/RWPROC33_ADAPTER.md。
  *
  * KO 选择支持版本族容错：文件名版本与模式（如 6.12.*）做族匹配，
  * 同族补丁号任意均可加载（复用 version.c 的 version_match_family）。

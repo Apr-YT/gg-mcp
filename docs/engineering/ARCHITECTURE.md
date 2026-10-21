@@ -22,7 +22,7 @@ AI agent ──MCP(JSON-RPC)──▶ gg-ghost-mcp ──wire 二进制帧──
 
 - **MCP 层**：JSON-RPC 2.0（initialize / tools/list / tools/call / ping）。stdio 用换行分隔 JSON；HTTP 用 `POST /mcp`。
 - **wire 层**：20 字节头 `{magic,ver,cmd,seq,flags,payload_len}` + JSON 负载（请求 `{"p":{}}`，响应 `{"r":{}}`，错误 `{"e":{code,message}}`）。定义见 `shared/wire_protocol.h`（PC/设备共用唯一事实源）。
-- **驱动层**：见 docs/PROTOCOL.md。
+- **驱动层**：见 docs/engineering/PROTOCOL.md。
 
 ## 3. KO 驱动加载与通道（核心）
 
@@ -44,7 +44,7 @@ AI agent ──MCP(JSON-RPC)──▶ gg-ghost-mcp ──wire 二进制帧──
   自检状态 `ST_DRIVER`（`state=kernel-driver`）。
 - **qx 型**（Aloha 开源 QX9-10）：隐藏进程持有已删除节点 → `/proc/<pid>/fd/3` 取主次号 →
   `mknod /dev/ggqx` → `open` → `init_key(0x800)`；读写 `0x801/0x802`（COPY_MEMORY 自然对齐），
-  模块基址 `0x803`。自检状态 `ST_DRIVER`（`state=kernel-driver`）。协议详见 docs/PROTOCOL.md。
+  模块基址 `0x803`。自检状态 `ST_DRIVER`（`state=kernel-driver`）。协议详见 docs/engineering/PROTOCOL.md。
 
 降级链：KO 通道 → `process_vm_readv` → `/proc/<pid>/mem`，任一层失败自动切换，`kernel_status` 标记状态。
 

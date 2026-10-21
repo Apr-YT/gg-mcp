@@ -1,5 +1,13 @@
 # GG-MCP 优化项目检查点审查报告
 
+> ⚠️ **历史快照声明（2026-08-27，勿当现状）**：本文是 2026-08-27 的检查点审查记录，**其中部分结论已被后续提交推翻**，逐项更正如下：
+> 1. 「error.h / mempool / atomic / perf 优化已落地」**不实** —— 这四个模块从未进入任何构建脚本，`error.h` 的宏全仓实际调用 0 处；因零引用已于 2026-08-28 归档至 `archive/framework_v1/`。实际接线并留用的只有 `atomic_simple.h` / `perf_simple.h` / `log_enhance.h`。
+> 2. 「综合性能提升 25-35%」「代码质量 72→85」「文档完整 85%→95%」为**未实测的预估**，无基准数据、无测量工具输出支撑。
+> 3. 「所有备份文件完整」已失效 —— 相关 `.backup` 文件已删除；`design-system/...` 与 UI 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
+> 4. 文中「9 项优化任务全部完成」的判定口径过宽 —— 成立的只有 -O3/-flto 编译优化与 search.c/watch.c 的针对性健壮性修复。
+>
+> 同期同源的更正声明见 `docs/engineering/OPTIMIZATION_SUMMARY.md` 文首。**本文仅作历史留档，不代表当前代码状态，引用前请以代码与 AGENTS.md 为准。**
+
 **审查时间**: 2026-08-27T09:29:12.033Z
 **审查类型**: 维护通道审查
 **审查范围**: 代码质量、性能、安全性、文档
@@ -98,7 +106,7 @@
 
 ## 📝 文档完整性
 
-- ✅ `docs/OPTIMIZATION_SUMMARY.md` - 优化总结
+- ✅ `docs/engineering/OPTIMIZATION_SUMMARY.md` - 优化总结
 - ✅ `design-system/gg-mcp/MASTER.md` - 设计系统
 - ✅ 所有备份文件完整
 - ✅ 代码注释良好
@@ -125,7 +133,7 @@
 | `agentd/atomic.h` | 6.2KB | 头文件 |
 | `agentd/perf.h` | 5.8KB | 头文件 |
 | `agentd/perf.c` | 3.7KB | 实现文件 |
-| `docs/OPTIMIZATION_SUMMARY.md` | 5.6KB | 文档 |
+| `docs/engineering/OPTIMIZATION_SUMMARY.md` | 5.6KB | 文档 |
 | 备份文件 | 4个 | 备份 |
 
 **总计**: ~33KB 新增代码

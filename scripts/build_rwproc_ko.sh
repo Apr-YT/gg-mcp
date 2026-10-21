@@ -3,7 +3,7 @@
 #
 # 背景: 模块必须在与设备内核同源的 Linux 构建环境里编译（本机 Windows checkout 无内核构建产物）。
 # 设备: REDMI myron, 内核 6.12.69-android16-6-4k（GKI android16-6.12, SUBLEVEL=69,
-#       CONFIG_CFI_ICALL_NORMALIZE_INTEGERS=y 已开启 —— 见 docs/RWPROC33_ADAPTER.md §十）
+#       CONFIG_CFI_ICALL_NORMALIZE_INTEGERS=y 已开启 —— 见 docs/engineering/RWPROC33_ADAPTER.md §十）
 #
 # 用法:
 #   KERN_SRC=/path/to/android16-6.12 \

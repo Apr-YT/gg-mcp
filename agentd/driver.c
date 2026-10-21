@@ -306,7 +306,7 @@ int qx_hwbp_disable(gg_driver_t *d, pid_t pid) { return qx_hwbp_simple(d, pid, Q
 int qx_hwbp_clear(gg_driver_t *d, pid_t pid)   { return qx_hwbp_simple(d, pid, QX_OP_HWBP_CLEAR); }
 
 /* ---------- rwproc33 型后端（abcz316/rwProcMem33, proc read 33B 头协议） ----------
- * 协议（见 docs/RWPROC33_ADAPTER.md + 上游源码）:
+ * 协议（见 docs/engineering/RWPROC33_ADAPTER.md + 上游源码）:
  *   read(fd, buf, 33 + data_size):
  *     头(33B packed {cmd,p1,p2,p3,buf_size}) 在 buf[0..32], 数据区在 buf[33..]
  *     read() 返回值 = 操作结果长度；负值 = -errno
