@@ -36,18 +36,38 @@ if [ -z "$KOS" ]; then
     exit 2
 fi
 
-# 3) 逐个加载（已加载的跳过）
+# 3) 逐个加载（按内核版本挑选 + 已加载跳过）
+# 同一模块可能同时存在多份、分别对应不同内核（如 6.12.23 与 6.12.69）。
+# 文件名规范：<模块名>_<x.y.z>.ko —— 只加载与当前内核完全一致的那份，
+# 否则会把给别的机器编的模块 insmod 上去（vermagic 拒绝，或更糟：勉强加载后崩）。
+KVER_SHORT=$(uname -r | sed -n 's/^\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+log "当前内核: ${KVER_SHORT:-unknown}（多版本 KO 只加载匹配的）"
+
 for ko in $KOS; do
     name=$(basename "$ko" .ko)
+
+    # 提取文件名末尾的 x.y.z；没有版本后缀则不筛选（兼容旧命名）
+    kov=$(echo "$name" | sed -n 's/.*_\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')
+    if [ -n "$kov" ] && [ -n "$KVER_SHORT" ] && [ "$kov" != "$KVER_SHORT" ]; then
+        log "跳过: $name（对应内核 $kov，当前 $KVER_SHORT）"
+        continue
+    fi
+
     if grep -q "^${name} " /proc/modules 2>/dev/null; then
         log "已加载: $name（跳过）"
         continue
     fi
     log "insmod $ko"
-    if insmod "$ko" 2>>"$LOG"; then
+    err=$(insmod "$ko" 2>&1)
+    rc=$?
+    if [ $rc -eq 0 ]; then
         log "加载成功: $name"
+    elif echo "$err" | grep -qi "exists"; then
+        # 模块开了 hide_by_default 时 /proc/modules 里看不到，重复 insmod 会返回 EEXIST。
+        # 这不是失败，不能报成"加载失败"让人误以为驱动装不上。
+        log "已加载: $name（模块已隐藏，跳过）"
     else
-        log "加载失败: $name（内核版本不匹配？SELinux？权限？）"
+        log "加载失败: $name -> $err"
     fi
 done
 
@@ -58,8 +78,10 @@ if [ "$SE_BEFORE" = "1" ]; then
 fi
 
 # 5) 汇总
-log "== /proc/modules =="
-grep -E "$(ls "$KO_DIR" 2>/dev/null | sed 's/\.ko$//' | tr '\n' '|' | sed 's/|$//')" /proc/modules 2>/dev/null | tee -a "$LOG" || true
+# 注意：模块开了 hide_by_default 后 /proc/modules 里看不到它们，
+# 这里为空是正常的，判断是否成功要看上面的 insmod 结果。
+log "== 相关模块（hide 后可能为空，属正常）=="
+grep -iE "rwProc|hwBreakpoint|apr_dlkm" /proc/modules 2>/dev/null | tee -a "$LOG" || true
 
 log "KO 加载完成。启动 agentd 后可用 gg_kernel_status 自检"
-log "（hook 型期望 state=ko-hook；dev 型期望 state=kernel-driver）"
+log "（hook 型期望 state=ko-hook；rwproc 型期望 state=kernel-driver）"

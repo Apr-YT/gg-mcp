@@ -123,8 +123,15 @@ if (-not $SkipKo) {
         # adb shell 仍无法直接 push 到 $DevDir/ko/。改走 /data/local/tmp 中转 + su 复制。
         New-Item -ItemType Directory -Force -Path "$Stage\ko" | Out-Null
         foreach ($f in $koFiles) { Copy-Item $f.FullName "$Stage\ko\" -Force }
+        # 中转目录也要先清：它跨次保留，旧文件会被一起 cp 过去
+        Adb-Sh "rm -rf $TmpDir/ko" | Out-Null
         Adb-Sh "mkdir -p $TmpDir/ko" | Out-Null
         foreach ($f in $koFiles) { Adb-Cmd "push" "$Stage\ko\$($f.Name)" "$TmpDir/ko/" }
+        # 清空目标目录再复制：文件名规范变化后旧 .ko 会残留，
+        # 而 install_ko.sh 会挨个 insmod —— 结果同一模块被加载多份实例
+        # （hide_by_default 下 rmmod 不可用，只能重启清理）。
+        # 先 push 到 tmp 成功后再清，避免中途失败把设备上的 KO 删空。
+        Adb-Sh "su -c ""rm -f $DevDir/ko/*.ko""" | Out-Null
         Adb-Sh "su -c ""cp $TmpDir/ko/*.ko $DevDir/ko/""" | Out-Null
         Adb-Sh "su -c ""chmod 644 $DevDir/ko/*.ko""" | Out-Null
         Adb-Sh "su -c ""sh $DevDir/install_ko.sh""" | ForEach-Object { Write-Host "  $_" }
