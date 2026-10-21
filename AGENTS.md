@@ -53,6 +53,11 @@ python tests\unit\check_kernel_only.py
 > - `run_tests.bat` 的护栏探测已修（此前是死代码）：找不到 python 会**直接 `exit /b 1`**，
 >   不再静默跳过报假绿。确需跳过时显式设 `GG_SKIP_GUARDRAILS=1`；
 >   或用 `GG_PYTHON=<python.exe 全路径>` 指定解释器。
+> - **WSL2 已装（2026-10-21）**：`Ubuntu 24.04.5`（WSL 3.0.3 / 内核 6.18.54.1），
+>   磁盘在 `D:\WSL\Ubuntu`，swap 在 `D:\WSL\swap.vhdx`，apt 走清华源，gcc 13.3 + make 4.3。
+>   用途：跑 Windows 上无法验证的 POSIX 行为（如 `install_file` 的 rename 覆盖语义）。
+>   `run_tests.bat` 末尾会自动调用 `tests/unit/run_tests_wsl.sh`，无 WSL 时明确 SKIP。
+>   直接编译 `/mnt/d/...` 可用但 9p 较慢，重负载建议把源码放 WSL 内部的 `/home`。
 
 设备：Redmi myron（serial `134d2f8`，KernelSU root，内核 6.12.69，SELinux Permissive）。
 adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；当前无设备连接）。
