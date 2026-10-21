@@ -336,7 +336,9 @@ int AgentClient::write_frame(int fd, uint16_t cmd, uint32_t seq, const std::stri
     h.flags = GGWF_REQ;
     h.payload_len = static_cast<uint32_t>(payload.size());
     std::string enc = payload;
-    if (enc_on_) {
+    /* 空负载时不能对 &enc[0] 取址（C++11 起 s[0] 在 size()==0 时返回不可修改的
+     * 引用，取非 const 指针是 UB）。当前调用点都非空，但接口不该依赖这一点。 */
+    if (enc_on_ && !enc.empty()) {
         gg_xor_payload(reinterpret_cast<unsigned char*>(&enc[0]), enc.size());
         h.flags |= GGWF_ENC;
         h.payload_len = static_cast<uint32_t>(enc.size());
@@ -456,13 +458,15 @@ int AgentClient::call(uint16_t cmd, const json& params, json* out) {
     for (;;) {
         int rr = read_frame(fd_, &h, &resp, deadline);
         if (rr < 0) {
-            GG_LOG(1, "[wire] read_frame failed: fd=%d rc=%d err=%d t=%lldms\n", fd_, rr,
+            /* 平台错误码先取到局部变量：#ifdef 不能放进宏参数，
+             * 否则 cppcheck 报 directiveAsMacroParameter 且读代码的人要跨条件编译看。 */
 #ifdef _WIN32
-                    (int)WSAGetLastError()
+            const int io_err = (int)WSAGetLastError();
 #else
-                    errno
+            const int io_err = errno;
 #endif
-                    , (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+            GG_LOG(1, "[wire] read_frame failed: fd=%d rc=%d err=%d t=%lldms\n", fd_, rr, io_err,
+                    (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::steady_clock::now().time_since_epoch()).count());
             GG_CLOSE_SOCK(static_cast<sock_t>(fd_));
             fd_ = -1;

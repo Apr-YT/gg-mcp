@@ -81,7 +81,9 @@ static LoadResult load_config(const std::string& path, ServerConfig* cfg) {
         std::cerr << "[GG-GHOST-MCP][FATAL] agent_port out of range: " << cfg->agent_port << "\n";
         return LOAD_INVALID;
     }
-    if (cfg->max_save_bytes == 0) {
+    /* 只判 ==0 会放过负数：负的 max_save_bytes 让 len > max 恒真，
+     * 表现为"这个功能永远拒绝"，而配置里看不出错。 */
+    if (cfg->max_save_bytes <= 0) {
         std::cerr << "[GG-GHOST-MCP][FATAL] max_save_bytes must be > 0\n";
         return LOAD_INVALID;
     }

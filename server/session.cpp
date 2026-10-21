@@ -83,6 +83,11 @@ static bool parse_addr(const json& v, uint64_t* out) {
         const std::string s = v.get<std::string>();
         char* end = nullptr;
         errno = 0;
+        /* strtoull 接受前导 '-' 并做模运算：'-1' → 0xFFFFFFFFFFFFFFFF，且不设 ERANGE。
+         * 不拦的话，写错的负地址会被当成一个巨大的合法地址去读。 */
+        size_t i = 0;
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) i++;
+        if (i < s.size() && s[i] == '-') return false;
         unsigned long long a = strtoull(s.c_str(), &end, 0);
         if (end == s.c_str() || *end != '\0' || errno == ERANGE) return false;
         *out = static_cast<uint64_t>(a);
@@ -120,6 +125,27 @@ static bool parse_len(const json& v, long long def, long long maxv, long long* o
     if (n <= 0 || n > maxv) return false;
     *out = n;
     return true;
+}
+
+// force 参数：只接受 0/1（bool / 整数 / 数字字符串）。
+// 旧写法 a["force"].get<int>() 在传 "1"/true/null 时会抛 json::type_error，
+// 被协议层统一吞成 -32603 Internal error —— 明明是参数错，却报成服务端故障。
+static bool parse_flag01(const json& v, int* out) {
+    if (v.is_null()) { *out = 0; return true; }
+    if (v.is_boolean()) { *out = v.get<bool>() ? 1 : 0; return true; }
+    if (v.is_number_integer()) {
+        long long n = v.get<long long>();
+        if (n != 0 && n != 1) return false;
+        *out = static_cast<int>(n);
+        return true;
+    }
+    if (v.is_string()) {
+        const std::string s = v.get<std::string>();
+        if (s == "0") { *out = 0; return true; }
+        if (s == "1") { *out = 1; return true; }
+        return false;
+    }
+    return false;
 }
 
 // 把 uint64 地址格式化成下行用的字符串
@@ -245,6 +271,8 @@ int Session::norm_op(const json& o) {
     return -1;
 }
 
+// 会话概览。仅在 call_tool 的会话锁内调用（它读 client_.last_error，
+// 而该字段由 AgentClient::call 在另一把锁下写）。
 json Session::local_status() {
     json out;
     json ks;
@@ -333,7 +361,10 @@ json tool_read(Session::CallCtx& c, const json& a) {
         return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     c.params["addr"] = addr_to_wire(addr);
     if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
-    if (a.contains("force")) c.params["force"] = a["force"].get<int>();
+    int force = 0;
+    if (!parse_flag01(a.contains("force") ? a["force"] : json(), &force))
+        return c.fail(GGERR_BAD_REQUEST, "force must be 0 or 1");
+    if (force) c.params["force"] = force;
     return c.send(GGCMD_READ);
 }
 json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / gg_hex_dump
@@ -395,7 +426,9 @@ json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / 
         if (addr > UINT64_MAX - static_cast<uint64_t>(len))
             return c.fail(GGERR_BAD_REQUEST, "addr + len overflows the address space");
 
-        int force = a.contains("force") ? a["force"].get<int>() : 0;
+        int force = 0;
+        if (!parse_flag01(a.contains("force") ? a["force"] : json(), &force))
+            return c.fail(GGERR_BAD_REQUEST, "force must be 0 or 1");
 
         // 先写 .part，全部段成功才改名 —— 避免中途失败把同名旧文件截断成半截数据。
         ensure_parent_dirs(path);
@@ -478,7 +511,10 @@ json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / 
         return c.fail(GGERR_BAD_REQUEST, "len must be an integer in 1..65536");
     c.params["addr"] = addr_to_wire(addr);
     c.params["len"] = len;
-    if (a.contains("force")) c.params["force"] = a["force"].get<int>();
+    int force = 0;
+    if (!parse_flag01(a.contains("force") ? a["force"] : json(), &force))
+        return c.fail(GGERR_BAD_REQUEST, "force must be 0 or 1");
+    if (force) c.params["force"] = force;
     return c.send(GGCMD_READ_BYTES);
 }
 json tool_view_memory(Session::CallCtx& c, const json& a) {
@@ -492,7 +528,10 @@ json tool_view_memory(Session::CallCtx& c, const json& a) {
     }
     c.params["range"] = rng;
     if (a.contains("element_type")) c.params["element_type"] = a["element_type"];
-    if (a.contains("force")) c.params["force"] = a["force"].get<int>();
+    int force = 0;
+    if (!parse_flag01(a.contains("force") ? a["force"] : json(), &force))
+        return c.fail(GGERR_BAD_REQUEST, "force must be 0 or 1");
+    if (force) c.params["force"] = force;
     return c.send(GGCMD_VIEW_MEMORY);
 }
 json tool_write(Session::CallCtx& c, const json& a) {
@@ -721,6 +760,14 @@ const ToolEntry kTools[] = {
 }  // namespace
 
 json Session::call_tool(const std::string& name, const json& args) {
+    /* HTTP 传输下 httplib 用线程池并发处理 POST /mcp，本函数会并发进入。
+     * AgentClient::mtx_ 只串行化单次 call，保护不到两件事：
+     *   - client_.last_error / last_outcome 的跨调用读写（std::string 并发写 = UB）；
+     *   - device_call 的 close() + 重放会把另一个线程正在用的连接掐断。
+     * 用会话级锁把整次工具调用串起来。设备端本来就单连接串行，
+     * 这把锁不会带来额外的实际串行代价。
+     * 注意：local_status() 假定调用方持有本锁，不要再自己加锁（std::mutex 非递归）。 */
+    std::lock_guard<std::mutex> lk(mtx_);
     for (const ToolEntry& t : kTools) {
         if (name == t.name) {
             // 写操作在 safe_mode 下本地拒绝（双保险；表驱动 write_op 字段为单一数据源）
