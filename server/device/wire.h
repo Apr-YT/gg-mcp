@@ -45,7 +45,8 @@ public:
     int ensure_connected();
     void close();
 
-    // 发请求并等待响应。返回 0 成功（out 为 {"r":...}）；负值为 GGERR_*。
+    // 发请求并等待响应。返回 0 成功（out 为 {"r":...}），失败返回**正的** GGERR_*（枚举本身即 1..14）。
+    // 注意不是负值：调用方一律用 rc != 0 判定，若照旧注释写成 rc < 0 会恒假。
     // 失败时 last_outcome 给出细分语义：只有 ConnectFailed 允许上层安全重放。
     int call(uint16_t cmd, const json& params, json* out);
 
