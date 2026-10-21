@@ -1,12 +1,12 @@
 @echo off
 rem build_ndk.bat - build device artifacts with Android NDK (agentd + hook + stub)
 rem usage: build_ndk.bat [NDK dir] [Capstone dir]
-rem   NDK default:      D:\Kiln\android-ndk-r27d-windows
+rem   NDK default:      D:\Kiln\android-ndk-r30
 rem   Capstone default: D:\Kiln\capstone\capstone-5.0.1
 setlocal
 set ROOT=%~dp0..
 set NDK=%1
-if "%NDK%"=="" set NDK=D:\Kiln\android-ndk-r27d-windows
+if "%NDK%"=="" set NDK=D:\Kiln\android-ndk-r30
 set CAPSTONE=%2
 if "%CAPSTONE%"=="" set CAPSTONE=D:\Kiln\capstone\capstone-5.0.1
 set BIN=%NDK%\toolchains\llvm\prebuilt\windows-x86_64\bin
