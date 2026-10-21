@@ -57,6 +57,9 @@ static void read_comm(pid_t pid, char *out, size_t outsz) {
     close(fd);
     if (n <= 0) return;
     buf[n] = 0;
+    /* /proc/<pid>/comm 以换行结尾。不裁掉会让 comm 变成 "init\n"，
+     * 既污染 JSON 输出，也让按进程名比较（attach by name）永远匹配不上。 */
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
     snprintf(out, outsz, "%s", buf);
 }
 

@@ -91,6 +91,11 @@ enum gg_cmd {
                                  * 负载 {"p":{"type":"annotate","data":{...}}} → 事件 {"ev":{"type":...,"data":...}} */
     GGCMD_GHOST_TAP,            /* 内核虚拟触摸: 单点 tap {"p":{"x":..,"y":..,"hold_ms":..}} */
     GGCMD_GHOST_SWIPE,          /* 内核虚拟触摸: 滑动 {"p":{"x1":..,"y1":..,"x2":..,"y2":..,"ms":..}} */
+    /* 握手鉴权（必须放在枚举末尾，保证既有命令码的数值不变）：
+     * 请求 {"p":{"key":"<hex>"}}；成功响应 {"r":{"authed":true}}，失败 GGERR_PERM。
+     * 未携带有效密钥的连接只允许 PING / AUTH，其余命令一律 GGERR_PERM。
+     * 目的是堵住「设备上任意本地 App 连 127.0.0.1:34127 即可获得 root 能力」的面。 */
+    GGCMD_AUTH,
     GGCMD_MAX
 };
 

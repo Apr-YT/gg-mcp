@@ -55,6 +55,29 @@ static _Thread_local char g_last_resp[8192];
 static _Thread_local int  g_last_resp_ok = 0;
 static _Thread_local int  g_last_resp_set = 0;
 
+/* ---------------- 握手鉴权 + 并发闸门 ---------------- */
+
+/* 共享密钥（hex 字符串）。来源优先级：--wire-key > --wire-key-file > 空。
+ * 空串 = 不启用鉴权：设备上任何拿到 INTERNET 权限的本地 App 都能连
+ * 127.0.0.1:<port> 直接调用 GGCMD_SHELL / WRITE / LOAD_GG（agentd 是 root）。
+ * 因此启动时会打印醒目警告，正式部署必须配置。 */
+static char g_wire_key[65] = {0};
+
+/* 并发连接上限：accept 后无限 pthread_create，本地进程可用几千连接耗尽
+ * 线程栈与 fd 把 agentd 拖死（listen 的 backlog 只限制未 accept 的队列）。 */
+#define GG_MAX_CLIENTS 8
+static atomic_int g_active_clients;
+
+/* 常量时间比较：避免按首个不同字节提前返回、泄露密钥前缀。 */
+static int ct_equal(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    if (la != lb) return 0;
+    unsigned char d = 0;
+    for (size_t i = 0; i < la; i++) d |= (unsigned char)(a[i] ^ b[i]);
+    return d == 0;
+}
+
+
 void log_msg(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -64,6 +87,17 @@ void log_msg(const char *fmt, ...) {
         fflush(g_eng.logf);
     }
     va_end(ap);
+}
+
+/* 严格解析地址字符串；失败返回 0。详见 engine_internal.h 的说明。 */
+int parse_u64_strict(const char *s, uint64_t *out) {
+    if (!s || !*s) return 0;
+    char *end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(s, &end, 0);
+    if (end == s || *end != '\0' || errno == ERANGE) return 0;
+    if (out) *out = (uint64_t)v;
+    return 1;
 }
 
 /* ---------------- 帧收发 ---------------- */
@@ -288,6 +322,7 @@ static const char *cmd_name(uint16_t cmd) {
     case GGCMD_RELAY_EVENT:        return "gg_relay_event";
     case GGCMD_GHOST_TAP:          return "gg_ghost_tap";
     case GGCMD_GHOST_SWIPE:        return "gg_ghost_swipe";
+    case GGCMD_AUTH:               return "gg_auth";
     default:                       return "gg_unknown";
     }
 }
@@ -487,6 +522,35 @@ static uint64_t parse_value_str(int vtype, const char *s, int *ok) {
 }
 
 /* ---------------- 各命令处理 ---------------- */
+
+/* GGCMD_AUTH：握手。成功后本连接才放行其余命令（见 dispatch 的握手门）。
+ * 未配置密钥时走「显式无鉴权」模式并回成功，让客户端握手流程保持统一；
+ * 启动日志已打印警告，不在这里二次报错刷屏。 */
+static void h_auth(int fd, uint32_t seq, cJSON *p, int *authed) {
+    if (g_wire_key[0] == '\0') {
+        *authed = 1;
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddBoolToObject(r, "authed", 1);
+        cJSON_AddBoolToObject(r, "auth_disabled", 1);   /* 客户端可据此提示风险 */
+        send_ok(fd, GGCMD_AUTH, seq, r);
+        cJSON_Delete(r);
+        return;
+    }
+    cJSON *kj = cJSON_GetObjectItem(p, "key");
+    const char *k = (kj && cJSON_IsString(kj)) ? kj->valuestring : NULL;
+    if (!k || !ct_equal(k, g_wire_key)) {
+        /* 只记录失败类型，绝不把密钥本身或对端提交值写进日志 */
+        log_msg("auth: rejected (%s)", k ? "key mismatch" : "key missing");
+        send_err(fd, GGCMD_AUTH, seq, GGERR_PERM, "wire auth failed");
+        return;
+    }
+    *authed = 1;
+    log_msg("auth: accepted");
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "authed", 1);
+    send_ok(fd, GGCMD_AUTH, seq, r);
+    cJSON_Delete(r);
+}
 
 static void h_ping(int fd, uint32_t seq, cJSON *p) {
     cJSON *r = cJSON_CreateObject();
@@ -969,10 +1033,21 @@ static void h_get_results(int fd, uint32_t seq, cJSON *p) {
 
     uint64_t *addrs = malloc(limit * sizeof(uint64_t));
     uint64_t *vals = malloc(limit * sizeof(uint64_t));
+    /* 分配失败必须明确报错：旧实现在 addrs/vals 任一为 NULL 时静默返回空结果集，
+     * 调用方会把它当成「这页确实没数据」，从而误判搜索结果已空。 */
+    if (!addrs || !vals) {
+        free(addrs);
+        free(vals);
+        send_err(fd, GGCMD_GET_RESULTS, seq, GGERR_INTERNAL, "oom");
+        return;
+    }
     size_t got = 0;
-    if (addrs && vals) {
-        results_get_page(&g_eng.drv, g_eng.session_pid, &g_eng.results,
-                         offset, limit, addrs, vals, type, &got);
+    if (results_get_page(&g_eng.drv, g_eng.session_pid, &g_eng.results,
+                         offset, limit, addrs, vals, type, &got) != 0) {
+        free(addrs);
+        free(vals);
+        send_err(fd, GGCMD_GET_RESULTS, seq, GGERR_INTERNAL, "page read failed");
+        return;
     }
     cJSON *r = cJSON_CreateObject();
     cJSON *items = cJSON_AddArrayToObject(r, "results");
@@ -1495,7 +1570,7 @@ static void h_relay_event(int fd, uint32_t seq, cJSON *p) {
     cJSON_Delete(r);
 }
 
-static void dispatch(int fd, gg_wire_header_t *h, const char *payload) {
+static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *authed) {
     uint32_t seq = h->seq;
     cJSON *root = cJSON_Parse(payload);
     cJSON *p = NULL;
@@ -1504,6 +1579,46 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload) {
         if (pj) p = pj;
     }
     if (!p) { send_err(fd, h->cmd, seq, GGERR_BAD_REQUEST, "payload must be {\"p\":{...}}"); if (root) cJSON_Delete(root); return; }
+
+    /* 握手门：未认证的连接只放行 AUTH 与 PING（PING 无副作用，用于探活与部署自检）。
+     * 位置在 payload 解析之后、safe_mode 之前 —— AUTH 需要读 {"p":{"key":...}}，
+     * 且认证失败时不该暴露 safe_mode / 驱动状态等引擎信息。
+     * 这一层堵的是「本地任意 App 连上回环端口即获得 root 能力」的面。 */
+    if (h->cmd == GGCMD_AUTH) {
+        h_auth(fd, seq, p, authed);
+        cJSON_Delete(root);
+        return;
+    }
+    if (!*authed && h->cmd != GGCMD_PING) {
+        log_msg("gate: cmd %u rejected (unauthenticated)", (unsigned)h->cmd);
+        send_err(fd, h->cmd, seq, GGERR_PERM, "wire auth required");
+        cJSON_Delete(root);
+        return;
+    }
+
+    /* 地址类参数统一校验：agentd 内有 17 处裸 strtoull(s, NULL, 0)，
+     * 非法输入会静默得到 0，随后拿着地址 0 去读内存 —— 调用方看到的错误是
+     * 「读失败」而不是「地址写错了」，排查成本极高。
+     * 集中在这里拦一次，比在 17 个 handler 里各写一遍可靠，也不会漏。
+     * PC 端已统一下发 "0x..." 字符串；这里同时容忍 JSON 数字形式以兼容旧客户端。 */
+    {
+        static const char *const addr_keys[] = {"addr", "base", "pc", "fp", "sp", "lr", NULL};
+        for (int i = 0; addr_keys[i]; i++) {
+            cJSON *a = cJSON_GetObjectItem(p, addr_keys[i]);
+            if (!a) continue;
+            int ok;
+            if (cJSON_IsString(a))      ok = parse_u64_strict(a->valuestring, NULL);
+            else if (cJSON_IsNumber(a)) ok = (a->valuedouble >= 0);
+            else                        ok = 0;
+            if (!ok) {
+                log_msg("gate: cmd %u bad address arg '%s'", (unsigned)h->cmd, addr_keys[i]);
+                send_err(fd, h->cmd, seq, GGERR_BAD_REQUEST,
+                         "invalid address argument (expected 0x-prefixed string)");
+                cJSON_Delete(root);
+                return;
+            }
+        }
+    }
 
     /* safe_mode 双保险: 单一破坏性命令清单, 在分发前统一拦截。
      * 单一事实源, 消除各 handler 散落检查导致的漏拦
@@ -1589,6 +1704,9 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload) {
     case GGCMD_RELAY_EVENT:        h_relay_event(fd, seq, p); break;
     case GGCMD_GHOST_TAP:          h_ghost_tap(fd, seq, p); break;
     case GGCMD_GHOST_SWIPE:        h_ghost_swipe(fd, seq, p); break;
+    /* AUTH 已在 dispatch 的握手门里提前处理并 return；这里保留 case 只为
+     * 消除 -Wswitch 告警并让命令表保持完整。 */
+    case GGCMD_AUTH:               h_auth(fd, seq, p, authed); break;
     default:
         send_err(fd, h->cmd, seq, GGERR_BAD_REQUEST, "unknown command");
         break;
@@ -1609,6 +1727,7 @@ fast_done:
 
 static void *conn_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
+    int authed = 0;   /* 本连接是否已通过 GGCMD_AUTH；未认证只放行 PING/AUTH */
     struct timeval tv = { .tv_sec = 300, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     tv.tv_sec = 5;   /* 发送超时收紧: 事件广播 best-effort, 慢客户端最多拖 5s */
@@ -1635,11 +1754,12 @@ static void *conn_thread(void *arg) {
         /* 请求负载解密（客户端若开 GGWF_ENC 则 XOR; 未开保持明文, 向后兼容） */
         if ((h.flags & GGWF_ENC) && h.payload_len)
             gg_xor_payload((unsigned char *)payload, h.payload_len);
-        dispatch(fd, &h, payload);
+        dispatch(fd, &h, payload, &authed);
         free(payload);
     }
     clients_unregister(fd);
     close(fd);
+    atomic_fetch_sub(&g_active_clients, 1);
     return NULL;
 }
 
@@ -1659,6 +1779,8 @@ static void print_usage(const char *argv0) {
         "           [--qx-key <key>]              # qx 型驱动 init_key 密钥（可选）\n"
         "           [--rwproc-key <key>]          # rwproc33 内存模块 proc 节点 auth key\n"
         "           [--rwproc-bp-key <key>]       # rwproc33 断点模块 proc 节点 auth key\n"
+        "           [--wire-key <hex>]            # wire 握手密钥（PC 端须配置同一值）\n"
+        "           [--wire-key-file <path>]      # 从文件读握手密钥（推荐：0600 权限，仅 root 可读）\n"
         "           [--log /path/log] [--safe] [--shell]\n",
         argv0);
 }
@@ -1687,6 +1809,7 @@ int main(int argc, char **argv) {
     static char dev_path_buf[128], qx_key_buf[0x100];
     static char rwproc_key_buf[128], rwproc_bp_key_buf[128], logpath_buf[256];
     static char ko_pattern_buf[64];
+    static char wire_key_buf[65], wire_key_file_buf[256];
     const char *dtype = dtype_buf, *ko_dir = ko_dir_buf, *ko_file = ko_file_buf;
     const char *dev_path = dev_path_buf, *qx_key = qx_key_buf;
     const char *rwproc_key = rwproc_key_buf, *rwproc_bp_key = rwproc_bp_key_buf;
@@ -1698,6 +1821,7 @@ int main(int argc, char **argv) {
     snprintf(ko_pattern_buf, sizeof(ko_pattern_buf), "%s", "6.12.*");
     ko_file_buf[0] = dev_path_buf[0] = qx_key_buf[0] = 0;
     rwproc_key_buf[0] = rwproc_bp_key_buf[0] = logpath_buf[0] = 0;
+    wire_key_buf[0] = wire_key_file_buf[0] = 0;
     int ko_strict = 1;
     int ioctl_read = 0x7e1a, ioctl_write = 0x7e1b;
 
@@ -1722,6 +1846,10 @@ int main(int argc, char **argv) {
             snprintf(rwproc_key_buf, sizeof(rwproc_key_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--rwproc-bp-key") == 0 && i + 1 < argc)
             snprintf(rwproc_bp_key_buf, sizeof(rwproc_bp_key_buf), "%s", argv[++i]);
+        else if (strcmp(argv[i], "--wire-key") == 0 && i + 1 < argc)
+            snprintf(wire_key_buf, sizeof(wire_key_buf), "%s", argv[++i]);
+        else if (strcmp(argv[i], "--wire-key-file") == 0 && i + 1 < argc)
+            snprintf(wire_key_file_buf, sizeof(wire_key_file_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc)
             snprintf(logpath_buf, sizeof(logpath_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--safe") == 0) g_eng.safe_mode = 1;
@@ -1734,6 +1862,40 @@ int main(int argc, char **argv) {
             print_usage(argv[0]);
             return 1;
         }
+    }
+
+    /* ---- 握手密钥装载：--wire-key 优先，其次 --wire-key-file，都没有则无鉴权 ----
+     * 为什么必须有：agentd 以 root 运行且监听回环端口，设备上任何拿到 INTERNET
+     * 权限的 App 都能连上来调 GGCMD_SHELL / WRITE / LOAD_GG。密钥文件应放在
+     * 只有 root 可读的目录（如 /data/adb/...，权限 0600），普通 App 拿不到。
+     * 必须在 hide_process() 之前完成：argv 稍后会被清零。 */
+    if (wire_key_buf[0]) {
+        snprintf(g_wire_key, sizeof(g_wire_key), "%s", wire_key_buf);
+    } else if (wire_key_file_buf[0]) {
+        FILE *kf = fopen(wire_key_file_buf, "re");
+        if (!kf) {
+            fprintf(stderr, "[FATAL] --wire-key-file 无法打开: %s\n", wire_key_file_buf);
+            return 1;
+        }
+        char kline[128] = {0};
+        if (!fgets(kline, sizeof(kline), kf)) kline[0] = 0;
+        fclose(kf);
+        size_t kn = strlen(kline);
+        while (kn && (kline[kn - 1] == '\n' || kline[kn - 1] == '\r')) kline[--kn] = 0;
+        if (kn == 0) {
+            fprintf(stderr, "[FATAL] --wire-key-file 内容为空: %s\n", wire_key_file_buf);
+            return 1;
+        }
+        snprintf(g_wire_key, sizeof(g_wire_key), "%s", kline);
+    }
+    if (g_wire_key[0]) {
+        fprintf(stderr, "[gg-agentd] wire auth: ENABLED (key %zu chars)\n", strlen(g_wire_key));
+    } else {
+        /* 不直接退出，保留旧部署的可用性；但必须让操作者看见风险 */
+        fprintf(stderr,
+                "[gg-agentd][WARN] wire auth DISABLED — 本地任意进程均可连 127.0.0.1:%d "
+                "调用 root 级命令 (shell/write/load_gg)。正式部署请用 "
+                "--wire-key 或 --wire-key-file。\n", port);
     }
 
     hide_process(argc, argv);   /* 清 cmdline 参数与环境（防 ACE 扫 /proc/PID/cmdline） */
@@ -1787,6 +1949,14 @@ int main(int argc, char **argv) {
     log_msg("driver self-test: %s (%s)",
             st > 0 ? "channel OK" : (st == 0 ? "degraded" : "UNAVAILABLE"),
             driver_state_str(g_eng.drv.state));
+    /* hook 型的常见情形：内核里已有 hook（开机脚本或别的途径加载），
+     * 本进程不需要再 insmod，于是上面的 ko_load 必然失败并写下
+     * "no .ko file found in ko dir"。但通道其实可用 —— 这条错误留着会让
+     * gg_kernel_status 一直误报，看起来像驱动没工作。通道自检通过就清掉它。 */
+    if (st > 0 && g_eng.drv.state == ST_KO_HOOK && g_eng.drv.last_error[0]) {
+        log_msg("driver: clearing stale error (channel OK): %s", g_eng.drv.last_error);
+        g_eng.drv.last_error[0] = 0;
+    }
     if (st < 0) {
         log_msg("WARNING: all memory channels unavailable; attach/search will fail");
     }
@@ -1831,8 +2001,17 @@ int main(int argc, char **argv) {
             usleep(100000);
             continue;
         }
+        /* 连接上限：先原子占位再判，避免「判完未占位」的竞态导致瞬时超限 */
+        int now = atomic_fetch_add(&g_active_clients, 1) + 1;
+        if (now > GG_MAX_CLIENTS) {
+            atomic_fetch_sub(&g_active_clients, 1);
+            log_msg("accept: too many clients (max %d), rejected", GG_MAX_CLIENTS);
+            close(cfd);
+            continue;
+        }
         pthread_t th;
         if (pthread_create(&th, NULL, conn_thread, (void *)(intptr_t)cfd) != 0) {
+            atomic_fetch_sub(&g_active_clients, 1);
             close(cfd);
             continue;
         }

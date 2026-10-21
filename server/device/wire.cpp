@@ -125,6 +125,47 @@ int AgentClient::ensure_connected() {
     return ensure_connected_locked();
 }
 
+// 连接建立后的握手。协议要求：未认证的连接只能发 PING/AUTH，其余命令一律 GGERR_PERM。
+// 因此这里失败必须让整次连接失败——否则上层会拿到一堆 PERM 却不知道根因是密钥不匹配。
+int AgentClient::auth_locked(Clock::time_point deadline) {
+    json req{{GG_J_REQ, {{"key", cfg_.wire_key}}}};
+    uint32_t seq = ++seq_;
+    int wr = write_frame(fd_, GGCMD_AUTH, seq, req.dump(), deadline);
+    if (wr != 0) {
+        last_error = "failed to send wire auth request";
+        return -1;
+    }
+    gg_wire_header_t h{};
+    std::string resp;
+    for (;;) {
+        int rr = read_frame(fd_, &h, &resp, deadline);
+        if (rr != 0) {
+            last_error = (rr == -2) ? "wire auth timed out"
+                                    : (rr == -3 ? "malformed frame during wire auth"
+                                                : "connection lost during wire auth");
+            return -1;
+        }
+        if (h.flags & GGWF_EVENT) continue;   // 事件帧可能先到
+        if (h.seq != seq) continue;           // 杂散帧
+        break;
+    }
+    if (h.flags & GGWF_ERR) {
+        // agentd 明确拒绝：几乎总是两边 wire_key 不一致，或对端要求鉴权而本地没配
+        last_error = cfg_.wire_key.empty()
+                         ? "agentd requires wire auth but wire_key is empty in config"
+                         : "agentd rejected wire auth (wire_key mismatch)";
+        return -1;
+    }
+    try {
+        json r = json::parse(resp);
+        if (r.contains("r") && r["r"].value("auth_disabled", false))
+            GG_LOG(1, "[wire] WARNING: agentd runs with wire auth DISABLED\n");
+    } catch (...) {
+        // 响应体形状不符不影响后续请求，agentd 已明确接受
+    }
+    return 0;
+}
+
 // 调用方必须已持有 mtx_
 int AgentClient::ensure_connected_locked() {
     if (fd_ >= 0) return 0;
@@ -135,6 +176,12 @@ int AgentClient::ensure_connected_locked() {
         int rc = tcp_connect();
         if (rc == 0) {
             seq_ = 0;
+            // 握手：必须在任何业务命令之前，否则 agentd 会以 GGERR_PERM 拒绝
+            if (auth_locked(Clock::now() + std::chrono::milliseconds(cfg_.connect_timeout_ms)) != 0) {
+                GG_CLOSE_SOCK(static_cast<sock_t>(fd_));
+                fd_ = -1;
+                return -2;   // -2 = 鉴权失败（区别于连接失败），last_error 已由 auth_locked 设置
+            }
             if (cfg_.print_events) {
                 // 订阅事件流（手机悬浮窗同款）；事件帧由 call() 读取时跳过并打印
                 json req{{GG_J_REQ, json::object()}};
@@ -373,7 +420,13 @@ int AgentClient::call(uint16_t cmd, const json& params, json* out) {
     const Clock::time_point deadline = Clock::now() + std::chrono::milliseconds(cfg_.io_timeout_ms);
 
     if (fd_ < 0) {
-        if (ensure_connected_locked() != 0) {
+        int cr = ensure_connected_locked();
+        if (cr != 0) {
+            if (cr == -2) {
+                // 鉴权被明确拒绝：重连没有意义，也不能归入 ConnectFailed（否则上层会重放）
+                last_outcome = CallOutcome::RemoteError;
+                return GGERR_PERM;
+            }
             last_outcome = CallOutcome::ConnectFailed;
             return GGERR_NO_DEVICE;
         }

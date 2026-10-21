@@ -675,14 +675,20 @@ size_t results_materialize(gg_results_t *r) {
 }
 
 /* 批量读连续地址段：addrs[0..n) 中从 idx 起收集连续段（步长 sz，段长 ≤ GG_SEARCH_CHUNK），
- * 一次 driver_read 拉整段，逐项写入 vals[]。返回段内元素数；段读失败返回 0（调用方回退逐项）。 */
+ * 一次 driver_read 拉整段，逐项写入 vals[]。返回段内元素数；段读失败返回 0（调用方回退逐项）。
+ *
+ * ⚠ max_n 是调用方缓冲区还能容纳的元素数，必须参与循环条件。
+ *   历史缺陷（2026-10-21 修复）：原来的条件只有「结果集剩余」和「段长 ≤ GG_SEARCH_CHUNK」，
+ *   完全不看调用方的 limit —— 而搜索结果天然大量连续地址，于是 bulk 段会按 256KB 上限
+ *   一口气写 seg_n（vt=DWORD 时最多 65536 个 u64 = 512KB）进只有 limit*8 字节的缓冲区，
+ *   单次 gg_get_results(limit=100) 即可造成堆溢出。agentd 是 root 进程，影响面极大。 */
 static size_t bulk_read_segment(gg_driver_t *d, pid_t pid, const uint64_t *addrs,
                                 size_t n, size_t idx, int vtype,
-                                uint8_t *bigbuf, uint64_t *vals) {
+                                uint8_t *bigbuf, uint64_t *vals, size_t max_n) {
     int sz = vt_size(vtype);
     size_t seg_n = 0;
     uint64_t cur = addrs[idx];
-    while (idx + seg_n < n && addrs[idx + seg_n] == cur &&
+    while (idx + seg_n < n && seg_n < max_n && addrs[idx + seg_n] == cur &&
            (seg_n + 1) * (size_t)sz <= GG_SEARCH_CHUNK) {
         seg_n++;
         cur += (uint64_t)sz;
@@ -705,8 +711,10 @@ int results_get_page(gg_driver_t *d, pid_t pid, gg_results_t *r,
     uint8_t *bigbuf = malloc(GG_SEARCH_CHUNK);
     if (!bigbuf) return -1;
     for (size_t i = offset; i < r->count && n < limit; ) {
+        /* 本次最多还能写多少个元素：必须传给 bulk_read_segment，
+         * 否则连续段的批量写会越过 out_addrs/out_values 的 limit 容量。 */
         size_t seg = bulk_read_segment(d, pid, r->addrs, r->count, i, vtype,
-                                       bigbuf, out_values + n);
+                                       bigbuf, out_values + n, limit - n);
         if (seg > 0) {
             for (size_t j = 0; j < seg; j++)
                 out_addrs[n + j] = r->addrs[i + j];

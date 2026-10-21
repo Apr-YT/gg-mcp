@@ -37,6 +37,9 @@ public:
         int connect_timeout_ms = 5000;
         int io_timeout_ms = 300000;     // 搜索可能较久
         bool print_events = false;      // 订阅并打印 agentd 事件帧（调试/监控用）
+        // wire 握手密钥：必须与 agentd 的 --wire-key / --wire-key-file 一致。
+        // 为空时仍会发起握手，由 agentd 决定放行（无密钥的 agentd 会回 auth_disabled）。
+        std::string wire_key;
     };
 
     explicit AgentClient(Config cfg) : cfg_(std::move(cfg)) {}
@@ -58,6 +61,7 @@ private:
 
     int ensure_connected_locked();   // 前提: mtx_ 已持有
     int tcp_connect();               // 单次 TCP 连接（不跑 adb）
+    int auth_locked(Clock::time_point deadline);   // 连接后握手（GGCMD_AUTH）
     // 返回值：0 成功；-1 IO 错误/对端关闭；-2 截止时间到期；-3 协议帧非法
     int read_frame(int fd, gg_wire_header_t* h, std::string* payload, Clock::time_point deadline);
     int write_frame(int fd, uint16_t cmd, uint32_t seq, const std::string& payload, Clock::time_point deadline);

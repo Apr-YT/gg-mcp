@@ -1,0 +1,17 @@
+# 统一行尾，避免 Windows 上的 core.autocrlf 把 shell 脚本转成 CRLF。
+# 背景（2026-10-21）：5 个 .sh 曾被提交成 CRLF，设备上 sh 把 \r 当成命令的一部分，
+# 报 "[18]: : inaccessible or not found" / "return: bad number: 1"，启动脚本直接失效。
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# 二进制（避免 git 尝试规范化）
+*.exe  binary
+*.so   binary
+*.ko   binary
+*.a    binary
+*.png  binary
+*.jpg  binary

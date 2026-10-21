@@ -32,6 +32,8 @@ static void print_banner(const ServerConfig& cfg) {
         " GG 版本族 : " << cfg.gg_version_pattern
         << (cfg.gg_strict ? " (strict)" : " (lenient)") << "\n"
         " safe-mode : " << (cfg.safe_mode ? "ON (read-only)" : "off") << "\n"
+        " wire auth : " << (cfg.wire_key.empty() ? "DISABLED (agentd 若要求鉴权将连不上)"
+                                                 : "ENABLED") << "\n"
         "==============================================\n";
 }
 
@@ -59,6 +61,7 @@ static LoadResult load_config(const std::string& path, ServerConfig* cfg) {
         cfg->http_host = j.value("http_host", cfg->http_host);
         cfg->http_token = j.value("http_token", cfg->http_token);
         cfg->agent_port = j.value("agent_port", cfg->agent_port);
+        cfg->wire_key = j.value("wire_key", cfg->wire_key);
         cfg->adb = j.value("adb", cfg->adb);
         cfg->serial = j.value("serial", cfg->serial);
         cfg->safe_mode = j.value("safe_mode", cfg->safe_mode);

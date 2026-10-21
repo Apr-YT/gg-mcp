@@ -74,14 +74,78 @@ static void ensure_parent_dirs(const std::string& path) {
     }
 }
 
+// 地址参数统一解析：接受 JSON 整数或数字字符串。
+// 为什么必须统一：JSON number 是 double，超过 2^53 的地址（0x7fxxxxxxxxxx 的十进制写法）
+// 会被序列化成科学计数法，agentd 侧 strtoull 解析失败后静默当 0 —— 表现为「读不到」而不是
+// 「地址写错了」。统一转成 "0x..." 字符串下行可以彻底避免精度问题。
+static bool parse_addr(const json& v, uint64_t* out) {
+    if (v.is_string()) {
+        const std::string s = v.get<std::string>();
+        char* end = nullptr;
+        errno = 0;
+        unsigned long long a = strtoull(s.c_str(), &end, 0);
+        if (end == s.c_str() || *end != '\0' || errno == ERANGE) return false;
+        *out = static_cast<uint64_t>(a);
+        return true;
+    }
+    if (v.is_number_unsigned()) { *out = v.get<uint64_t>(); return true; }
+    if (v.is_number_integer()) {
+        long long n = v.get<long long>();
+        if (n < 0) return false;
+        *out = static_cast<uint64_t>(n);
+        return true;
+    }
+    return false;
+}
+
+// 长度参数统一解析：缺省用 def，显式值必须是 1..maxv 的整数。
+// 旧实现对 len 不做任何检查：传字符串会抛 json 异常被吞成 -32603，
+// 传 0 或负数则被静默改成默认值 —— 两者都让调用方看不出是自己参数错了。
+static bool parse_len(const json& v, long long def, long long maxv, long long* out) {
+    long long n = def;
+    if (!v.is_null()) {
+        if (v.is_number_integer()) {
+            n = v.get<long long>();
+        } else if (v.is_string()) {
+            const std::string s = v.get<std::string>();
+            char* end = nullptr;
+            errno = 0;
+            long long t = strtoll(s.c_str(), &end, 0);
+            if (end == s.c_str() || *end != '\0' || errno == ERANGE) return false;
+            n = t;
+        } else {
+            return false;
+        }
+    }
+    if (n <= 0 || n > maxv) return false;
+    *out = n;
+    return true;
+}
+
+// 把 uint64 地址格式化成下行用的字符串
+static std::string addr_to_wire(uint64_t addr) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)addr);
+    return std::string(buf);
+}
+
+
 Session::Session(ServerConfig cfg)
     : cfg_(std::move(cfg)),
-      client_([&] {
+      /* ⚠ 这里必须读 cfg_ 而不是形参 cfg。
+       * 成员按声明顺序初始化：cfg_ 先于 client_，而 cfg_ 的初始化已经把形参
+       * cfg 整体 move 走 —— 此后 cfg.adb / cfg.serial / cfg.wire_key 全是空串，
+       * 只有 POD 的 agent_port 因为 move 对 int 等同拷贝才幸存。
+       * 旧实现读的就是形参，后果是 AgentClient 拿到的 adb 恒为 ""，
+       * 直连失败后 adb forward 拼不出来（adb_safe("") 直接拒绝），
+       * 只能依赖部署脚本预先建好的 forward —— 这也是「重连有时不生效」的根因。 */
+      client_([this] {
           AgentClient::Config ac;
-          ac.adb = cfg.adb;
-          ac.serial = cfg.serial;
-          ac.agent_port = cfg.agent_port;
-          ac.print_events = cfg.print_events;
+          ac.adb = cfg_.adb;
+          ac.serial = cfg_.serial;
+          ac.agent_port = cfg_.agent_port;
+          ac.print_events = cfg_.print_events;
+          ac.wire_key = cfg_.wire_key;
           return ac;
       }()),
       store_(cfg_.annotations_file.empty() ? "annotations.json" : cfg_.annotations_file) {}
@@ -264,7 +328,10 @@ json tool_clear_results(Session::CallCtx& c, const json&) { return c.send(GGCMD_
 // ---- 内存读/写 ----
 json tool_read(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
-    c.params["addr"] = a["addr"];
+    uint64_t addr = 0;
+    if (!parse_addr(a["addr"], &addr))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
+    c.params["addr"] = addr_to_wire(addr);
     if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     if (a.contains("force")) c.params["force"] = a["force"].get<int>();
     return c.send(GGCMD_READ);
@@ -400,8 +467,17 @@ json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / 
             r["warning"] = "local write did not finish cleanly (flush/close/rename failed)";
         return c.ok(r);
     }
-    c.params["addr"] = a["addr"];
-    c.params["len"] = a.value("len", 64);
+    /* 非落盘模式（hex 返回）：addr/len 同样要显式校验 ——
+     * 旧实现直接把 a["addr"] 塞进 params，大地址经 JSON double 会丢精度，
+     * len 传字符串则抛异常被吞成 -32603。上限 65536 与 agentd h_read_bytes 一致。 */
+    uint64_t addr = 0;
+    if (!parse_addr(a["addr"], &addr))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
+    long long len = 64;
+    if (!parse_len(a.contains("len") ? a["len"] : json(), 64, 65536, &len))
+        return c.fail(GGERR_BAD_REQUEST, "len must be an integer in 1..65536");
+    c.params["addr"] = addr_to_wire(addr);
+    c.params["len"] = len;
     if (a.contains("force")) c.params["force"] = a["force"].get<int>();
     return c.send(GGCMD_READ_BYTES);
 }
@@ -422,7 +498,10 @@ json tool_view_memory(Session::CallCtx& c, const json& a) {
 json tool_write(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr") || !a.contains("value"))
         return c.fail(GGERR_BAD_REQUEST, "addr and value required");
-    c.params["addr"] = a["addr"];
+    uint64_t addr = 0;
+    if (!parse_addr(a["addr"], &addr))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
+    c.params["addr"] = addr_to_wire(addr);
     c.params["value"] = a["value"];
     if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     return c.send(GGCMD_WRITE);

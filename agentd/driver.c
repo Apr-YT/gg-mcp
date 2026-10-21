@@ -33,6 +33,7 @@ void log_msg(const char *fmt, ...);
 #include <stdatomic.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(__linux__) || defined(__ANDROID__)
@@ -696,14 +697,33 @@ int rwproc_hwbp_start_all(gg_driver_t *d, pid_t pid, uint64_t addr, int type, in
 
 /* ---------- KO 加载 ---------- */
 
+/* fork+execl 直接执行，不经 shell。
+ * 旧实现是 system("insmod '%s'")，path 来自 ko/ 目录的文件名，
+ * 文件名只要含一个单引号就能闭合引号注入命令 —— 而 agentd 是 root 进程。
+ * 单引号转义只能缓解，根治办法是不经过 shell。
+ * 子进程只调用 async-signal-safe 函数（open/dup2/close/execl/_exit）。 */
+static int run_exec1(const char *bin, const char *arg) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execl(bin, bin, arg, (char *)NULL);
+        _exit(127);   /* exec 失败：insmod 不在该路径 */
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
+}
+
 static int ko_insmod(const char *path) {
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "insmod '%s' 2>/dev/null", path);
-    int rc = system(cmd);
-    if (rc == 0) return 0;
+    if (run_exec1("insmod", path) == 0) return 0;
     /* 部分设备 insmod 不在 PATH：尝试 /system/bin/insmod */
-    snprintf(cmd, sizeof(cmd), "/system/bin/insmod '%s' 2>/dev/null", path);
-    return system(cmd);
+    return run_exec1("/system/bin/insmod", path);
 }
 
 static int ko_in_modules(const char *modname) {
@@ -810,7 +830,7 @@ int ko_load(gg_driver_t *d, const char *dir, const char *file,
             fclose(ef);
         }
     }
-    if (se_was_enforcing) system("setenforce 0 2>/dev/null");
+    if (se_was_enforcing) run_exec1("setenforce", "0");   /* 同样不走 shell */
 
     int rc = 0;
     /* 已加载则跳过 insmod */
@@ -855,7 +875,7 @@ int ko_load(gg_driver_t *d, const char *dir, const char *file,
     }
 out:
     /* 恢复 SELinux enforcing（无论成败） */
-    if (se_was_enforcing) system("setenforce 1 2>/dev/null");
+    if (se_was_enforcing) run_exec1("setenforce", "1");
     return rc;
 }
 

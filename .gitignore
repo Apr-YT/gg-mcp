@@ -25,4 +25,11 @@ exports/
 # 归档的废弃脚本（被最终版取代，勿入仓库）
 scripts/_archive/
 
+# WorkBuddy 会话数据（不是缓存，但也不该入库）
+.workbuddy/
+
+# 临时演示产物
+gg-mcp-*.pptx
+slide-outline.md
+
 __pycache__/

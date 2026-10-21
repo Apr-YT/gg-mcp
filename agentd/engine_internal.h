@@ -59,4 +59,13 @@ void send_err(int fd, uint16_t cmd, uint32_t seq, int code, const char *msg);
 
 void log_msg(const char *fmt, ...);
 
+/* ---------------- 参数解析 helper（实现位于 main.c） ---------------- */
+
+/* 严格解析地址字符串（"0x..." / 十进制）。返回 1 成功、0 非法；out 可为 NULL（只校验）。
+ *
+ * 为什么需要：agentd 里原本有 17 处裸 strtoull(s, NULL, 0)，非法输入一律得到 0，
+ * 然后拿着地址 0 去读内存。调用方看到的错误是"读失败"，而不是"地址写错了" ——
+ * 排查成本极高。dispatch 在分发前统一用本函数校验 addr/base/pc/fp/sp/lr。 */
+int parse_u64_strict(const char *s, uint64_t *out);
+
 #endif /* GG_ENGINE_INTERNAL_H */

@@ -20,6 +20,7 @@ struct ServerConfig {
     std::string adb = "adb";
     std::string serial;
     int agent_port = 34127;      // 设备端 agentd 端口（hide 改造 2026-08-18）
+    std::string wire_key;        // wire 握手密钥：必须与 agentd --wire-key 一致
     std::string gg_version_pattern = "101.*";   // 实际包: 宇航员修改器 = GG 101.1
     bool gg_strict = true;
     bool safe_mode = false;
