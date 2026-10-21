@@ -105,6 +105,37 @@ int main() {
         check(error_code_of(r) == GGERR_BAD_REQUEST, "d4) gg_search_refine bad op -> GGERR_BAD_REQUEST");
     }
 
+    // ---- f1) 负数字符串地址必须被拒 ----
+    // strtoull 接受前导 '-' 并做模运算："-1" → 0xFFFFFFFFFFFFFFFF，且不设 ERANGE。
+    // 旧实现在 dispatch 的集中校验里只看 endptr/ERANGE，负地址会漏过去。
+    {
+        json r = s.call_tool("gg_read", json{{"addr", "-1"}, {"type", "dword"}});
+        check(r.value("isError", false) == true, "f1) addr=\"-1\" -> isError");
+        check(error_code_of(r) == GGERR_BAD_REQUEST, "f1) addr=\"-1\" -> GGERR_BAD_REQUEST");
+
+        r = s.call_tool("gg_read", json{{"addr", "-0x10"}, {"type", "dword"}});
+        check(error_code_of(r) == GGERR_BAD_REQUEST, "f1) addr=\"-0x10\" -> GGERR_BAD_REQUEST");
+
+        r = s.call_tool("gg_read_bytes", json{{"addr", "-1"}, {"len", 4}});
+        check(error_code_of(r) == GGERR_BAD_REQUEST, "f1) gg_read_bytes addr=\"-1\" rejected");
+    }
+
+    // ---- f2) force 只接受 0/1 ----
+    // 旧写法 a["force"].get<int>() 对 "abc" 抛 json::type_error，
+    // 被协议层统一吞成 -32603 Internal error（参数错报成服务端故障）。
+    {
+        json r = s.call_tool("gg_read", json{{"addr", "0x1000"}, {"force", "abc"}});
+        check(r.value("isError", false) == true, "f2) force=\"abc\" -> isError");
+        check(error_code_of(r) == GGERR_BAD_REQUEST, "f2) force=\"abc\" -> GGERR_BAD_REQUEST");
+
+        r = s.call_tool("gg_read", json{{"addr", "0x1000"}, {"force", 2}});
+        check(error_code_of(r) == GGERR_BAD_REQUEST, "f2) force=2 -> GGERR_BAD_REQUEST");
+
+        // 合法值不得被拒（force 合法时才会走到 device_call，无设备 → NO_DEVICE，不是 BAD_REQUEST）
+        r = s.call_tool("gg_read", json{{"addr", "0x1000"}, {"force", 1}});
+        check(error_code_of(r) != GGERR_BAD_REQUEST, "f2) force=1 passes validation");
+    }
+
     std::printf(fails ? "\n== FAILED: %d ==\n" : "\n== ALL PASS ==\n", fails);
     return fails ? 1 : 0;
 }

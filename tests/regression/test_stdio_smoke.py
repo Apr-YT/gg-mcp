@@ -30,6 +30,28 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 EXE = os.path.join(ROOT, "build", "pc", "gg-ghost-mcp.exe")
 CFG = os.path.join(ROOT, "configs", "gg-ghost.json")
 
+# 测试隔离（2026-10-21 审查 F-16）：
+# 用例 5 断言"无设备时必须返回错误而不是挂住"，但它原先直接用仓库配置。
+# 只要本机 adb 有设备、forward 已建立、agentd 在跑，gg_list_processes 就会成功，
+# 这条断言随即假失败 —— 实测 test_all 在有设备在线时直接红。
+# 因此这里生成一份临时配置，把 agent_port 指到 discard 端口（必然无人监听），
+# 让"无设备"路径变成确定性行为，而不是取决于机器的外部状态。
+ISOLATED_CFG = os.path.join(ROOT, "build", "pc", "_smoke_isolated.json")
+
+
+def _write_isolated_cfg():
+    try:
+        with open(CFG, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:  # 配置缺失/损坏时用最小集合，冒烟测试不依赖它
+        cfg = {}
+    cfg["transport"] = "stdio"
+    cfg["agent_port"] = 9   # discard：connect 必然被拒，走 NO_DEVICE 分支
+    os.makedirs(os.path.dirname(ISOLATED_CFG), exist_ok=True)
+    with open(ISOLATED_CFG, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+    return ISOLATED_CFG
+
 passed = 0
 failed = 0
 failures = []
@@ -50,10 +72,12 @@ class Client:
     """Drives the server: one JSON per line in, one JSON per line out."""
 
     def __init__(self):
+        isolated = _write_isolated_cfg()
         self.proc = subprocess.Popen(
             # configs/gg-ghost.json 默认 transport=http，必须显式覆盖，
             # 否则 server 去监听 8788 而不是读 stdin（表现为本脚本永远收不到响应）。
-            [EXE, "--config", CFG, "--transport", "stdio"],
+            # 同时改用隔离配置（agent_port=9），让"无设备"用例不依赖外部设备状态。
+            [EXE, "--config", isolated, "--transport", "stdio"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

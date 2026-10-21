@@ -57,11 +57,9 @@ echo === test_results_page ===
 "%ROOT%\build\pc\test_results_page.exe"
 if errorlevel 1 ( echo [FAIL] test_results_page & exit /b 1 )
 echo === test_elfsym ===
-if exist "%ROOT%\build\native\libKernelGg.so" (
-  "%ROOT%\build\pc\test_elfsym.exe" "%ROOT%\build\native\libKernelGg.so" "%ROOT%\build\native\lib5_stub"
-) else (
-  "%ROOT%\build\pc\test_elfsym.exe"
-)
+rem The GG core injection chain (libKernelGg.so / lib5_stub) was removed on
+rem 2026-10-21; test_elfsym therefore always runs against its own fixture.
+"%ROOT%\build\pc\test_elfsym.exe"
 if errorlevel 1 ( echo [FAIL] test_elfsym & exit /b 1 )
 
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
@@ -172,6 +170,12 @@ if errorlevel 1 ( echo [FAIL] dispatch consistency & exit /b 1 )
 echo === kernel-only guardrail: driver.c stays kernel-side ===
 "%PYEXE%" "%ROOT%\tests\unit\check_kernel_only.py" "%ROOT%"
 if errorlevel 1 ( echo [FAIL] kernel-only guardrail & exit /b 1 )
+rem F-01 guard: rwproc_buf is a process-wide static buffer shared by the search
+rem worker pool and the freeze thread. Its request/result copies must stay inside
+rem the mutex, otherwise threads overwrite each other's data (silent corruption).
+echo === rwproc locking guardrail: shared buffer inside the critical section ===
+"%PYEXE%" "%ROOT%\tests\unit\check_rwproc_locking.py" "%ROOT%"
+if errorlevel 1 ( echo [FAIL] rwproc locking guardrail & exit /b 1 )
 goto :gg_guardrails_done
 
 :gg_skip_guardrails
