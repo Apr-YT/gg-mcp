@@ -132,7 +132,9 @@ static void *watch_loop(void *arg) {
             if (hit) { ptrace(PTRACE_CONT, tid, 0, 0); continue; }
             /* 非监视点 SIGTRAP（目标自身断点等）: 原样转交 */
         }
-        ptrace(PTRACE_CONT, tid, 0, (void *)(long)sig);
+        /* 用 intptr_t 而不是 long：MinGW 是 LLP64（long 只有 32 位），
+         * 转指针会被 -Wint-to-pointer-cast 警告且在高位地址上截断；目标平台 arm64 是 LP64。 */
+        ptrace(PTRACE_CONT, tid, 0, (void *)(intptr_t)sig);
     }
     return NULL;
 }

@@ -197,6 +197,28 @@ exit /b 1
 
 :gg_guardrails_done
 
+rem ---- Linux-only tests ------------------------------------------------------
+rem test_loader.c's install_file uses rename() to overwrite, which only works on
+rem POSIX (Windows rename fails on existing files). Run them inside WSL.
+where wsl >nul 2>nul
+if errorlevel 1 (
+  echo [SKIP] WSL not available - Linux-only unit tests not run
+  goto :gg_wsl_done
+)
+set "WSLROOT="
+for /f "delims=" %%p in ('wsl -d Ubuntu -u root -- wslpath -u "%ROOT%" 2^>nul') do if not defined WSLROOT set "WSLROOT=%%p"
+if not defined WSLROOT (
+  echo [SKIP] WSL distro not usable - Linux-only unit tests not run
+  goto :gg_wsl_done
+)
+wsl -d Ubuntu -u root -- bash "%WSLROOT%/tests/unit/run_tests_wsl.sh"
+if errorlevel 1 (
+  echo [FAIL] Linux-only unit tests failed
+  endlocal
+  exit /b 1
+)
+:gg_wsl_done
+
 echo [OK] all unit tests passed
 endlocal
 exit /b 0
