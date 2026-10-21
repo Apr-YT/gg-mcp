@@ -5,7 +5,9 @@
 > - PC 产物：`gg-mcp-server.exe` → **`gg-ghost-mcp.exe`**（提交 b953bc5「命名统一」）
 > - 配置文件：`configs/ggmcp.json` → **`configs/gg-ghost.json`**（前者全仓已不存在）
 > - adb：`D:\Kiln\ADB\adb.exe` → **`D:\Kiln\platform-tools\adb.exe`**（已入 PATH）
-> - MinGW：14.2 → **16.2.0**；**NDK / capstone 本机未安装**（agentd 无法本地编译，需先补）
+> - MinGW：14.2 → **16.2.0**；~~NDK / capstone 本机未安装~~ → **2026-10-21 已就位**：
+>   NDK **r30**（`D:\Kiln\android-ndk-r30`）+ capstone 5.0.1（`D:\Kiln\capstone\capstone-5.0.1`），
+>   agentd 可本地编译，步骤见 `docs/TOOLCHAIN.md`
 > - 对外工具数 43 → **45**；wire 命令数 36 → **41**
 > 现状一律以 `AGENTS.md` 为准。
 

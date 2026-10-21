@@ -16,6 +16,8 @@
 | [OPTIMIZATION_SUMMARY.md](engineering/OPTIMIZATION_SUMMARY.md) | 2026-08-22 优化工作总结；文首有 08-28 更正声明，**部分声明不实，以更正声明为准**。 |
 | [CHECKPOINT_REVIEW_REPORT.md](engineering/CHECKPOINT_REVIEW_REPORT.md) | 2026-08-27 检查点审查报告；文首有历史快照声明，**勿当现状**。 |
 | [RWPROC33_ADAPTER.md](engineering/RWPROC33_ADAPTER.md) | rwProcMem33 驱动接口适配：命令枚举、请求结构、硬件断点与构建要点。 |
+| [HWBP_CRASH_HELP.md](engineering/HWBP_CRASH_HELP.md) | hwBreakpointProc_module 静默挂死排查记录（已解决：命令枚举错位），同类内核挂死可复用其排查法。 |
+| [TOOLCHAIN.md](engineering/TOOLCHAIN.md) | 本机工具链实况（NDK r30 / capstone 5.0.1 / MinGW），跨平台构建 agentd 的可复制步骤。 |
 | [DEVICE_STATUS_6.12.69.md](engineering/DEVICE_STATUS_6.12.69.md) | 内核 6.12.69 设备上的部署与运行状态报告（2026-08-22 快照）。 |
 | [VERSION_MATCHING.md](engineering/VERSION_MATCHING.md) | 版本族（major.minor 同级放行）匹配规则，GG 核心与 KO 驱动两处生效。 |
 | [GG-GHOST.md](engineering/GG-GHOST.md) | GG-Ghost 内核虚拟触摸注入套件（`gg-ghost` input 设备 + proc 注入协议）完整文档。 |
@@ -39,4 +41,3 @@
 | [Unity Camera ICall 逆向.md](research/Unity%20Camera%20ICall%20逆向.md) | 由 `libunity.so` 的 ICall 注册表定位相机矩阵的通用方法论。 |
 | [加密类型识别方法.md](research/加密类型识别方法.md) | 判定内存数据被哪种方式加密的决策树方法论，坐标加密的配套篇。 |
 | [坐标加密对抗方法.md](research/坐标加密对抗方法.md) | 坐标加密的 7 种形式、识别特征与解密破解链，ESP 对抗面专项。 |
-| [HWBP_CRASH_HELP.md](research/HWBP_CRASH_HELP.md) | hwBreakpointProc_module 静默挂死排查记录（已定位：命令枚举错位）。 |
