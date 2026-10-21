@@ -8,6 +8,7 @@
 
 | 文件 | 用途 |
 |---|---|
+| [PROJECT_MAP.md](engineering/PROJECT_MAP.md) | **项目总览**：进程边界、通信链路、各模块行数、45 个工具面、构建/测试能力与债务清单。查现状先看这份。 |
 | [ACCEPTANCE.md](engineering/ACCEPTANCE.md) | KO 驱动方案验收清单，区分「本机可验证」与「需真机」两类项。 |
 | [ARCHITECTURE.md](engineering/ARCHITECTURE.md) | 组件划分、数据流与驱动通道的架构说明。 |
 | [PROTOCOL.md](engineering/PROTOCOL.md) | PC ↔ gg-agentd 的 wire 协议（20B 头 + JSON）与 KO 驱动 ioctl 协议笔记。 |
