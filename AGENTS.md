@@ -45,9 +45,11 @@ python tests\unit\check_kernel_only.py
 > - MinGW g++ **16.2.0**（`D:\Kiln\mingw64`，已入 PATH）；Python 3.13 可用于两道结构护栏。
 > - NDK 为 **r30**（`D:\Kiln\android-ndk-r30`，`Pkg.Revision = 30.0.16248370`）；
 >   `toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android28-clang.cmd` 存在。
-> - **capstone 确实缺失**：`D:\Kiln\capstone` 整个目录不存在，而 `agentd/disasm.c` 链接需要 `libcapstone.a`
->   → **agentd / native 无法本地编译，也就无法本地验证**。PC 端、全部单元测试、结构护栏均可正常跑。
-> - ⚠️ 要改 agentd（含拆 main.c）**先补 capstone**（NDK 已就位，不再是瓶颈）；否则属于盲改，改动必须过真机 itest 才能算完成。
+> - **capstone 5.0.1 已就位**：`D:\Kiln\capstone\capstone-5.0.1\libcapstone.a`（17:44 装入）。
+> - **agentd / native 现已可本地完整编译**。实测 `scripts\build_ndk.bat` 全绿，产出
+>   `build\agentd\gg-agentd`（2.4MB，ELF64 **AArch64 PIE**，仅 NEEDED `libc.so`/`libdl.so`，`-Wall` 零警告）、
+>   `build\native\libKernelGg.so`、`build\native\lib5_stub`。
+> - ⚠️ **编译通过 ≠ 功能可用**：设备端改动仍必须过真机 itest（`deploy.bat` → `run_itest.ps1`）才算完成。
 > - `run_tests.bat` 的护栏探测已修（此前是死代码）：找不到 python 会**直接 `exit /b 1`**，
 >   不再静默跳过报假绿。确需跳过时显式设 `GG_SKIP_GUARDRAILS=1`；
 >   或用 `GG_PYTHON=<python.exe 全路径>` 指定解释器。
@@ -59,17 +61,19 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
 ## 已知债（2026-10-15 复核，2026-10-21 校准）
 
 1. **main.c 巨型文件**：已拆 shell 域（`cmd_shell.c`）、view/符号/指针链域（`cmd_view.c`），
-   现 1846 行（2026-10-21 `wc -l` 实测）；待拆 `cmd_search` / `cmd_mem` / `cmd_proc` / dispatch。拆前后必跑 `check_dispatch_consistency.py`。
-   ⚠️ 本机无 capstone，拆分无法本地编译验证 —— 见上。
+   现 1846 行（2026-10-21 `wc -l` 实测）；待拆 `cmd_search` / `cmd_mem` / `cmd_proc` / dispatch。拆前后必跑 `check_dispatch_consistency.py`，
+   并跑 `scripts\build_ndk.bat` 确认可编译（NDK+capstone 已就位，不再是盲改）。
 2. wire 协议：1MiB 上限无分片（`GGWM_MAX_PAYLOAD`）；XOR seed 固定 `0xA5`（`shared/wire_protocol.h`）；serial 硬编码在 config。
    - 实测余量：`gg_get_results` 上限 10000 条（`agentd/main.c:968` 硬钳），每条 `addr`/`value`/`value_hex` 三个字符串，
      单条序列化 61–74B → 整帧 JSON 约 **610–740KB**，距 1MiB 剩约 29%–42%（2026-10-21 按序列化格式实测）。
      → **补分片之前不要上调 limit**，否则单帧会被 `read_frame`（`server/device/wire.cpp:286`）直接判非法。
 3. ~~`docs/` 工程文档与逆向研究笔记混放，待分目录~~ —— 2026-10-21 已分为 `docs/engineering/` / `docs/research/`，
    索引见 `docs/README.md`（研究笔记仅限本仓，不外发）。
-4. `archive/framework_v1/` 全量版框架（perf/atomic/error/mempool/conn_pool/io_batch）未接线，后续要么启用要么删除。
-5. **capstone 5.0.1 的 aarch64 静态库缺失** → agentd / native 无法本地编译（`D:\Kiln\capstone\capstone-5.0.1\libcapstone.a`
-   不存在，`scripts/build_ndk.bat` 直接 `exit /b 1`）。已由 `chore/toolchain-capstone` 分支处理中（2026-10-21）。
+4. ~~`archive/framework_v1/` 全量版框架（perf/atomic/error/mempool/conn_pool/io_batch）未接线~~ —— 2026-10-21 已删除（8 个文件）。
+   理由：未接线，且与现役 `*_simple` 是同一职责的两套实现，留着必然被误用。需要时从提交 `a29871b` 的 `archive/framework_v1/` 恢复。
+5. ~~**capstone 5.0.1 的 aarch64 静态库缺失**~~ —— 2026-10-21 17:44 已装入并实测 `build_ndk.bat` 全绿（本节保留为历史记录）。原判断：
+   agentd / native 无法本地编译（`D:\Kiln\capstone\capstone-5.0.1\libcapstone.a`
+   当时不存在，`scripts/build_ndk.bat` 直接 `exit /b 1`）。**该阻塞项已解除。**
 6. **无真机连接时 `tests/integration/run_itest.ps1` 无法执行** → 设备端改动等于没有闭环，只能等设备接上后补验，
    期间不得把设备端改动当作「已验证」上报（2026-10-21）。
 
