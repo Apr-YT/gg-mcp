@@ -12,6 +12,8 @@
 #include <string.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 /* 并行搜索: region 分片, 每 worker 扫一段 region 子集 + 本地结果缓冲。
  * driver_read 为独立 ioctl, 线程安全; handler 级 g_eng.mtx 已保证搜索互斥。 */
@@ -54,6 +56,72 @@ static inline int w_push(search_worker_t *w, uint64_t addr) {
     return 0;
 }
 
+/* 内存页大小（用于搜索时容错跳过不可读页，见下方各 got<=0 分支，C2） */
+#define GG_PAGE_SIZE 4096u
+#define GG_PAGE_MASK  (GG_PAGE_SIZE - 1u)
+
+/* ---- pagemap 驻留筛选（2026-10-23）----------------------------------------
+ * 病灶：rw-p 堆里大量页是"映射了但从未 touch"，驱动读它们失败，而
+ * gg_fault_advance 每次只前进一页 —— 一次全量搜索产生 25 万次 syscall
+ * （驱动内实测 reads=258400 / pages=55002，平均每次只读到 0.21 页，
+ *  而每页在驱动里只花 916ns：walk 357ns + 物理读 559ns）。
+ * 所以瓶颈是请求次数，不是驱动内部。
+ *
+ * 用 /proc/<pid>/pagemap 的 present 位（bit63）批量判断：一次 pread
+ * 8 字节/页、最多 64 页（256KB），把"逐页探测"变成"按驻留段整块读"。
+ * 本机实测 present 准确（pfn 也没被屏蔽，但这里只用 present）。
+ *
+ * 为什么不用"连续失败就大步跳过"（X4 试过、已否决）：大步会过冲混合
+ * region 末端可读页。pagemap 不猜 —— 只有确定为 absent 的页才跳，
+ * 因此**不漏**：absent 页本来就读不到，跨它的模式匹配本来也不存在。
+ * 打不开 pagemap 时（权限/内核配置），pmfd<0，退回原逐页探测逻辑。
+ * ------------------------------------------------------------------------- */
+#define GG_PM_BATCH_PAGES 64u
+
+static int pm_open(pid_t pid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/pagemap", (int)pid);
+    return open(path, O_RDONLY | O_CLOEXEC);
+}
+
+/* 读 [va, va+npages*4K) 的 present 位，成功返回 0。 */
+static int pm_read_vec(int fd, uint64_t va, uint64_t *vec, size_t npages) {
+    off_t off = (off_t)((va >> 12) * 8);
+    ssize_t want = (ssize_t)(npages * 8);
+    ssize_t got = pread(fd, vec, (size_t)want, off);
+    return got == want ? 0 : -1;
+}
+
+/* 从 va 起连续 present 的字节数（≤maxlen，最多 64 页）。0 = 首页 absent 或读失败。 */
+static size_t pm_present_run(int fd, uint64_t va, size_t maxlen) {
+    uint64_t vec[GG_PM_BATCH_PAGES];
+    size_t npages = (maxlen + GG_PAGE_SIZE - 1) / GG_PAGE_SIZE;
+    size_t n = 0, bytes;
+    if (npages > GG_PM_BATCH_PAGES) npages = GG_PM_BATCH_PAGES;
+    if (npages == 0) return 0;
+    if (pm_read_vec(fd, va, vec, npages)) return 0;
+    while (n < npages && ((vec[n] >> 63) & 1u)) n++;
+    bytes = n * GG_PAGE_SIZE;
+    return bytes > maxlen ? maxlen : bytes;
+}
+
+/* 跳过一段 absent，返回应前进的字节数（0 = 当前页 present，或 pagemap 读失败）。 */
+static size_t pm_skip_absent(int fd, uint64_t va, size_t len) {
+    uint64_t vec[GG_PM_BATCH_PAGES];
+    size_t done = 0;
+    while (done < len) {
+        size_t npages = (len - done + GG_PAGE_SIZE - 1) / GG_PAGE_SIZE;
+        size_t i;
+        if (npages > GG_PM_BATCH_PAGES) npages = GG_PM_BATCH_PAGES;
+        if (pm_read_vec(fd, va + done, vec, npages)) return done;
+        for (i = 0; i < npages; i++) {
+            if ((vec[i] >> 63) & 1u) return done + i * GG_PAGE_SIZE;
+        }
+        done += npages * GG_PAGE_SIZE;
+    }
+    return done;
+}
+
 /* 单 worker 扫描 rbegin..rend 的 region 子集（模式由 w->mode 决定） */
 static void *search_worker_main(void *arg) {
     search_worker_t *w = arg;
@@ -62,6 +130,7 @@ static void *search_worker_main(void *arg) {
     if (sz <= 0) return NULL;
     uint8_t *chunk = malloc(GG_SEARCH_CHUNK + 256);
     if (!chunk) return NULL;
+    int pmfd = pm_open(w->pid);   /* <0 = pagemap 不可用，退回逐页探测 */
     uint64_t found = 0;
     for (size_t k = w->rbegin; k < w->rend; k++) {
         uint64_t addr = w->regs[k].start;
@@ -71,6 +140,21 @@ static void *search_worker_main(void *arg) {
         while (len > 0) {
             size_t rd = len > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)len;
             ssize_t got;
+            /* 驻留筛选：只对 present 的连续页发驱动读。absent 页直接跳过，
+             * 并把 carry 清零（字节流断开，跨 absent 的匹配不存在）。 */
+            if (pmfd >= 0) {
+                size_t run = pm_present_run(pmfd, addr, rd);
+                if (run == 0) {
+                    size_t skip = pm_skip_absent(pmfd, addr, len);
+                    if (skip == 0) skip = GG_PAGE_SIZE;   /* pagemap 读失败：保守前进一页 */
+                    if (skip > len) skip = (size_t)len;
+                    carry = 0;
+                    addr += skip;
+                    len -= skip;
+                    continue;
+                }
+                if (run < rd) rd = run;
+            }
             /* 所有模式都读进 chunk+carry：跨块匹配需要把上一块尾部保留下来 */
             got = driver_read(d, w->pid, addr, chunk + carry, rd);
             if (got <= 0) {
@@ -91,7 +175,7 @@ static void *search_worker_main(void *arg) {
                     if (!hit) break;
                     size_t off = (size_t)(hit - chunk);
                     if (memcmp(hit, w->pat, (size_t)sz) == 0) {
-                        if (w_push(w, addr - carry + off) < 0) { free(chunk); return NULL; }
+                        if (w_push(w, addr - carry + off) < 0) { free(chunk); if (pmfd >= 0) close(pmfd); return NULL; }
                         found++;
                     }
                     i = off + 1;
@@ -106,7 +190,7 @@ static void *search_worker_main(void *arg) {
                     for (size_t i = 0; i + (size_t)sz <= total; i++) {
                         uint64_t v = read_bits(chunk + i, w->vtype);
                         if (v >= w->ilo && v <= w->ihi) {
-                            if (w_push(w, addr - carry + i) < 0) { free(chunk); return NULL; }
+                            if (w_push(w, addr - carry + i) < 0) { free(chunk); if (pmfd >= 0) close(pmfd); return NULL; }
                             found++;
                         }
                     }
@@ -114,7 +198,7 @@ static void *search_worker_main(void *arg) {
                     for (size_t i = 0; i + (size_t)sz <= total; i++) {
                         double v = read_as_double(chunk + i, w->vtype);
                         if (v >= w->dlo && v <= w->dhi) {
-                            if (w_push(w, addr - carry + i) < 0) { free(chunk); return NULL; }
+                            if (w_push(w, addr - carry + i) < 0) { free(chunk); if (pmfd >= 0) close(pmfd); return NULL; }
                             found++;
                         }
                     }
@@ -127,7 +211,7 @@ static void *search_worker_main(void *arg) {
                 size_t total = carry + rd;
                 for (size_t i = 0; i + w->pat_len <= total; i++) {
                     if (memcmp(chunk + i, w->pat, w->pat_len) == 0) {
-                        if (w_push(w, addr + i - carry) < 0) { free(chunk); return NULL; }
+                        if (w_push(w, addr + i - carry) < 0) { free(chunk); if (pmfd >= 0) close(pmfd); return NULL; }
                         found++;
                     }
                 }
@@ -140,6 +224,7 @@ static void *search_worker_main(void *arg) {
         }
     }
     free(chunk);
+    if (pmfd >= 0) close(pmfd);
     w->hits_n = found;
     return NULL;
 }
@@ -176,16 +261,19 @@ static void search_split_regions(search_worker_t *ws, size_t nt, size_t nreg) {
     }
 }
 
-/* 内存页大小（用于搜索时容错跳过不可读页，见下方各 got<=0 分支，C2） */
-#define GG_PAGE_SIZE 4096u
-#define GG_PAGE_MASK  (GG_PAGE_SIZE - 1u)
 
 /* 故障推进：恒逐页前进（最多漏一页 4KB，C2 语义：同 region 内故障页之后的可读字节
  * 不可漏）。X4 曾尝试"连续 64 页失败后大步 1MB 跳过"，但大步会过冲混合 region
  * （可读+连续故障，如 rw-p 堆中段未驻留洞）末端可读页，违背 C2"两端可读都找到"；
  * 真实性能问题已由根因优化解决：region_matches 排除 ---p(PROT_NONE) 区域
  * （zygote64 实测 12.9GB/17GB 是 PROT_NONE，搜索它们纯浪费，782 万次驱动读
- *   → 过滤后大幅下降）。fail_streak 参数保留以最小化调用处改动。 */
+ *   → 过滤后大幅下降）。fail_streak 参数保留以最小化调用处改动。
+ *
+ * ⚠ 2026-10-23 再修正：过滤 PROT_NONE 后仍有 25 万次 read —— 真因是 rw-p 堆里
+ *   大量页"映射了但从未 touch"（absent），每次失败只前进一页。
+ *   现在由上面的 pm_* 系列先用 pagemap 的 present 位批量判断并跳过，
+ *   **正常路径不会再走到这里**；本函数只作为 pagemap 不可用时的兜底。
+ *   别再试图把它改成"连续失败就大步跳过"（X4 否决过，会过冲混合 region）。 */
 static inline uint64_t gg_fault_advance(uint64_t addr, uint64_t len, size_t rd,
                                         int *fail_streak) {
     (void)len; (void)fail_streak;

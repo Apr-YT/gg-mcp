@@ -364,6 +364,41 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    （Makefile 只有 `obj-m += hwBreakpointProc_module.o`），里面的 cdev/`/dev` 节点
    全是死代码 —— 别照着它找 `/dev/rwNova`。
 
+30. **搜索性能：瓶颈是请求次数，不是驱动**（2026-10-23 实测定案，3.2s → 0.15s）。
+
+   在驱动里加 `ktime` 分段计时（临时诊断版）量出的真实数据：
+
+   ```
+   per_page_walk = 357ns    ← 页表遍历
+   per_page_phys = 559ns    ← 物理读 + 拷贝
+   reads = 258400, pages = 55002   ← 平均每次 read 只读到 0.21 页
+   ```
+
+   **驱动内每页只花 916ns**，全量扫 341MB 理论上 80ms —— 那 3.2s 里 97% 不是驱动。
+   真因：`rw-p` 堆里大量页"映射了但从未 touch"，驱动读它们失败，而
+   `gg_fault_advance()` 每次只前进一页 → 25 万次 syscall（每次 ~12μs）。
+
+   **修法**：用 `/proc/<pid>/pagemap` 的 present 位（bit63）批量筛选
+   （`agentd/search.c` 的 `pm_open / pm_present_run / pm_skip_absent`）：
+   一次 `pread` 8 字节/页、最多 64 页（256KB），只对 present 的连续页发
+   驱动读，absent 页直接跳并清零 `carry`（字节流断开，跨 absent 的匹配不存在）。
+   pagemap 打不开（`pmfd < 0`）时退回原逐页逻辑 —— 零回归风险。
+
+   **为什么不用"连续失败就大步跳过"**：X4 试过、已否决 —— 大步会过冲混合
+   region 末端可读页。pagemap 不猜，只跳确定为 absent 的页，因此**不漏**。
+
+   实测：systemui 341MB 全量搜索 **3.21s → 0.15~0.22s**（15~20 倍），
+   结果数不减反增（20698 → 21954，此前"遇到 absent 就中断整块"会丢掉块内
+   后面的可读页）。
+
+   **正确性验证（改搜索逻辑必须做这一步）**：取一个命中密集的 64KB 区间，
+   用 `gg_read_bytes` 分块拉回本地扫描，与 `gg_search` 在该区间的命中集合
+   逐地址比对 —— 实测 192 vs 192、集合完全相同。只在两边数量相等还不够，
+   要比**集合**。
+
+   **未覆盖**：`fuzzy_snapshot`（search.c:549）和 `refine`（:650）仍走原
+   `driver_read` 循环，没接 pagemap 筛选，模糊搜索首帧仍可能慢。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
