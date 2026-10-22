@@ -64,6 +64,10 @@ static int g_hwbp_allowed = 0;   /* --hwbp：跳过探测强制启用（自担�
  * 自编译模块 GET_NUM_BRPS 返回 6；afei 的 0 起始 prebuilt 返回 4（那里
  * cmd=3 其实是 GET_NUM_WRPS）。只有探到 6 才放行。 */
 static int g_hwbp_probe = -1;
+/* 探测的原始返回值，只用于把错误信息说准：-1 是「节点没开/开错」，
+ * 4 才是「0 起始枚举的旧模块」。两者混在一句话里会把排查方向带偏
+ * （AGENTS 第 25 条就是这么误判成模块命令码不一致的）。 */
+static int g_hwbp_probe_rc = -1;
 
 /* 最近一次响应存档（send_ok/send_err 写入，dispatch 的 cmd_end 事件使用）。
  * X3: 改为线程局部——每连接线程独立，快速通道（PING/KERNEL_STATUS 等无锁
@@ -1437,17 +1441,29 @@ static void h_watch(int fd, uint32_t seq, cJSON *p) {
          * put_pid 打到用户态整数上直接崩内核。--hwbp 可跳过探测（自担风险）。 */
         if (g_hwbp_probe < 0) {
             int probe = rwproc_hwbp_probe(&g_eng.drv);
+            g_hwbp_probe_rc = probe;
             g_hwbp_probe = (probe == 6) ? 1 : 0;
             log_msg("hwbp probe: GET_NUM_BRPS=%d (expect 6) -> %s",
                     probe, g_hwbp_probe ? "usable" : "refused");
         }
         if (!g_hwbp_allowed && !g_hwbp_probe) {
             cJSON_Delete(r);
-            send_err(fd, GGCMD_WATCH, seq, GGERR_DEGRADED,
-                     "hwbp unavailable: the hwBreakpointProc module in use has a 0-based "
-                     "command enum (probe GET_NUM_BRPS did not return 6), so INST would "
-                     "panic the kernel. Deploy the self-built module "
-                     "(scripts/build_hwbp_ko.sh), or force with agentd --hwbp");
+            /* 两种失败长得很像但原因完全不同，别再合成一句话：
+             *   -1 = 断点节点没打开 / 打开的是内存节点 → 看部署与 key 配置
+             *    4 = 0 起始枚举的旧模块（afei prebuilt）→ 换自编译模块 */
+            if (g_hwbp_probe_rc < 0) {
+                send_err(fd, GGCMD_WATCH, seq, GGERR_DEGRADED,
+                         "hwbp unavailable: the breakpoint module node is not usable "
+                         "(GET_NUM_BRPS failed). Check that rwNova / hwBreakpointProc_module "
+                         "is loaded and that --rwproc-bp-key points at it, not at the memory "
+                         "module. See gg_kernel_status / agentd log for the node path.");
+            } else {
+                send_err(fd, GGCMD_WATCH, seq, GGERR_DEGRADED,
+                         "hwbp unavailable: GET_NUM_BRPS returned 4, which means the loaded "
+                         "module uses a 0-based command enum (afei prebuilt), so INST would "
+                         "panic the kernel. Deploy the self-built module "
+                         "(scripts/build_hwbp_ko.sh), or force with agentd --hwbp");
+            }
             return;
         }
         if (g_eng.session_pid <= 0) {

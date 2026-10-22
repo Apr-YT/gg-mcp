@@ -240,7 +240,45 @@ apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdc
    `deploy.ps1` 现在显式 `Remove-Item $Stage\ko\hwBreakpointProc_*.ko`，别删这行。
    同理 push 要按 **staging 目录**遍历，不能按 `$koFiles`（rwNova 是后补进 staging 的）。
 
-25. **hwbp / watch 当前不可用**（遗留，非部署问题）：模块加载成功、proc 节点存在，
-   但探测返回 `模块命令码基准不符 (GET_NUM_BRPS=-1, 期望 6)` —— 自编译模块的 ioctl
-   命令码编号与 `agentd/driver.h` 不一致。修它要改模块源码重编 + 刷机验证，
-   别在部署脚本里绕（绕不过去）。其余功能（内存读写/搜索/冻结）不受影响。
+25. ~~**hwbp / watch 当前不可用**~~ —— **2026-10-22 深夜复测：可用，原结论是误判**。
+   原记录说「探测返回 GET_NUM_BRPS=-1，自编译模块命令码与 driver.h 不一致」。
+   真机直连复现（`build/ko/_dev/hwbp_probe.c`，向两个模块节点各发一次 cmd=3）：
+   - 断点节点 `/proc/dce377…/dce377…` → `read=6`，**命令码基准就是对的**
+   - 内存节点 `/proc/e84523…/e84523…` → `read=-1 EFAULT`（cmd3 在内存模块里是
+     READ_PROCESS_MEMORY，p1=0 是空句柄）
+
+   所以 -1 只可能来自"bp_fd 指向了内存模块"。经 agentd 实测：probe=6 → usable，
+   `watch_set` 注册 16 线程、`UNINST` 正常、槽位满时内核回 `ENOSPC`（说明
+   perf_event 真的建了起来）。**别再照第 25 条旧文案去重编模块。**
+
+   **这一条真正的教训**：`-1` 和"0 起始旧模块的 4"被写进了同一句错误提示，
+   排查方向直接被带偏。现在 `main.c` 按 `g_hwbp_probe_rc` 分开报：
+   `<0` = 节点没开/开错，`==4` = 旧模块，两条不同的文案。
+
+26. **两个模块的 proc 节点长得一样，光看路径分不出谁是谁**（2026-10-22 修）。
+   都是 `/proc/<auth_key>/<auth_key>`（mem `e84523…` / bp `dce377…`），
+   把 `--rwproc-bp-key` 写成 mem 的 key 时，open 会**成功**，然后 GET_NUM_BRPS
+   打到内存模块上返回 -1 —— 表现和"模块命令码不对"一模一样。
+   现在 `driver.c` 的 `rwproc_open_node` 带类型校验：打开后先发一次
+   `GET_NUM_BRPS`，`read>0` 判为断点模块、`read<=0` 判为内存模块，不匹配就
+   关掉并明确报「is the memory module, not breakpoint — key 配反了」。
+   **探测只有这一条命令是安全的**：内存模块的 cmd4 是 WRITE_PROCESS_MEMORY、
+   cmd5 是 CLOSE_PROCESS，拿它们试探会在真正的断点上写内存 / put_pid。
+
+   **自动扫描（不传 key）实测在真机上是无效的**：模块 `hide_procfs_dir` 之后
+   `readdir("/proc")` 列不出 key 目录、`access()` 也失败 → 「memory module node
+   not found」。所以 `start_agentd.sh` 里那两行显式 key 是**必需**的，别当成冗余删掉。
+   扫描分支留着只为模块未隐藏的场景（本地调试）。
+
+27. **hwbp 在 `[stack]` 最后一页（紧邻栈顶 4KB）注册会 `EINVAL`**（2026-10-22 实测）。
+   同一 vma 里 0x…df000 成功、0x…ff000~0x…fff00 全部 `errno=22`，
+   与进程无关（换 pid 一样），换 type/len 也一样。设断点时避开栈顶那一页。
+   **排查时别被 `no thread registered` 带偏**：`start_all` 把每个线程的失败原因
+   全吞了，地址不合法和进程不可注册报的是同一句话。用
+   `build/ko/_dev/hwbp_inject.c` 逐步打印 OPEN/INST/UNINST 的返回值与 errno。
+   另外 `HWBP_MAX_HANDLES=16`（模块静态句柄表，`hwBreakpointProc_module.c:28/288`）：
+   已注册 16 个断点时再 INST 由模块直接回 `ENOSPC`。这是正常语义，但它同时意味着
+   **watch 对一个进程最多只覆盖前 16 个线程**（`start_all` 按 `/proc/<pid>/task`
+   顺序注册，第 17 个起全部 ENOSPC 被 `continue` 跳过）。systemui 这种 200+ 线程的
+   进程，只有前 16 个线程的命中能被看到 —— 别把"没命中"当成"地址不对"。
+

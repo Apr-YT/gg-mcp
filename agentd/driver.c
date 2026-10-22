@@ -177,17 +177,60 @@ static ssize_t rwproc_call(gg_driver_t *d, int fd, char cmd,
     return rwproc_call_ex(d, fd, cmd, p1, p2, p3, data, data_size, 0, NULL, 0);
 }
 
-/* 打开 /proc/<key>/<key> 节点。key 为空时扫描 /proc 找"目录名==内文件名"的节点
- * （模块未隐藏时可发现；已隐藏则必须配置 key）。返回 fd；-1 失败。 */
-static int rwproc_open_node(gg_driver_t *d, const char *key) {
+/* 节点归属：两个模块都用 /proc/<key>/<key> 的形状，光看路径分不出是谁。
+ * 区分的唯一手段是发一条只有一方认识、且对另一方无害的命令。 */
+#define RWPROC_KIND_MEM  1
+#define RWPROC_KIND_BP   2
+
+/* 探测一个已打开的节点属于哪个模块。
+ *
+ * 判据：GET_NUM_BRPS(cmd=3)。
+ *   断点模块：cmd3 = 取执行断点槽数，read 返回正数（ARM64 实测 6）。
+ *   内存模块：cmd3 = READ_PROCESS_MEMORY，p1=0 是空句柄 → 返回 -1/-14。
+ * 只用这一条：内存模块的 cmd4 是 WRITE_PROCESS_MEMORY、cmd5 是 CLOSE_PROCESS，
+ * 拿它们试探会在真正的硬件断点上写用户内存 / put_pid。
+ *
+ * 为什么必须做这个探测：bp 节点一旦错指到内存模块，hwbp 探测会拿到 -1，
+ * 而 -1 和「0 起始枚举的旧模块」表现一模一样，排查方向直接被带偏
+ * （AGENTS 第 25 条就是这么误判的）。
+ *
+ * 返回 RWPROC_KIND_*；read 异常（含 -EFAULT）一律按内存模块处理 —— 断点模块
+ * 在这条命令上不会失败，把异常归给内存模块只会让 bp 侧继续找下一个候选。 */
+static int rwproc_node_kind(int fd) {
+    unsigned char buf[RWPROC_HDR_SZ];
+    memset(buf, 0, sizeof(buf));
+    ((rwproc_request_t *)buf)->cmd = (char)RWBP_CMD_GET_NUM_BRPS;
+    ssize_t r = read(fd, buf, sizeof(buf));
+    return (r > 0) ? RWPROC_KIND_BP : RWPROC_KIND_MEM;
+}
+
+/* 打开指定类型的模块节点。
+ * key 非空：只试 /proc/<key>/<key>，并校验类型（配错 key 会明确报出来，
+ *          而不是把内存节点的 fd 当成断点节点用）。
+ * key 为空：扫描 /proc 找"目录名==内文件名"的候选，逐个探测类型
+ *          （模块未隐藏时可发现；已隐藏则必须配置 key）。
+ * 返回 fd；-1 失败（last_error 说明原因）。 */
+static int rwproc_open_node(gg_driver_t *d, const char *key, int want_kind) {
+    const char *want = (want_kind == RWPROC_KIND_BP) ? "breakpoint" : "memory";
     if (key && *key) {
         char path[256];
         snprintf(path, sizeof(path), "/proc/%s/%s", key, key);
         int fd = open(path, O_RDWR);
-        if (fd >= 0) return fd;
-        snprintf(d->last_error, sizeof(d->last_error),
-                 "open %s failed: %s", path, strerror(errno));
-        return -1;
+        if (fd < 0) {
+            snprintf(d->last_error, sizeof(d->last_error),
+                     "open %s failed: %s", path, strerror(errno));
+            return -1;
+        }
+        int kind = rwproc_node_kind(fd);
+        if (kind != want_kind) {
+            snprintf(d->last_error, sizeof(d->last_error),
+                     "%s is the %s module, not %s (GET_NUM_BRPS probe) — --rwproc-key / "
+                     "--rwproc-bp-key 配反了", path,
+                     kind == RWPROC_KIND_BP ? "breakpoint" : "memory", want);
+            close(fd);
+            return -1;
+        }
+        return fd;
     }
     DIR *dp = opendir("/proc");
     if (!dp) { set_err(d, "cannot scan /proc"); return -1; }
@@ -199,14 +242,22 @@ static int rwproc_open_node(gg_driver_t *d, const char *key) {
         char sub[512];
         snprintf(sub, sizeof(sub), "/proc/%s/%s", de->d_name, de->d_name);
         if (access(sub, F_OK) != 0) continue;
-        fd = open(sub, O_RDWR);
-        if (fd >= 0) {
+        int cand = open(sub, O_RDWR);
+        if (cand < 0) continue;
+        if (rwproc_node_kind(cand) == want_kind) {
+            fd = cand;
             snprintf(d->last_error, sizeof(d->last_error),
-                     "auto-discovered rwproc node: %s", sub);
+                     "auto-discovered %s node: %s", want, sub);
+        } else {
+            close(cand);
         }
     }
     closedir(dp);
-    if (fd < 0) set_err(d, "rwproc node not found (module not loaded? set --rwproc-key)");
+    if (fd < 0) {
+        snprintf(d->last_error, sizeof(d->last_error),
+                 "%s module node not found (module not loaded? set %s)",
+                 want, want_kind == RWPROC_KIND_BP ? "--rwproc-bp-key" : "--rwproc-key");
+    }
     return fd;
 }
 
@@ -257,12 +308,12 @@ int driver_init_rwproc(gg_driver_t *d, const char *mem_key, const char *bp_key) 
 
 int rwproc_attach(gg_driver_t *d) {
     /* 1) 打开内存模块节点 */
-    d->rwproc_mem_fd = rwproc_open_node(d, d->rwproc_mem_key);
+    d->rwproc_mem_fd = rwproc_open_node(d, d->rwproc_mem_key, RWPROC_KIND_MEM);
     if (d->rwproc_mem_fd < 0) return -GGERR_NOT_FOUND;
     /* 2) 打开断点模块节点（可选; 失败不影响内存读写） */
     char mem_err[256];
     snprintf(mem_err, sizeof(mem_err), "%s", d->last_error);
-    d->rwproc_bp_fd = rwproc_open_node(d, d->rwproc_bp_key);
+    d->rwproc_bp_fd = rwproc_open_node(d, d->rwproc_bp_key, RWPROC_KIND_BP);
     if (d->rwproc_bp_fd < 0) {
         /* bp 节点缺失（单模块 apr_dlkm 无 hwbp）= watch 不可用，非错误：
            只进日志，恢复 last_error 为 mem 节点状态，避免 kernel_status 误报。 */
