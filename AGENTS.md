@@ -85,8 +85,11 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
    ① `phy_mem_auto_offset.h:45` 用 `__pa(si.totalram)` 算物理地址上限（字节数当内核 VA）→ 范围检查失效；
    ② `get_proc_phy_addr` 不判 pmd 大页，THP 的 pmd 被 `pte_offset_kernel` 当页表指针；
    ③ 本地打开 `CONFIG_ENABLE_FAST_PHYMEM` 的 `__va()` 后无 `virt_addr_valid` 兜底；
-   ④ 页表遍历在 `mmap_lock` 外。四处在 `build/rwProcMem33` 已改，**未编译、未上机**，
-   证据与验证步骤见 `docs/audit/RWPROC33_2026-10-22.md`。在 VM 重编 + 真机二分通过前，不要用 rwproc 对游戏做全量搜索。
+   ④ 页表遍历在 `mmap_lock` 外。四处在 `build/rwProcMem33` 已改，**arm64 交叉编译通过**
+   （WSL + `linux-source-6.8.0`，产物 AARCH64 ELF），**未上机**；顺带修了
+   `hide_procfs_dir.h` 的 `strscpy` 少传 size 导致的编译阻塞。
+   证据、复现命令与真机二分步骤见 `docs/audit/RWPROC33_2026-10-22.md`。
+   在真机验证前，不要用 rwproc 对游戏做全量搜索。
 8. **本轮（2026-10-22）已修但设备端未验**：地址参数两端类型约定不一致（数字地址让 `gg_watch_inject`
    `strtoull(NULL)` 段错误、`gg_write {value:100}` 误报缺参）、`parse_value_str` 缺 endptr、HEX_DUMP 响应 cmd 错位、
    safe_mode 漏 `ghost_tap/swipe`、elfsym 字符串表越界；server 端 Windows connect 缺 `SO_ERROR`（把「设备没连上」报成
