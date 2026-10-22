@@ -118,24 +118,34 @@ if (-not $SkipKo) {
         # 硬件断点模块必须用自编译版（scripts/build_hwbp_ko.sh 产出）。
         # build\ko\ 里那份是 afei 的 prebuilt：命令枚举从 0 起始、命中回调用
         # mutex + cvector，加载后一发 INST 就把整机打崩（put_pid 收到用户态整数）。
-        # 两者模块名与 vermagic 完全相同，用同名覆盖，install_ko.sh 的
-        # 内核版本匹配逻辑不受影响。
-        $selfHwbp = "$Root\build\ko_built\hwbp_selfbuilt_6.12.69.ko"
+        #
+        # 模块已改名为 rwNova（加载名 rwNova，proc 节点仍由 CONFIG_PROC_NODE_AUTH_KEY
+        # 决定，与模块名无关，agentd 不受影响）。改名后**不再同名覆盖**，所以
+        # build\ko\ 里那份 prebuilt 会以 hwBreakpointProc_*.ko 的名字留在 staging 里，
+        # 而 install_ko.sh 会遍历目录里所有 .ko 逐个 insmod —— 必须显式删掉，
+        # 否则下次部署会把那份会崩机的模块一起装上去。
+        $selfHwbp = "$Root\build\ko_built\rwNova_6.12.69.ko"
+        Remove-Item "$Stage\ko\hwBreakpointProc_*.ko" -Force -ErrorAction SilentlyContinue
+        Remove-Item "$Stage\ko\rwNova_*.ko" -Force -ErrorAction SilentlyContinue
         if (Test-Path $selfHwbp) {
-            Copy-Item $selfHwbp "$Stage\ko\hwBreakpointProc_6.12.69.ko" -Force
-            Write-Host "  硬件断点模块: 使用自编译版（覆盖 afei prebuilt）" -ForegroundColor DarkYellow
+            Copy-Item $selfHwbp "$Stage\ko\rwNova_6.12.69.ko" -Force
+            Write-Host "  硬件断点模块: 使用自编译版 rwNova（已剔除 afei prebuilt）" -ForegroundColor DarkYellow
         } else {
             # 没有自编译版就干脆不部署 hwbp：afei 那份的枚举从 0 起始、回调用 mutex，
             # 留着只会在探测时被拒（功能不可用），而且重复 insmod 同名模块会顶掉
             # proc 节点，排查起来很绕。宁缺勿滥。
-            Remove-Item "$Stage\ko\hwBreakpointProc_6.12.69.ko" -Force -ErrorAction SilentlyContinue
             Write-Host "  跳过硬件断点模块（gg_watch_* 将不可用）" -ForegroundColor Yellow
             Write-Host "  需要时先执行: bash scripts/build_hwbp_ko.sh（WSL，需完整 GKI 源码树）" -ForegroundColor Yellow
         }
         # 中转目录也要先清：它跨次保留，旧文件会被一起 cp 过去
         Adb-Sh "rm -rf $TmpDir/ko" | Out-Null
         Adb-Sh "mkdir -p $TmpDir/ko" | Out-Null
-        foreach ($f in $koFiles) { Adb-Cmd "push" "$Stage\ko\$($f.Name)" "$TmpDir/ko/" }
+        # 按 staging 目录推送，而不是按 $koFiles：自编译的 rwNova 是后补进
+        # staging 的，不在 $koFiles 里。原实现靠"自编译版与 prebuilt 同名覆盖"
+        # 蹭到推送，改名后这个便宜没了 —— 只遍历 $koFiles 会把 rwNova 漏掉，
+        # 部署完设备上就没有硬件断点模块（甚至一个 hwbp 都没有）。
+        $stageKos = Get-ChildItem "$Stage\ko" -Filter *.ko -ErrorAction SilentlyContinue
+        foreach ($f in $stageKos) { Adb-Cmd "push" $f.FullName "$TmpDir/ko/" }
         # 清空目标目录再复制：文件名规范变化后旧 .ko 会残留，
         # 而 install_ko.sh 会挨个 insmod —— 结果同一模块被加载多份实例
         # （hide_by_default 下 rmmod 不可用，只能重启清理）。

@@ -39,7 +39,7 @@ KSRC="${1:-/root/kernel_common-android16-6.12}"
 DEVCONF="${2:-/mnt/c/Windows/Temp/ggdeck_verify/device.config}"
 SRC=/root/hwbp-src
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$REPO/build/ko_built/hwbp_selfbuilt_6.12.69.ko"
+OUT="$REPO/build/ko_built/rwNova_6.12.69.ko"
 
 SUBLEVEL_WANT=69
 LOCALVERSION_WANT="-android16-6-4k"
@@ -54,7 +54,9 @@ MODDIR="$REPO/build/rwProcMem33/hwBreakpointProcModule/hwBreakpointProc_module"
 rm -rf "$SRC"; mkdir -p "$SRC"
 cp "$MODDIR"/*.c "$MODDIR"/*.h "$SRC"/ || { echo "FAIL: 复制源码失败"; exit 1; }
 cat > "$SRC/Makefile" <<'MK'
-obj-m += hwBreakpointProc_module.o
+obj-m += rwNova.o
+# 模块名用 rwNova，源文件名保持原样（改名只影响加载名与产物名）
+rwNova-y := hwBreakpointProc_module.o
 # clang 18 比 afei 用的版本严格：cvector.h 里两个非 static 函数会触发
 # -Wmissing-prototypes（内核把警告当错误），只在编译单元关掉。
 ccflags-y += -Wno-missing-prototypes -Wno-unused-function
@@ -162,7 +164,7 @@ echo "=== 5) 编译模块 ==="
 make ARCH=arm64 LLVM=1 KBUILD_MODPOST_WARN=1 M="$SRC" modules -j"$(nproc)" 2>&1 \
     | grep -E "error|CC \[M\]|LD \[M\]|MODPOST" | head -8
 
-MOD="$SRC/hwBreakpointProc_module.ko"
+MOD="$SRC/rwNova.ko"
 [ -f "$MOD" ] || { echo "FAIL: 未产出 .ko"; exit 1; }
 
 # ---------- 6) 校验并导出 ----------

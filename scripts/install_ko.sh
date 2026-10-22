@@ -81,7 +81,7 @@ fi
 # 注意：模块开了 hide_by_default 后 /proc/modules 里看不到它们，
 # 这里为空是正常的，判断是否成功要看上面的 insmod 结果。
 log "== 相关模块（hide 后可能为空，属正常）=="
-grep -iE "rwProc|hwBreakpoint|apr_dlkm" /proc/modules 2>/dev/null | tee -a "$LOG" || true
+grep -iE "rwProc|hwBreakpoint|rwNova|apr_dlkm" /proc/modules 2>/dev/null | tee -a "$LOG" || true
 
 log "KO 加载完成。启动 agentd 后可用 gg_kernel_status 自检"
 log "（期望 state=kernel-driver (rwproc33)）"
