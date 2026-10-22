@@ -902,6 +902,25 @@ static pid_t resolve_pid(cJSON *p) {
  * 调用方持 g_eng.mtx（与 h_attach/h_detach 同一临界区），内部不再加锁。
  * 返回 1 = 有可用会话；0 = 无会话或刚被清理（handler 会照常回 NO_SESSION，
  * 与"从未 attach"走同一条路径，客户端无需区分两种情形）。 */
+/* 丢弃当前会话（停 watch/freeze、清结果集、失效 maps 缓存）。
+ * reason 只用于 session_change 事件与日志。
+ * 调用方持 g_eng.mtx。 */
+static void session_drop(const char *reason) {
+    pid_t old_pid = g_eng.session_pid;
+    char old_name[sizeof(g_eng.session_name)];
+    snprintf(old_name, sizeof(old_name), "%s", g_eng.session_name);
+    watch_stop(&g_watch);
+    freeze_stop(&g_eng.freeze);
+    /* 结果集必须一起清：里面存的都是**旧进程**的地址，留着会被当成新会话的
+     * 结果直接拿去读写（正是要防的错进程写）。 */
+    results_clear(&g_eng.results);
+    maps_cache_invalidate();
+    g_eng.session_pid = -1;
+    g_eng.session_starttime = 0;
+    g_eng.session_name[0] = 0;
+    if (old_pid > 0) event_session_change(reason, old_pid, old_name);
+}
+
 static int session_guard(void) {
     if (g_eng.session_pid <= 0) return 0;
     uint64_t st = process_starttime(g_eng.session_pid);
@@ -910,35 +929,29 @@ static int session_guard(void) {
                   st != g_eng.session_starttime);
     if (!gone && !reused) return 1;
 
-    pid_t old_pid = g_eng.session_pid;
-    char old_name[sizeof(g_eng.session_name)];
-    snprintf(old_name, sizeof(old_name), "%s", g_eng.session_name);
     log_msg("session self-heal: pid %d %s (starttime now=%llu expected=%llu)",
-            (int)old_pid, gone ? "exited" : "reused by another process",
+            (int)g_eng.session_pid, gone ? "exited" : "reused by another process",
             (unsigned long long)st, (unsigned long long)g_eng.session_starttime);
-
-    watch_stop(&g_watch);
-    freeze_stop(&g_eng.freeze);
-    /* 结果集必须一起清：里面存的都是**旧进程**的地址，留着会被当成新会话的
-     * 结果直接拿去读写（正是上面要防的错进程写）。 */
-    results_clear(&g_eng.results);
-    maps_cache_invalidate();
-    g_eng.session_pid = -1;
-    g_eng.session_starttime = 0;
-    g_eng.session_name[0] = 0;
-    event_session_change(gone ? "target_exit" : "pid_reused", old_pid, old_name);
+    session_drop(gone ? "target_exit" : "pid_reused");
     return 0;
 }
 
 static void h_attach(int fd, uint32_t seq, cJSON *p) {
     pid_t pid = resolve_pid(p);
+    /* attach 失败要**清掉旧会话**：否则客户端以为已经切到新目标，实际后续
+     * 读写还落在上一个目标上（实测：attach 一个已退出的 pid 报错后，
+     * search/read 仍然正常返回 —— 操作的是旧进程）。宁可让调用方重新 attach，
+     * 也不能让它以为切了却没切。 */
     if (pid <= 0 || !process_exists(pid)) {
-        send_err(fd, GGCMD_ATTACH, seq, GGERR_NOT_FOUND, "process not found");
+        if (g_eng.session_pid > 0) session_drop("attach_failed");
+        send_err(fd, GGCMD_ATTACH, seq, GGERR_NOT_FOUND,
+                 "process not found (previous session cleared)");
         return;
     }
     if (process_is_64bit(pid) == 0) {
+        if (g_eng.session_pid > 0) session_drop("attach_failed");
         send_err(fd, GGCMD_ATTACH, seq, GGERR_ARCH_UNSUPPORTED,
-                 "32-bit target not supported (driver struct is 64-bit)");
+                 "32-bit target not supported (previous session cleared)");
         return;
     }
     /* 清理旧会话 */
