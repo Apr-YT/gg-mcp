@@ -500,6 +500,39 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    另：itest 的 hwbp 段在探测失败时会打 `[skip]` 然后继续，
    **`ITEST ALL PASS` 不等于 hwbp 验过** —— 必须看有没有 `bp id` 那两行。
 
+33. **隐藏性自检脚本 `scripts/check_stealth.sh`**（2026-10-23）。
+
+   改完驱动或 agentd 的通信层，**先跑这个再谈"改好了"**：
+
+   ```
+   adb push scripts/check_stealth.sh /data/local/tmp/cs.sh
+   su -c 'cp /data/local/tmp/cs.sh /data/adb/GG-Ghost/check_stealth.sh
+          chmod 755 /data/adb/GG-Ghost/check_stealth.sh
+          sh /data/adb/GG-Ghost/check_stealth.sh'
+   ```
+
+   12 项检查，任一 FAIL 退出码 1：
+
+   | # | 检查项 | 判据 |
+   |---|---|---|
+   | 1 | dmesg | 无 rwproc/rwnova/rwproc33 字样 |
+   | 2 | /proc/modules | 查不到模块 |
+   | 3 | /sys/module | 查不到模块 |
+   | 4 | ls /proc | 查不到两个 key 目录 |
+   | 5 | 节点权限 | `-rw-------` |
+   | 6 | agentd fd 表 | 无 `/proc/<key>/<key>` 链接 |
+   | 7 | 匿名 fd 数 | ≥2（两个模块都升级） |
+   | 8 | fd 名 | 无 `anon_inode:rwproc`（应为 dmabuf） |
+   | 9 | kallsyms | 无 `[rwNova` 符号 |
+   | 10 | debugfs kprobe | 未挂载 或 无 proc_root_readdir 探针 |
+   | 11 | 非 root 打开 | 必须被拒 |
+   | 12 | 功能 | agentd 日志有 `channel OK`（隐藏不能以功能为代价） |
+
+   第 12 项是刻意加的：**只验"看不见"不验"还能用"，很容易把驱动改瘸了还庆祝隐藏成功**
+   （本轮 hwbp 的 fd 归属 bug 就是这样 —— 隐藏全过、功能全挂）。
+
+   当前实测：**PASS=12 FAIL=0**。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
