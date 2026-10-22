@@ -62,6 +62,7 @@ enum {
     RWPROC_CMD_GET_PROCESS_RSS       = 11,
     RWPROC_CMD_GET_PROCESS_CMDLINE_ADDR = 12,
     RWPROC_CMD_HIDE_KERNEL_MODULE    = 13,
+    RWPROC_CMD_ANON_GET_FD           = 14,  /* 在当前进程装一个匿名 inode fd（返回值=fd 号） */
     RWPROC_CMD_GGTOUCH_TAP           = 15,  /* 内核虚拟触摸: 单点 tap（display 坐标, 驱动内换算 raw） */
     RWPROC_CMD_GGTOUCH_SWIPE         = 16   /* 内核虚拟触摸: 滑动 swipe */
 };
@@ -114,6 +115,10 @@ typedef struct gg_driver {
 
     /* rwproc33 后端 */
     int    rwproc_mem_fd;     /* rwProcMem_module 节点 fd（-1=未打开） */
+    /* 匿名 inode 通道 fd（anon_inode:rwproc）。>=0 时内存模块的所有命令改走
+     * ioctl(fd, 33, buf)，proc fd 只作为引导/重连入口保留。
+     * install_fd 必须由用户态触发，所以它只能靠 proc 通道拿到 —— 不能纯匿名。 */
+    int    rwproc_anon_fd;
     int    rwproc_bp_fd;      /* hwBreakpointProc_module 节点 fd（-1=未打开） */
     uint64_t rwproc_handle;   /* 当前 OPEN_PROCESS 的进程句柄（0=未打开） */
     pid_t  rwproc_pid;        /* 句柄对应的 pid（换 pid 时自动关旧开新） */

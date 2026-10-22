@@ -116,6 +116,11 @@ static ssize_t rwproc_call_ex(gg_driver_t *d, int fd, char cmd,
                               const void *data, size_t data_size, size_t resp_cap,
                               void *out, size_t out_cap) {
     if (fd < 0) { set_err(d, "rwproc node not open"); return -1; }
+    /* 内存模块若有匿名通道，命令改走 ioctl —— 只对 mem fd 生效，
+     * 断点模块（rwproc_bp_fd）仍走 proc read，两个 fd 不能混用。 */
+    int use_anon = (d->rwproc_anon_fd >= 0 && fd == d->rwproc_mem_fd);
+    int anon_fd = use_anon ? d->rwproc_anon_fd : -1;
+    if (use_anon) fd = anon_fd;
     if (data_size > RWPROC_MAX_IO) {
         snprintf(d->last_error, sizeof(d->last_error),
                  "rwproc request too large: %zu", data_size);
@@ -135,10 +140,18 @@ static ssize_t rwproc_call_ex(gg_driver_t *d, int fd, char cmd,
     req->buf_size = data_size;
     if (data && data_size) memcpy(rwproc_buf + RWPROC_HDR_SZ, data, data_size);
     errno = 0;
-    r = read(fd, rwproc_buf, rd);
+    if (use_anon) {
+        /* 匿名 inode 通道：驱动侧 anon_channel_ioctl 要求 cmd >= sizeof(请求头)
+         * （用作布局校验），arg 指向同一块 [33B 头][payload]，语义与 proc 的
+         * read() 完全一致 —— 所以这里只是换了系统调用，报文布局不动。 */
+        r = ioctl(anon_fd, (unsigned long)RWPROC_HDR_SZ, rwproc_buf);
+    } else {
+        r = read(fd, rwproc_buf, rd);
+    }
     if (r < 0) {
         snprintf(d->last_error, sizeof(d->last_error),
-                 "rwproc read(cmd=%d) failed: %s", (int)cmd, strerror(errno));
+                 "rwproc %s(cmd=%d) failed: %s", use_anon ? "ioctl" : "read",
+                 (int)cmd, strerror(errno));
         pthread_mutex_unlock(&rwproc_mtx);
         return -1;
     }
@@ -284,6 +297,7 @@ int driver_init_rwproc(gg_driver_t *d, const char *mem_key, const char *bp_key) 
     memset(d, 0, sizeof(*d));
     d->state = ST_UNAVAILABLE;
     d->rwproc_mem_fd = -1;
+    d->rwproc_anon_fd = -1;
     d->rwproc_bp_fd = -1;
     d->rwproc_handle = 0;
     d->rwproc_pid = -1;
@@ -291,6 +305,8 @@ int driver_init_rwproc(gg_driver_t *d, const char *mem_key, const char *bp_key) 
     if (bp_key && *bp_key) snprintf(d->rwproc_bp_key, sizeof(d->rwproc_bp_key), "%s", bp_key);
     return 0;
 }
+
+static void rwproc_try_anon(gg_driver_t *d);   /* 定义在本文件下方 */
 
 int rwproc_attach(gg_driver_t *d) {
     /* 1) 打开内存模块节点 */
@@ -312,6 +328,9 @@ int rwproc_attach(gg_driver_t *d) {
         d->rwproc_mem_fd = -1;
         return -GGERR_INTERNAL;
     }
+    /* 3.5) 升级到匿名通道（失败则继续用 proc read，功能不受影响） */
+    rwproc_try_anon(d);
+
     /* 4) 触发内核模块隐藏（CMD_HIDE_KERNEL_MODULE=13）:
      *    模块内 list_del(modules 链表) + kobject_del(/sys/module)，
      *    /proc/modules 与 /sys/module 立即消失。失败不致命（节点已开，
@@ -328,6 +347,26 @@ int rwproc_attach(gg_driver_t *d) {
              "proc nodes: mem=%s bp=%s", d->rwproc_mem_key, d->rwproc_bp_key);
     d->ko_loaded = 1;
     return 0;
+}
+
+/* 通过 proc 通道在当前进程装一个匿名 inode fd（驱动侧 CMD_ANON_GET_FD=14）。
+ *
+ * 为什么必须在"用户态触发"的路径里做：fd_install() 装的是**发起该系统调用
+ * 的进程**的 fd 表；在模块 init 里装只会落到 insmod 进程，insmod 一退就没了。
+ * 所以 proc 通道是必须保留的引导入口 —— 这也是"纯匿名、节点不建"做不到的原因。
+ *
+ * 用 rwproc_call（out=NULL）而不是 rwproc_call_ex：驱动的返回值就是 fd 号，
+ * 而 call_ex 的 out 长度校验会把 "r=fd号" 当成回写长度，fd 号大一点就误报溢出。
+ * 失败不致命 —— proc 通道继续可用。 */
+static void rwproc_try_anon(gg_driver_t *d) {
+    ssize_t r = rwproc_call(d, d->rwproc_mem_fd, RWPROC_CMD_ANON_GET_FD,
+                            0, 0, 0, NULL, 0);
+    if (r < 0) {
+        log_msg("anon channel unavailable, keep using proc read: %s", d->last_error);
+        return;
+    }
+    d->rwproc_anon_fd = (int)r;
+    log_msg("anon channel ready: fd=%d (mem commands now use ioctl)", (int)r);
 }
 
 int rwproc_open_process(gg_driver_t *d, pid_t pid, uint64_t *handle) {

@@ -407,6 +407,35 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    3. 取命中密集的 64KB 区间做「集合比对」（`gg_read_bytes` 分块拉回本地扫）
    4. 模糊：init → refine → undo 状态机走通，remaining 数合理
 
+31. **匿名 inode 通道已启用（2026-10-23）—— 但"节点不建"做不到，别被这个说法误导**。
+
+   现状：`CONFIG_USE_ANON_CHANNEL` 打开后，agentd attach 时通过 proc 通道发
+   `CMD_ANON_GET_FD(14)`，驱动在当前进程 `fd_install()` 一个
+   `anon_inode:rwproc`，之后**内存模块的所有命令改走 `ioctl(fd, 33, buf)`**。
+    实测：`ls -l /proc/<agentd>/fd` 里是 `6 -> anon_inode:rwproc`；
+    搜索/读写/refine 全部正常（ioctl 路径与 read 路径耗时持平，0.11~0.18s）。
+
+   **为什么不能"纯匿名、proc 节点完全不建"**（这条别再去试，会白做一轮）：
+   `fd_install()` 装的是**发起该系统调用的进程**的 fd 表。它只能在用户态
+   触发的路径里执行，而用户态第一次触发的唯一入口就是 proc 节点
+   （`anon_channel_install_fd()` 的注释里有 2026-10-10 的真机验证：
+   放 init 里只会装进 insmod 进程，insmod 一退 fd 就没了）。
+   所以 proc 节点必须保留 —— 它是 bootstrap，也是 agentd 崩溃重启后的重连入口。
+
+   **改动要点**（`agentd/driver.c`）：
+   - `rwproc_call_ex` 内部判断 `use_anon = (rwproc_anon_fd >= 0 && fd == rwproc_mem_fd)`，
+     命中就换 fd + 走 ioctl；**断点模块仍走 proc read**（只有内存模块启用了匿名），
+     两个 fd 不能混用。
+   - 取 fd 用 `rwproc_call`（out=NULL）而不是 `rwproc_call_ex`：驱动返回值就是
+     fd 号，而 call_ex 的 out 长度校验会把 "r=fd号" 当成回写长度，fd 号大一点
+     就误报 `result overflow`。
+   - `ioctl` 的 cmd 必须 ≥ 33（驱动用它做布局校验），arg 指向 `[33B 头][payload]`。
+   - 拿不到时只记日志、继续用 proc read —— 不致命。
+
+   **仍然存在的暴露面**：proc 节点还在（0600 + readdir 隐藏），知道 key 就能开。
+   想再进一步只能接受"agentd 不能重启"（删节点 = 断了重连入口），或者
+   让驱动主动往指定 pid 塞 fd（`task_work_add`，但 pid 要在 insmod 时传）。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
