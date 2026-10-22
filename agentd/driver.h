@@ -1,10 +1,5 @@
 /* driver.h — agentd 内核内存驱动抽象层（仅 rwproc33）
- *
- * 2026-10-21 清理：原本支持四类后端（hook / dev / qx / rwproc），
- * 但 hook/dev/qx 三型从来没有对应可用的 KO —— 代码从未在真机执行过，
- * 且 hook 型的自检用 process_vm_readv 读自己，必然成功，导致 state=ko-hook
- * 是假阳性（详见 docs/engineering/DRIVER_MATRIX.md §3）。
- * 现在只保留真实在跑的 rwproc33（abcz316/rwProcMem33）。
+ 
  *
  * rwproc33 型说明：
  *   两个 LKM（rwProcMem_module + hwBreakpointProc_module），各自创建

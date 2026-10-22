@@ -139,7 +139,7 @@ hook / dev / qx 三型后端已于 2026-10-21 删除，理由见 `DRIVER_MATRIX.
 | 项 | 状态 |
 |---|---|
 | `agentd/main.c` 仍 2398 行 | 已拆 shell（`cmd_shell.c`）/ view（`cmd_view.c`）两域，待拆 cmd_search / cmd_mem / cmd_proc / dispatch；拆前后跑 `check_dispatch_consistency.py` + `build_ndk.bat` |
-| wire 1MiB 单帧上限无分片 | `gg_get_results` 上限 10000 条已占 510KB。超限现在回 `GGERR_CAP` 错误帧（带实际字节数与修法），不再静默丢帧让客户端等 300s；但**分片仍未做**，加 limit 之前必须先分片 |
+| wire 分片 | 已实现（`GGWF_MORE`，2026-10-22）：单帧 1MiB、重组 `GGWM_MAX_REASSEMBLED` 8MiB，AUTH 需带 `frag:1` 协商。`gg_get_results` 10000 条约 510KB，**上调 limit 前先看 8MiB 重组上限**（超限帧会被 `read_frame` 拒） |
 | wire 头仍走结构体内存布局 | 无显式 encode/decode，依赖两端同为小端 x86/arm64 |
 | **`driver.c` 残留三型死代码** | `ko_ioctl_req_t` / `qx_copy_memory_t` / `qx_module_base_t` 只剩定义、无任何调用；文件头注释仍按四型后端写。功能无影响，读码者会被误导（2026-10-22 发现） |
 | **硬件断点默认禁用** | 不带 `--hwbp` 时先做运行时探测，探测不过就报错；帮助文本原话是「当前 KO 的模块会崩内核，勿开」（`main.c`）。要用得先用 `scripts/build_hwbp_ko.sh` 重编模块 |

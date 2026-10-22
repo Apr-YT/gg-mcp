@@ -235,5 +235,25 @@ cmd=3 (GET_NUM_BRPS) → 自编译模块返回 6（执行断点槽数）
 ## 7. 待办
 
 1. §4：`libKernelGg.so` 增加 rwproc 协议支持（否则 GG 核心一直走原生 syscall）。
-2. §5.1：rwproc 崩溃需 KO 侧定位（逐区域二分 + 对照 KO 源码）。
+2. ~~§5.1：rwproc 崩溃需 KO 侧定位~~ —— 2026-10-23 定位完成，不在页表遍历
+   （dbg 版日志显示 paddr 算得都对），而是 KO 版本选错 + 旧模块并存抢 proc 节点，
+   见 §8。
 3. `gg_disassemble` 对由 ELF 头起始的地址返回 `count=0`，待确认是 capstone 行为还是缺陷。
+
+## 8. KO 版本谱系（2026-10-23 实测）
+
+`build/ko/_dev/` 下四个自编译 KO 只有一个可用，**别按文件时间戳选**：
+
+| 文件 | 大小 | 读写 | 全量搜索（systemui 341MB） | 结论 |
+|---|---|---|---|---|
+| `rwproc_v2.ko` | 307640 | ITEST ALL PASS | 3.6s / 21892 条 / 不崩 | **现役**（`build/ko/rwProcMem_6.12.69.ko`） |
+| `rwProcMem_gki.ko` | 307584 | read 全 0 | 正常 | `virt_addr_valid` 误判合法 pfn，弃用 |
+| `rwproc_dbg.ko` | 330712 | — | — | 唯一带 `CONFIG_DEBUG_PRINTK`，抓页表日志用 |
+| `prebuilt/rwProcMem_slim.ko` | 39552 | — | — | vermagic 不匹配，insmod 报 `module_layout` 版本不符 |
+
+另有历史遗留：设备上曾长期并存 `apr_dlkm.ko`（rwProcMem 的原始编译名，
+`build_rwproc_ko.sh` 的产物就叫这个）与 `rwProcMem_<ver>.ko`。两者模块名不同
+（`apr_dlkm` / `rwProcMem_module`）所以都能 insmod，但 proc 节点只有一个 ——
+先加载的占 `/proc/<key>/<key>`，后加载的 `proc_mkdir` 失败 fallback 到 /proc 根。
+**agentd 永远打开先加载那个**，导致「换 KO 不生效」的假象。
+根因（deploy staging 从不清理）与修法见 `AGENTS.md` 第 33 条。

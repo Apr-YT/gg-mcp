@@ -108,7 +108,7 @@ raw_y = dx * 100
 
 | 文件 | 改动 |
 |---|---|
-| `server/mcp/schema.cpp` | +`gg_ghost_tap` / `gg_ghost_swipe` 工具注册（含参数 schema 与描述）；全量 45 工具 |
+| `server/mcp/schema.cpp` | +`gg_ghost_tap` / `gg_ghost_swipe` 工具注册（含参数 schema 与描述）；全量 44 工具 |
 | `server/session.cpp` | +`tool_ghost_tap/swipe` 函数、`kTools[]` 表 2 条目（`write_op=true`） |
 | `server/main.cpp` | 命名统一 GG-GHOST-MCP（serverInfo.name=gg-ghost-mcp） |
 | `configs/gg-ghost.json` | 配置（原名 ggmcp.json，`safe_mode` 字段控制只读） |
@@ -359,7 +359,7 @@ python gg\tools\ptrscan.py libgame+0x702ED4
 
 | 文件 | 用途 |
 |---|---|
-| `ggghost.py` | 通用 MCP 客户端（45 工具封装，`libgame+0x` 偏移语法，CLI 模式） |
+| `ggghost.py` | 通用 MCP 客户端（44 工具封装，`libgame+0x` 偏移语法，CLI 模式） |
 | `hillclimb_coin.py` | 登山赛车金币脚本：`check` / `freeze` / `unfreeze` / `locate`（读值→搜→存 state）/ `locate2`（交叉→写测→冻结测） |
 | `ptrscan.py` | 多级指针扫描（`gg_set_results`→`gg_pointer_scan`→`gg_pointer_chain`→迭代到模块基址） |
 

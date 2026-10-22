@@ -4,7 +4,7 @@
 
 | 组件 | 位置 | 语言 | 职责 |
 |---|---|---|---|
-| `gg-ghost-mcp` | PC（Windows） | C++17 | MCP 协议面（stdio/HTTP）、43 个工具、会话、adb forward 管理 |
+| `gg-ghost-mcp` | PC（Windows） | C++17 | MCP 协议面（stdio/HTTP）、44 个工具、会话、adb forward 管理 |
 | `gg-agentd` | 设备（root） | C（NDK arm64） | **rwproc33 通道对接**、进程/maps、搜索/冻结引擎 |
 
 ## 2. 通信链路
