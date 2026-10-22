@@ -184,3 +184,20 @@ apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdc
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/engineering/AGENTD_HISTORY.md`。
 
 本文件最后校准：2026-10-21（工具链、main.c 行数、wire 余量均按本机实测）。
+
+16. **模糊搜索的三个坑（2026-10-22 靶场实测）**：
+   - `refine` 的 op **必须同时认字符串和数字**。cJSON 字符串节点的 `valueint`
+     恒为 0，而 `REFINE_*` 从 1 开始 —— 直接取 `valueint` 会让四个 op 全部落到
+     switch default，**候选被整体清空**。MCP 路径因为 PC 端先 norm 成数字，
+     碰巧正常，所以这个 bug 只在直连 wire 时暴露。改这块时先用字符串形式测一遍。
+   - 读失败（`got<=0`）要**清位图**，否则这些元素永远读不到、永远不被剔除，
+     `remaining` 卡住不动。但**短读（0<got<rd）不能清** —— rwproc 遇不可驻留页
+     是短读返回（请求 64KB 只回 8KB），下一轮从 `off+got` 还能读到，清了就是
+     误杀可读元素（`unchanged` 直接归零）。
+   - 诊断这类问题最快的办法是在 refine 里打 `compared/kept` 计数：
+     `compared>0 && kept==0` 说明比较都做了而不是没读到。
+17. **模糊搜索要在数值稳定的时刻 init**。目标活跃（游戏在跑）时 init，后续
+   refine 会把期间所有变化都算进去，收敛不到东西。正确姿势：菜单/暂停/操作
+   间隙 init，再让目标发生一次明确变化后 refine。
+18. **`gg_search_undo` 只回退模糊搜索**（位图环形栈 3 级，不回退数据快照）。
+   精确搜索的 undo 需要另存地址数组副本，尚未实现，调用时会明确报错。
