@@ -102,6 +102,15 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
    safe_mode 漏 `ghost_tap/swipe`、elfsym 字符串表越界；server 端 Windows connect 缺 `SO_ERROR`（把「设备没连上」报成
    「令牌鉴权失败」）、HTTP 暴露面判定、JSON-RPC batch。测试程序 13 → 15 个（新增 `test_protocol` / `test_net_guard`）。
    `run_tests.bat` 全绿只代表 PC 侧逻辑正确，设备端行为仍需接真机。
+9. **`--safe` / `--shell` / `--hwbp` 曾长期静默失效**（2026-10-22 已修，真机验证）：
+   `main()` 的 `memset(&g_eng,0,...)` 在参数解析**之后**，三个开关解析完立刻被清零。
+   `--safe` 失效 = **只读保护形同虚设**（write/freeze/shell 全放行）；`--shell` 永远打不开；
+   `--hwbp` 永远被拒。已把 memset + `session_pid`/`result_cap`/`mutex_init` 前移到解析之前。
+   验证：`--safe` 下 write/freeze/shell 均 `code=13 SAFE_MODE`，search 正常。
+   **改 main() 初始化顺序时别再把它挪回解析之后。**
+10. GG-U1（shell 无超时锁死守护进程）已修：`read`+`waitpid` 双超时，超时 SIGKILL 返回
+   `GGERR_TIMEOUT`。真机：`cat /dev/zero` 10.0s 超时、其后 ping 0.040s 返回。
+   仍开放：GG-U2（pid 复用无 starttime 校验）、GG-U3（事件广播锁内阻塞 send）。
 
 ### 已清（2026-10-15，本机实测）
 
