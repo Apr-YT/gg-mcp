@@ -30,6 +30,7 @@ call "%CC%" -O3 -flto -Wall -I"%ROOT%" -I"%CAPSTONE%\include" -o "%ROOT%\build\a
   "%ROOT%\agentd\cmd_shell.c" ^
   "%ROOT%\agentd\cmd_view.c" ^
   "%ROOT%\agentd\cmd_search.c" ^
+  "%ROOT%\agentd\cmd_mem.c" ^
   "%ROOT%\agentd\process.c" ^
   "%ROOT%\agentd\driver.c" ^
   "%ROOT%\agentd\search.c" ^

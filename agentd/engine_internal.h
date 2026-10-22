@@ -111,4 +111,12 @@ void h_get_results(int fd, uint32_t seq, cJSON *p);
 void h_clear_results(int fd, uint32_t seq, cJSON *p);
 void h_set_results(int fd, uint32_t seq, cJSON *p);
 
+/* cmd_mem.c — 内存读写 / 冻结 / 暂停恢复 */
+void h_read(int fd, uint32_t seq, cJSON *p);
+void h_read_bytes(int fd, uint16_t cmd, uint32_t seq, cJSON *p);  /* READ_BYTES 与 HEX_DUMP 共用 */
+void h_write(int fd, uint32_t seq, cJSON *p);
+void h_freeze(int fd, uint32_t seq, cJSON *p);
+void h_unfreeze(int fd, uint32_t seq, cJSON *p);
+void h_pause_resume(int fd, uint32_t seq, cJSON *p, int pause);
+
 #endif /* GG_ENGINE_INTERNAL_H */
