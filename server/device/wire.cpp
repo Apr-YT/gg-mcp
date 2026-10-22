@@ -186,6 +186,10 @@ int AgentClient::ensure_connected_locked() {
         int rc = tcp_connect();
         if (rc == 0) {
             seq_ = 0;
+            /* enc_on_ 是「连接级」状态，必须跟新连接一起归零：设备重启/回滚到不支持
+             * GGWF_ENC 的旧 agentd 后，残留 true 会让每条请求带上加密标志，对端解析
+             * 全败，表现为所有命令 ProtocolError 直到进程重启。 */
+            enc_on_ = false;
             // 握手：必须在任何业务命令之前，否则 agentd 会以 GGERR_PERM 拒绝
             if (auth_locked(Clock::now() + std::chrono::milliseconds(cfg_.connect_timeout_ms)) != 0) {
                 GG_CLOSE_SOCK(static_cast<sock_t>(fd_));
@@ -264,8 +268,21 @@ int AgentClient::tcp_connect() {
         tv.tv_sec = cfg_.connect_timeout_ms / 1000;
         tv.tv_usec = (cfg_.connect_timeout_ms % 1000) * 1000;
         rc = select(0, nullptr, &w, nullptr, &tv);
-        if (rc > 0) rc = 0;
-        else rc = -1;
+        if (rc > 0) {
+            /* Winsock 的「可写」同时覆盖「连上」与「被拒」：127.0.0.1 上无人监听时
+             * connect 失败也会立刻可写。不复核 SO_ERROR 就会把失败判成成功，随后
+             * write_frame 必然失败，整条链被归因成「鉴权失败/权限不足」，而第
+             * 205 行的 adb forward 自愈分支永远走不到（POSIX 分支一直有这一步）。 */
+            int sockerr = 0;
+            int sl = static_cast<int>(sizeof(sockerr));
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR,
+                           reinterpret_cast<char*>(&sockerr), &sl) != 0 || sockerr != 0)
+                rc = -1;
+            else
+                rc = 0;
+        } else {
+            rc = -1;
+        }
     }
     if (rc == 0) {
         u_long mode0 = 0;

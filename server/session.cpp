@@ -155,6 +155,18 @@ static std::string addr_to_wire(uint64_t addr) {
     return std::string(buf);
 }
 
+// args["addr"] → params["addr"]（"0x..." 字符串）。
+// 必须在所有带地址的工具上统一走这里：schema 声明 addr 是 string，但 AI 客户端
+// 传 JSON 数字（{"addr":4096}）是常态。数字原样透传下去，agentd 侧按
+// ->valuestring 取会拿到 NULL —— gg_watch_inject 曾因此 strtoull(NULL) 直接段错误，
+// 其余工具则误报 "addr required"（明明用户传了地址）。
+static bool put_addr_param(const json& args, json& params) {
+    uint64_t addr = 0;
+    if (!parse_addr(args["addr"], &addr)) return false;
+    params["addr"] = addr_to_wire(addr);
+    return true;
+}
+
 
 Session::Session(ServerConfig cfg)
     : cfg_(std::move(cfg)),
@@ -532,7 +544,8 @@ json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / 
 }
 json tool_view_memory(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
-    c.params["addr"] = a["addr"];
+    if (!put_addr_param(a, c.params))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     long long rng = 8;
     if (a.contains("range")) {
         const json& rj = a["range"];
@@ -567,13 +580,15 @@ json tool_set_results(Session::CallCtx& c, const json& a) {
 json tool_freeze(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr") || !a.contains("value"))
         return c.fail(GGERR_BAD_REQUEST, "addr and value required");
-    c.params["addr"] = a["addr"];
+    if (!put_addr_param(a, c.params))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     c.params["value"] = a["value"];
     if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     return c.send(GGCMD_FREEZE);
 }
 json tool_unfreeze(Session::CallCtx& c, const json& a) {
-    if (a.contains("addr")) c.params["addr"] = a["addr"];
+    if (a.contains("addr") && !put_addr_param(a, c.params))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     return c.send(GGCMD_UNFREEZE);
 }
 
@@ -585,7 +600,8 @@ json tool_module_base(Session::CallCtx& c, const json& a) {
 }
 json tool_calc_offset(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
-    c.params["addr"] = a["addr"];
+    if (!put_addr_param(a, c.params))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     if (a.contains("module")) c.params["module"] = a["module"];
     return c.send(GGCMD_CALC_OFFSET);
 }
@@ -596,7 +612,8 @@ json tool_pointer_scan(Session::CallCtx& c, const json& a) {
 }
 json tool_pointer_chain(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
-    c.params["addr"] = a["addr"];
+    if (!put_addr_param(a, c.params))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     long long md = 8;
     if (a.contains("max_depth")) {
         const json& mj = a["max_depth"];
@@ -608,7 +625,8 @@ json tool_pointer_chain(Session::CallCtx& c, const json& a) {
 }
 json tool_resolve_symbol(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
-    c.params["addr"] = a["addr"];
+    if (!put_addr_param(a, c.params))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     json out;
     int rc = c.device_call(GGCMD_RESOLVE_SYMBOL, c.params, &out);
     if (rc != 0) return c.fail(rc, c.last_error());
@@ -656,7 +674,8 @@ json tool_device_info(Session::CallCtx& c, const json&) { return c.send(GGCMD_DE
 json tool_watch_set(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
     c.params["op"] = "set";
-    c.params["addr"] = a["addr"];
+    if (!put_addr_param(a, c.params))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     if (a.contains("type")) c.params["type"] = a["type"];
     if (a.contains("len")) c.params["len"] = a["len"];
     return c.send(GGCMD_WATCH);
@@ -668,10 +687,16 @@ json tool_watch_poll(Session::CallCtx& c, const json&) {
 json tool_watch_inject(Session::CallCtx& c, const json& a) {
     /* 调试: 手动构造命中, 走模块解析+回溯+预反汇编管道 */
     c.params["op"] = "inject";
-    if (a.contains("pc")) c.params["pc"] = a["pc"];
-    if (a.contains("fp")) c.params["fp"] = a["fp"];
-    if (a.contains("sp")) c.params["sp"] = a["sp"];
-    if (a.contains("lr")) c.params["lr"] = a["lr"];
+    /* pc/fp/sp/lr 同样规范化：schema 写的是 string，客户端传数字时若原样透传，
+     * JSON double 会丢掉 >2^53 的精度，且 agentd 侧要额外兜一次。 */
+    for (const char* k : {"pc", "fp", "sp", "lr"}) {
+        if (!a.contains(k)) continue;
+        uint64_t v = 0;
+        if (!parse_addr(a[k], &v))
+            return c.fail(GGERR_BAD_REQUEST,
+                          std::string(k) + " must be a non-negative integer or numeric string");
+        c.params[k] = addr_to_wire(v);
+    }
     return c.send(GGCMD_WATCH);
 }
 json tool_watch_clear(Session::CallCtx& c, const json&) {
@@ -680,7 +705,8 @@ json tool_watch_clear(Session::CallCtx& c, const json&) {
 }
 json tool_disassemble(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
-    c.params["addr"] = a["addr"];
+    if (!put_addr_param(a, c.params))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     if (a.contains("length")) c.params["length"] = a["length"];
     return c.send(GGCMD_DISASSEMBLE);
 }

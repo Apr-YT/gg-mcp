@@ -7,12 +7,21 @@
 // stdio 传输：供 Claude Desktop / Claude Code 等本地 MCP 客户端。
 // http 传输：POST /mcp（Streamable HTTP 风格），供 Cline 等远程客户端。
 #include "mcp/protocol.h"
+#include "net_guard.h"   // host_is_loopback / origin_allowed（可测版本）
 #include "session.h"
 
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <cstdlib>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <cstring>
+#endif
 
 #include "../third_party/httplib.h"   // 先于 windows.h（winsock2 顺序）
 #include "../third_party/json.hpp"
@@ -106,16 +115,24 @@ static int run_stdio(Session& session, McpProtocol& proto) {
 
 static int run_http(Session& session, McpProtocol& proto, const ServerConfig& cfg) {
     (void)session;
-    /* 远程暴露(0.0.0.0)时必须启用 token, 否则同网段任意主机可读写设备内存/执行 shell/加载 GG。
-     * 这是加能力不加限制: 远程能力保留, 但强制 bearer 鉴权。 */
-    if (cfg.http_host == "0.0.0.0" && cfg.http_token.empty()) {
-        std::cerr << "[GG-GHOST-MCP][FATAL] http_host=0.0.0.0 但 http_token 为空: "
+    const std::string host = cfg.http_host.empty() ? std::string("127.0.0.1") : cfg.http_host;
+    /* 对外暴露时必须启用 token, 否则同网段任意主机可读写设备内存/执行 shell/注入触摸。
+     * 判定用「地址是否回环」而不是字符串是否等于 0.0.0.0。 */
+    if (!host_is_loopback(host) && cfg.http_token.empty()) {
+        std::cerr << "[GG-GHOST-MCP][FATAL] http_host=" << host << " 对外可达但 http_token 为空: "
                      "拒绝在不可信网络暴露。请设置 --token <secret>/http_token 配置, "
                      "或将 http_host 改为 127.0.0.1(仅本机)\n";
         return 1;
     }
     httplib::Server svr;
+    /* 默认值是 SIZE_MAX：一个 Content-Length 极大的请求就能把进程撑爆。 */
+    svr.set_payload_max_length(8u * 1024u * 1024u);
     svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!origin_allowed(req.get_header_value("Origin"))) {
+            res.status = 403;
+            res.set_content("{\"error\":\"forbidden origin\"}", "application/json");
+            return;
+        }
         if (!cfg.http_token.empty()) {
             std::string auth = req.get_header_value("Authorization");
             std::string expect = "Bearer " + cfg.http_token;
@@ -131,7 +148,6 @@ static int run_http(Session& session, McpProtocol& proto, const ServerConfig& cf
     svr.Get("/healthz", [&](const httplib::Request&, httplib::Response& res) {
         res.set_content("{\"status\":\"ok\"}", "application/json");
     });
-    const std::string& host = cfg.http_host.empty() ? std::string("127.0.0.1") : cfg.http_host;
     std::cerr << "[GG-GHOST-MCP] listening on " << host << ":" << cfg.http_port
               << "/mcp (POST)"
               << (cfg.http_token.empty() ? " [no auth]" : " [bearer auth]") << "\n";

@@ -38,31 +38,58 @@ std::string McpProtocol::handle(const std::string& raw) {
     } catch (...) {
         return make_error(nullptr, -32700, "Parse error");
     }
-    if (!msg.is_object()) return make_error(nullptr, -32600, "Invalid Request");
 
-    // 通知（无 id）：即使方法不认识也不能回复
-    if (!msg.contains("id")) return "";
+    // 单条消息处理；批量数组复用同一份逻辑。
+    auto handle_one = [this](const json& m) -> std::string {
+        if (!m.is_object()) return make_error(nullptr, -32600, "Invalid Request");
 
-    if (!msg.contains("method") || !msg["method"].is_string())
-        return make_error(msg["id"], -32600, "Invalid Request");
+        // 通知（无 id）：即使方法不认识也不能回复
+        if (!m.contains("id")) return "";
 
-    json resp;
-    resp["jsonrpc"] = "2.0";
-    resp["id"] = msg["id"];
+        if (!m.contains("method") || !m["method"].is_string())
+            return make_error(m["id"], -32600, "Invalid Request");
 
-    try {
-        resp["result"] = handle_request(msg);
-    } catch (const RpcError& e) {
-        resp.erase("result");
-        resp["error"] = {{"code", e.code}, {"message", e.what()}};
-    } catch (const std::exception& e) {
-        // 详细原因只进服务端日志：不回传内部路径、文件名或异常原文
-        std::cerr << "[gg-mcp] internal error handling " << msg["method"].get<std::string>()
-                  << ": " << e.what() << "\n";
-        resp.erase("result");
-        resp["error"] = {{"code", -32603}, {"message", "Internal error"}};
+        json resp;
+        resp["jsonrpc"] = "2.0";
+        resp["id"] = m["id"];
+
+        try {
+            resp["result"] = handle_request(m);
+        } catch (const RpcError& e) {
+            resp.erase("result");
+            resp["error"] = {{"code", e.code}, {"message", e.what()}};
+        } catch (const std::exception& e) {
+            // 详细原因只进服务端日志：不回传内部路径、文件名或异常原文
+            std::cerr << "[gg-mcp] internal error handling " << m["method"].get<std::string>()
+                      << ": " << e.what() << "\n";
+            resp.erase("result");
+            resp["error"] = {{"code", -32603}, {"message", "Internal error"}};
+        }
+        return resp.dump();
+    };
+
+    /* JSON-RPC 2.0 批量请求。MCP 2024-11-05 建立在 JSON-RPC 2.0 之上，数组是合法输入：
+     * 旧实现把数组一律判成 Invalid Request，会把「客户端把并发 tools/call 合并成一个
+     * batch」变成一批无法配对的 id:null 错误，调用方要么挂死要么判协议错。
+     * 批量规则：逐条处理；通知不出现在响应里；整批都是通知时不回复任何内容。 */
+    if (msg.is_array()) {
+        if (msg.empty()) return make_error(nullptr, -32600, "Invalid Request: empty batch");
+        json out = json::array();
+        for (const auto& item : msg) {
+            std::string one = handle_one(item);
+            if (one.empty()) continue;
+            try {
+                out.push_back(json::parse(one));
+            } catch (...) {
+                out.push_back({{"jsonrpc", "2.0"}, {"id", nullptr},
+                               {"error", {{"code", -32603}, {"message", "Internal error"}}}});
+            }
+        }
+        if (out.empty()) return "";
+        return out.dump();
     }
-    return resp.dump();
+
+    return handle_one(msg);
 }
 
 json McpProtocol::handle_request(const json& msg) {
