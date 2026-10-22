@@ -215,3 +215,14 @@ apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdc
 21. **`gg_disassemble` 要求 addr 按 4 字节对齐**，否则直接报错。ARM64 从非
    对齐地址解码会得到一两条"看着像指令"的垃圾然后停住 —— 实测 `count=1`
    但 `bytes_read=48`，很容易被当成真有个怪函数。
+
+22. **大响应分片已实现**（`GGWF_MORE`，2026-10-22）。规则：
+   - 客户端 AUTH 带 `"frag":1` 才会收到分片；旧客户端不变（超限仍 `GGERR_CAP`）
+   - 同一响应所有分片共用 seq，最后一片不带 MORE
+   - 每片 ≤ `GGWM_MAX_PAYLOAD`，重组上限 `GGWM_MAX_REASSEMBLED`（8MiB）
+   **改这块极易踩的两点**：① XOR 必须逐片独立做（整体加密后切会让第二片起
+   偏移全错）；② 整组分片要在同一次发送锁持有期间发完（中途插入别的响应会
+   让接收端按 seq 拼错）。
+23. **search.c 的 log_msg 是 weak 默认实现**。单元测试常只链接 search.c，
+   没有 main.c —— 加诊断日志不用再给每个测试补 shim。产品构建里 main.c 的
+   强符号会覆盖它。同理，新增其他跨文件依赖时优先考虑 weak 默认实现。
