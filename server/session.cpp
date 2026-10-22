@@ -346,6 +346,12 @@ json tool_search_refine(Session::CallCtx& c, const json& a) {
     if (!c.put_op(a.value("op", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid op");
     return c.send(GGCMD_SEARCH_REFINE);
 }
+json tool_search_undo(Session::CallCtx& c, const json& a) {
+    (void)a;
+    /* wire 层复用 SEARCH_REFINE + op="undo"：不新增命令码，协议 ABI 不变。 */
+    c.params["op"] = "undo";
+    return c.send(GGCMD_SEARCH_REFINE);
+}
 json tool_search_range(Session::CallCtx& c, const json& a) {
     if (!a.contains("min") || !a.contains("max"))
         return c.fail(GGERR_BAD_REQUEST, "min and max required");
@@ -752,6 +758,7 @@ const ToolEntry kTools[] = {
     {"gg_search",           tool_search,           false},
     {"gg_search_unknown_init", tool_search_unknown_init, false},
     {"gg_search_refine",    tool_search_refine,    false},
+    {"gg_search_undo",      tool_search_undo,      false},
     {"gg_search_range",     tool_search_range,     false},
     {"gg_result_count",     tool_result_count,     false},
     {"gg_get_results",      tool_get_results,      false},

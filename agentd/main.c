@@ -1187,10 +1187,66 @@ static void h_unknown_init(int fd, uint32_t seq, cJSON *p) {
     event_search_update(prev, 0);   /* 模糊初始化后具体命中数未知, 广播清 0 */
 }
 
+/* refine 的 op：同时接受字符串与数字。
+ *
+ * schema 里 `gg_search_refine.op` 声明的是字符串 enum
+ * （increased / decreased / unchanged / changed），PC 端会 norm 成数字再下发；
+ * 但直连 wire 的脚本/客户端发的是字符串。原实现直接取 `->valueint` ——
+ * cJSON 字符串节点该字段恒为 0，而枚举从 1 开始，于是四个 op 全部落到
+ * switch 的 default，**结果集被整体清空**。
+ * 真机实测：任何 refine 调用后 remaining 都是 0，refine 功能实际不可用。
+ *
+ * 非法值一律返回 -1 让调用方报 BAD_REQUEST，不要静默退化成某个默认操作
+ * —— 猜错的默认会直接毁掉结果集。 */
+static int parse_refine_op(const cJSON *p) {
+    const cJSON *jo = cJSON_GetObjectItem(p, "op");
+    if (!jo) return REFINE_CHANGED;
+    if (cJSON_IsNumber(jo)) {
+        int v = (int)jo->valuedouble;
+        if (v >= REFINE_INCREASED && v <= REFINE_CHANGED) return v;
+        return -1;
+    }
+    if (cJSON_IsString(jo)) {
+        const char *s = jo->valuestring;
+        if (!strcmp(s, "increased")) return REFINE_INCREASED;
+        if (!strcmp(s, "decreased")) return REFINE_DECREASED;
+        if (!strcmp(s, "unchanged")) return REFINE_UNCHANGED;
+        if (!strcmp(s, "changed"))   return REFINE_CHANGED;
+        /* undo 用 0 表示（枚举从 1 开始，不冲突）：回退最近一次模糊 refine */
+        if (!strcmp(s, "undo"))      return 0;
+    }
+    return -1;
+}
+
 static void h_refine(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_SEARCH_REFINE, seq, GGERR_NO_SESSION, "no session"); return; }
-    int op = cJSON_GetObjectItem(p, "op") ? cJSON_GetObjectItem(p, "op")->valueint : REFINE_CHANGED;
+    int op = parse_refine_op(p);
+    if (op < 0) {
+        send_err(fd, GGCMD_SEARCH_REFINE, seq, GGERR_BAD_REQUEST,
+                 "invalid op (increased|decreased|unchanged|changed|undo)");
+        return;
+    }
     int64_t prev = (int64_t)g_eng.results.count;
+    if (op == 0) {
+        /* 撤销上一步模糊 refine。只支持模糊搜索 —— 精确搜索的 undo 需要另存
+         * 地址数组副本，属于另一件事，这里明确报错而不是假装成功。 */
+        int64_t back = search_refine_undo(&g_eng.results);
+        if (back < 0) {
+            send_err(fd, GGCMD_SEARCH_REFINE, seq, GGERR_BAD_REQUEST,
+                     g_eng.results.fuzzy_active
+                         ? "nothing to undo (no refine yet)"
+                         : "undo supports fuzzy (unknown-value) scans only");
+            return;
+        }
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddNumberToObject(r, "remaining", (double)back);
+        cJSON_AddBoolToObject(r, "undone", 1);
+        send_ok(fd, GGCMD_SEARCH_REFINE, seq, r);
+        cJSON_Delete(r);
+        event_search_update(prev, (long)back);
+        event_results_update();
+        return;
+    }
     int64_t rem;
     if (g_eng.results.fuzzy_active) {
         rem = search_refine(&g_eng.drv, g_eng.session_pid, &g_eng.results, op);

@@ -17,6 +17,9 @@
  * driver_read 为独立 ioctl, 线程安全; handler 级 g_eng.mtx 已保证搜索互斥。 */
 #define GG_SEARCH_NTHREADS 4
 
+/* 实现在 main.c。只在诊断路径用（init 的读失败统计），不引入额外依赖。 */
+void log_msg(const char *fmt, ...);
+
 /* 前向声明（定义在本文件后部, worker 先引用） */
 static inline uint64_t gg_fault_advance(uint64_t addr, uint64_t len, size_t rd, int *fail_streak);
 static double read_as_double(const uint8_t *p, int vtype);
@@ -253,6 +256,27 @@ uint64_t read_bits(const uint8_t *p, int vtype) {
 static inline int bm_get(const uint8_t *bm, uint64_t i) { return (bm[i >> 3] >> (i & 7)) & 1; }
 static inline void bm_clr(uint8_t *bm, uint64_t i)      { bm[i >> 3] &= (uint8_t)~(1u << (i & 7)); }
 
+/* 把 [byte_off, byte_off+len) 覆盖的元素从候选里清掉。
+ *
+ * 用于「这段字节读不到」：读不到就无法比较，而原来只把快照填 0、位图原封不动，
+ * 这些元素就成了**永久候选** —— 每轮 refine 都会失败、每轮都不会被剔除，
+ * 结果集永远收敛不到。真机实测（登山赛车 / sleep）：256MB 可写区里大量页
+ * 未驻留（rwproc 的 is_force=0 不换入页面），refine 后 remaining 卡在
+ * 5300 万，几乎等于没细化。
+ *
+ * 取舍：宁可漏（暂时读不到的页不参与）也不要假候选 —— 假候选会让整个
+ * 模糊搜索失去意义，而漏掉的页在页驻留后重新 init 就能拿回来。 */
+static void bm_clear_span(uint8_t *bm, uint64_t elem_base, uint64_t byte_off,
+                          uint64_t elem_total, uint64_t len, int sz) {
+    uint64_t e0 = byte_off / (uint64_t)sz;
+    uint64_t e1 = (byte_off + len + (uint64_t)sz - 1) / (uint64_t)sz;
+    for (uint64_t e = e0; e < e1; e++) {
+        uint64_t gi = elem_base + e;
+        if (gi >= elem_total) break;
+        bm_clr(bm, gi);
+    }
+}
+
 static uint64_t bm_count(const uint8_t *bm, uint64_t bits) {
     uint64_t n = 0;
     for (uint64_t i = 0; i < bits; i++) n += (uint64_t)bm_get(bm, i);
@@ -269,6 +293,7 @@ uint64_t results_fuzzy_count(const gg_results_t *r) {
 void results_init(gg_results_t *r, size_t cap) {
     memset(r, 0, sizeof(*r));
     r->cap = cap ? cap : GG_RESULT_CAP_DEFAULT;
+    r->fuzzy_undo_head = -1;   /* memset 后是 0，会被误当成「有一级可回退」 */
 }
 
 void results_clear(gg_results_t *r) {
@@ -277,7 +302,9 @@ void results_clear(gg_results_t *r) {
     free(r->fuzzy_bitmap);
     free(r->fuzzy_snapshot);
     free(r->fuzzy_regions);
+    for (int i = 0; i < GG_FUZZY_UNDO_DEPTH; i++) free(r->fuzzy_undo[i]);
     memset(r, 0, sizeof(*r));
+    r->fuzzy_undo_head = -1;
 }
 
 static int results_push(gg_results_t *r, uint64_t addr) {
@@ -496,6 +523,7 @@ int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
     }
 
     uint64_t snap_off = 0, elem_idx = 0;
+    uint64_t fail_pages = 0, fail_bytes = 0, short_reads = 0;
     for (size_t k = 0; k < n_used; k++) {
         uint64_t l = regs[k].end - regs[k].start;
         if (snap_off + l > total) l = total - snap_off;
@@ -514,27 +542,95 @@ int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
                 uint64_t abs = regs[k].start + off;
                 uint64_t adv = gg_fault_advance(abs, l - off, rd, &fail_streak);
                 memset(r->fuzzy_snapshot + snap_off + off, 0, adv);
+                /* 读不到就不该当候选（否则永远是候选，见 bm_clear_span 注释） */
+                bm_clear_span(r->fuzzy_bitmap, fr->elem_begin, off, elem_total, adv, sz);
+                if (fail_pages < 3)
+                    log_msg("fuzzy init: read fail at 0x%llx len=%zu off=%llu got=%zd",
+                            (unsigned long long)abs, rd, (unsigned long long)off, got);
+                fail_pages++;
+                fail_bytes += adv;
                 off += adv;
                 continue;
             }
             fail_streak = 0;
-            if ((size_t)got < rd) memset(r->fuzzy_snapshot + snap_off + off + (size_t)got, 0, rd - (size_t)got);
+            if ((size_t)got < rd) {
+                /* 短读：只拿到前 got 字节（rwproc 遇到不可读页就停，实测请求
+                 * 64KB 只回 8KB）。**不能清位图** —— 下一轮从 off+got 继续读，
+                 * 没读到的部分还会被读到；清掉等于把可读元素误杀（曾经这么
+                 * 写过，结果 unchanged 直接归零）。只把快照补 0，等下一轮覆盖。 */
+                memset(r->fuzzy_snapshot + snap_off + off + (size_t)got, 0, rd - (size_t)got);
+                short_reads++;
+            }
             off += (size_t)got;
         }
         elem_idx += l / (uint64_t)sz;
         snap_off += l;
     }
     r->fuzzy_region_count = (size_t)n_used;
+    /* 重新初始化 = 换了元素规模：旧的 undo 副本一律作废，否则 undo 会把
+     * 上一轮搜索的位图盖到这一轮的 bitmap 上（长度可能还不一样）。 */
+    for (int i = 0; i < GG_FUZZY_UNDO_DEPTH; i++) { free(r->fuzzy_undo[i]); r->fuzzy_undo[i] = NULL; }
+    r->fuzzy_undo_bytes = 0;
+    r->fuzzy_undo_head = -1;
+    r->fuzzy_undo_count = 0;
     free(regs);
+    /* 诊断：读不到的页会让候选被清掉，这里把规模记下来 —— 真机上
+     * "refine 后 remaining 不动 / 立刻归零" 这两个相反症状都源于这块。 */
+    if (fail_pages || short_reads)
+        log_msg("fuzzy init: regions=%zu elems=%llu bytes=%llu fail_pages=%llu "
+                "fail_bytes=%llu short_reads=%llu",
+                n_used, (unsigned long long)elem_total, (unsigned long long)total,
+                (unsigned long long)fail_pages, (unsigned long long)fail_bytes,
+                (unsigned long long)short_reads);
     return (int64_t)elem_total;
+}
+
+/* 把当前位图拷一份进撤销栈（环形，深度 GG_FUZZY_UNDO_DEPTH）。
+ * 分配失败只影响"这一步能否回退"，不影响 refine 本身。 */
+static void fuzzy_undo_push(gg_results_t *r) {
+    size_t bytes = (size_t)((r->fuzzy_elem_count + 7) / 8);
+    if (!bytes || !r->fuzzy_bitmap) return;
+    if (r->fuzzy_undo_bytes != bytes) {
+        for (int i = 0; i < GG_FUZZY_UNDO_DEPTH; i++) { free(r->fuzzy_undo[i]); r->fuzzy_undo[i] = NULL; }
+        r->fuzzy_undo_bytes = bytes;
+        r->fuzzy_undo_head = -1;
+        r->fuzzy_undo_count = 0;
+    }
+    int next = (r->fuzzy_undo_head + 1) % GG_FUZZY_UNDO_DEPTH;
+    if (!r->fuzzy_undo[next]) {
+        r->fuzzy_undo[next] = malloc(bytes);
+        if (!r->fuzzy_undo[next]) return;
+    }
+    memcpy(r->fuzzy_undo[next], r->fuzzy_bitmap, bytes);
+    r->fuzzy_undo_head = next;
+    if (r->fuzzy_undo_count < GG_FUZZY_UNDO_DEPTH) r->fuzzy_undo_count++;
+}
+
+int64_t search_refine_undo(gg_results_t *r) {
+    if (!r->fuzzy_active || !r->fuzzy_bitmap) return -1;
+    if (r->fuzzy_undo_count <= 0 || r->fuzzy_undo_head < 0) return -1;
+    uint8_t *slot = r->fuzzy_undo[r->fuzzy_undo_head];
+    if (!slot) return -1;
+    size_t bytes = (size_t)((r->fuzzy_elem_count + 7) / 8);
+    memcpy(r->fuzzy_bitmap, slot, bytes);
+    r->fuzzy_undo_head = (r->fuzzy_undo_head - 1 + GG_FUZZY_UNDO_DEPTH) % GG_FUZZY_UNDO_DEPTH;
+    r->fuzzy_undo_count--;
+    int64_t remain = (int64_t)bm_count(r->fuzzy_bitmap, r->fuzzy_elem_count);
+    log_msg("fuzzy undo: restored %lld candidates (%d step(s) left)",
+            (long long)remain, r->fuzzy_undo_count);
+    return remain;
 }
 
 int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
     if (!r->fuzzy_active || !r->fuzzy_bitmap || !r->fuzzy_snapshot || !r->fuzzy_regions) return -1;
     int sz = vt_size(r->fuzzy_vt);
     if (sz <= 0) return -1;
+    /* 先存走这一步之前的位图：refine 只减不增，搜错就没有回头路，
+     * 只能重新 init（把整个可写区重读一遍）。 */
+    fuzzy_undo_push(r);
 
     static uint8_t chunk[GG_SEARCH_CHUNK];
+    uint64_t rf_fails = 0, cmp_n = 0, keep_n = 0;
     for (size_t k = 0; k < r->fuzzy_region_count; k++) {
         fz_region_t *fr = &r->fuzzy_regions[k];
         uint64_t off = 0;
@@ -547,6 +643,14 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
                 uint64_t abs = fr->start + off;
                 uint64_t adv = gg_fault_advance(abs, fr->len - off, rd, &fail_streak);
                 memset(r->fuzzy_snapshot + fr->snap_off + off, 0, adv);
+                /* 读不到的段落必须从候选里清掉：否则这些元素每轮都失败、
+                 * 每轮都保留，remaining 会卡住不动（真机实测卡在 5300 万）。 */
+                bm_clear_span(r->fuzzy_bitmap, fr->elem_begin, off,
+                              r->fuzzy_elem_count, adv, sz);
+                if (rf_fails < 3)
+                    log_msg("fuzzy refine: read fail at 0x%llx len=%zu off=%llu got=%zd",
+                            (unsigned long long)abs, rd, (unsigned long long)off, got);
+                rf_fails++;
                 off += adv;
                 continue;
             }
@@ -556,6 +660,7 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
             for (uint64_t e = 0; e < elem_in_chunk; e++) {
                 uint64_t gi = fr->elem_begin + off / (uint64_t)sz + e;
                 if (!bm_get(r->fuzzy_bitmap, gi)) continue;
+                cmp_n++;
                 const uint8_t *cur = chunk + e * (size_t)sz;
                 const uint8_t *prev = r->fuzzy_snapshot + fr->snap_off + off + e * (size_t)sz;
                 double a = read_as_double(prev, r->fuzzy_vt);
@@ -568,6 +673,7 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
                 case REFINE_CHANGED:   keep = (b != a); break;
                 default: keep = 0; break;
                 }
+                if (keep) keep_n++;
                 if (!keep) bm_clr(r->fuzzy_bitmap, gi);
             }
             /* 快照就地更新（读到的 chunk 即当前字节, 无需第二次读）:
@@ -576,7 +682,12 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
             off += rd;
         }
     }
-    return (int64_t)bm_count(r->fuzzy_bitmap, r->fuzzy_elem_count);
+    int64_t remain = (int64_t)bm_count(r->fuzzy_bitmap, r->fuzzy_elem_count);
+    if (rf_fails || cmp_n)
+        log_msg("fuzzy refine: op=%d fails=%llu compared=%llu kept=%llu remaining=%lld",
+                op, (unsigned long long)rf_fails, (unsigned long long)cmp_n,
+                (unsigned long long)keep_n, (long long)remain);
+    return remain;
 }
 
 /* 精确搜索 refine：候选在搜索时都 == exact_value（已入快照），

@@ -15,6 +15,10 @@ extern "C" {
 #define GG_RESULT_CAP_DEFAULT    100000u   /* 结果上限（可配） */
 #define GG_FUZZY_MAX_BYTES       (256ull << 20)  /* 模糊快照内存上限 256MB */
 #define GG_SEARCH_CHUNK          (256u << 10)    /* 搜索分块 256KB */
+/* 模糊 refine 可回退步数。每级占「元素数/8」字节（256MB 区 = 8.4MB/级），
+ * 所以不设太大；3 步足够覆盖"搜错了退回去换 op 再试"。
+ * 按需分配：没做过 refine 就不占内存。 */
+#define GG_FUZZY_UNDO_DEPTH      3
 
 /* 模糊扫描区域表项：addr = start + (全局元素i - elem_begin)*步长 */
 typedef struct fz_region {
@@ -45,6 +49,20 @@ typedef struct gg_results {
     size_t    fuzzy_snapshot_len;
     fz_region_t *fuzzy_regions;
     size_t    fuzzy_region_count;
+
+    /* 模糊 refine 的撤销栈：每次 refine 前把位图拷一份。
+     *
+     * 为什么需要：refine 是**破坏性**的（位图只减不增），搜错一次就只能重新
+     * init —— 而 init 要把整个可写区（最多 256MB）读一遍。真机靶场里这个
+     * 成本直接劝退"多试一次"。
+     *
+     * 只回退位图、不回退数据快照（快照是 256MB，每轮拷一份太贵）。
+     * 代价是 undo 后紧接着的 refine 是拿"更早一轮的值"做基准，语义上相当于
+     * 跳过一次比较 —— 对"我搜错了，退回去换个 op 再试"这个用法没有影响。 */
+    uint8_t  *fuzzy_undo[GG_FUZZY_UNDO_DEPTH];
+    size_t    fuzzy_undo_bytes;    /* 单级位图字节数（0 = 尚未分配） */
+    int       fuzzy_undo_head;     /* 最近一次保存的下标，-1 = 空 */
+    int       fuzzy_undo_count;    /* 当前可回退步数 */
 } gg_results_t;
 
 void results_init(gg_results_t *r, size_t cap);
@@ -70,6 +88,10 @@ int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
 
 /* 模糊细化：按 op 收缩候选。返回剩余候选数；-1 出错。 */
 int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op);
+
+/* 撤销最近一次模糊 refine（恢复候选位图）。返回恢复后的候选数；
+ * -1 = 没有可回退的步骤（或当前不是模糊搜索）。 */
+int64_t search_refine_undo(gg_results_t *r);
 
 /* 精确搜索 refine：对 search_exact 的候选按 op 比较（当前值 vs 各自快照）。
  * 语义同 GG：increased=值变大 / decreased=变小 / unchanged=不变 / changed=变化。

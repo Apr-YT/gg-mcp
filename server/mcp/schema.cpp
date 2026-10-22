@@ -66,18 +66,26 @@ static const std::vector<ToolDef>& build() {
              },
              json{"value"}),
         tool("gg_search_unknown_init",
-             "模糊搜索初始化：未知初值，建立候选位图+快照（内存上限 256MB）",
+             "模糊搜索初始化：未知初值，建立候选位图+快照（内存上限 256MB）。"
+             "注意：目标处于活跃状态（游戏在跑、数值持续变化）时，后续 refine 会把"
+             "期间所有变化都算进去，难以收敛；建议在数值稳定的时刻（菜单/暂停/操作间隙）"
+             "初始化，再让目标发生一次明确变化后 refine",
              json{
                  {"type", prop("string", "元素类型（模糊粒度）", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
                  {"region", prop("string", "搜索区域", "\"enum\":[\"anonymous\",\"writable\",\"all\"]")},
              },
              json::array()),
         tool("gg_search_refine",
-             "模糊细化：按比较结果收缩候选（需先 gg_search_unknown_init）",
+             "模糊细化：按比较结果收缩候选（需先 gg_search_unknown_init）。"
+             "搜错了用 gg_search_undo 回退",
              json{
                  {"op", prop("string", "细化操作", "\"enum\":[\"increased\",\"decreased\",\"unchanged\",\"changed\"]")},
              },
              json{"op"}),
+        tool("gg_search_undo",
+             "撤销最近一步模糊细化：恢复上一步的候选集（最多回退 3 步）。"
+             "只对模糊搜索（unknown_init）有效；精确搜索的 refine 无法回退",
+             json::object(), json::array()),
         tool("gg_search_range",
              "区间搜索：min <= 值 <= max（按类型解释）",
              json{
