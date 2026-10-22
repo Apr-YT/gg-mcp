@@ -205,6 +205,50 @@ int send_frame(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
     return rc;
 }
 
+/* 定义在下方事件广播区（需要 clients 表）；这里前置声明，避免把注册表
+ * 结构体数据挪到文件前部。 */
+static int client_supports_frag(int fd);
+
+/* 分片发送：把 plen 切成 ≤ GGWM_MAX_PAYLOAD 的块，除最后一块外都带 GGWF_MORE。
+ *
+ * XOR 必须**逐片独立**做：接收端是按帧解密的，整体加密后再切会让第二片
+ * 起的解密偏移全错。整组分片在一次 g_send_mtx 持有期间发完 —— 否则中途
+ * 被别的响应插进来，接收端会按 seq 拼错。
+ */
+static int send_frame_fragmented(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
+                                 const char *payload, size_t plen) {
+    int rc = 0;
+    pthread_mutex_lock(&g_send_mtx);
+    size_t off = 0;
+    while (off < plen) {
+        size_t chunk = plen - off;
+        if (chunk > (size_t)GGWM_MAX_PAYLOAD) chunk = (size_t)GGWM_MAX_PAYLOAD;
+        int more = (off + chunk < plen);
+        char *enc = malloc(chunk);
+        if (!enc) { rc = -1; break; }
+        memcpy(enc, payload + off, chunk);
+        gg_xor_payload((unsigned char *)enc, chunk);
+
+        gg_wire_header_t h;
+        h.magic = GGWM_MAGIC;
+        h.ver = GGWM_VERSION;
+        h.cmd = cmd;
+        h.seq = seq;
+        h.flags = flags | GGWF_ENC | (more ? GGWF_MORE : 0u);
+        h.payload_len = (uint32_t)chunk;
+        if (send_full(fd, &h, sizeof(h)) < 0 || send_full(fd, enc, chunk) < 0) {
+            log_msg("fragmented send failed at off=%zu/%zu", off, plen);
+            free(enc);
+            rc = -1;
+            break;
+        }
+        free(enc);
+        off += chunk;
+    }
+    pthread_mutex_unlock(&g_send_mtx);
+    return rc;
+}
+
 void send_ok(int fd, uint16_t cmd, uint32_t seq, cJSON *res) {
     char *s = cJSON_PrintUnformatted(res);
     if (!s) {
@@ -214,6 +258,16 @@ void send_ok(int fd, uint16_t cmd, uint32_t seq, cJSON *res) {
         return;
     }
     size_t len = strlen(s);
+    if (!gg_payload_fits(len) && client_supports_frag(fd)) {
+        /* 客户端声明过能重组（AUTH 带 "frag":1）→ 分片发完整结果。
+         * 旧客户端没声明，下面仍走 GGERR_CAP —— 不能让它们收到看不懂的帧。 */
+        log_msg("send_ok: %zu bytes > %u, sending fragmented", len,
+                (unsigned)GGWM_MAX_PAYLOAD);
+        gg_last_resp_snapshot(&g_last_resp, s, 1);
+        send_frame_fragmented(fd, cmd, seq, GGWF_RESP, s, len);
+        free(s);
+        return;
+    }
     if (!gg_payload_fits(len)) {
         /* 超限帧 send_frame 会直接拒发，客户端什么也收不到，只能等到连接层
          * 超时（PC 端 300s），从外部完全看不出是"结果太大"。改成明确的错误帧：
@@ -272,6 +326,7 @@ void send_err(int fd, uint16_t cmd, uint32_t seq, int code, const char *msg) {
 typedef struct gg_client {
     int fd;
     int subscribed;              /* 是否订阅事件流 */
+    int frag_ok;                 /* AUTH 时声明能重组分片响应（"frag":1） */
     struct gg_client *next;
 } gg_client_t;
 
@@ -299,6 +354,7 @@ static void clients_register(int fd) {
     if (c) {
         c->fd = fd;
         c->subscribed = 0;
+        c->frag_ok = 0;
         c->next = g_clients;
         g_clients = c;
     }
@@ -320,6 +376,23 @@ static void clients_unregister(int fd) {
     pthread_mutex_unlock(&g_clients_mtx);
 }
 
+/* 标记/查询「该连接能重组分片响应」。查询只在 send_ok 的超长分支用。 */
+static void clients_set_frag(int fd, int on) {
+    pthread_mutex_lock(&g_clients_mtx);
+    for (gg_client_t *c = g_clients; c; c = c->next)
+        if (c->fd == fd) { c->frag_ok = on ? 1 : 0; break; }
+    pthread_mutex_unlock(&g_clients_mtx);
+}
+
+static int client_supports_frag(int fd) {
+    int ok = 0;
+    pthread_mutex_lock(&g_clients_mtx);
+    for (gg_client_t *c = g_clients; c; c = c->next)
+        if (c->fd == fd) { ok = c->frag_ok; break; }
+    pthread_mutex_unlock(&g_clients_mtx);
+    return ok;
+}
+
 static void clients_set_subscribed(int fd, int on) {
     pthread_mutex_lock(&g_clients_mtx);
     gg_client_t *c = g_clients;
@@ -332,6 +405,7 @@ static void clients_set_subscribed(int fd, int on) {
         if (c) {
             c->fd = fd;
             c->subscribed = 1;
+            c->frag_ok = 0;
             c->next = g_clients;
             g_clients = c;
         }
@@ -820,9 +894,15 @@ static void h_auth(int fd, uint32_t seq, cJSON *p, int *authed) {
         return;
     }
     *authed = 1;
-    log_msg("auth: accepted");
+    /* 客户端声明能重组分片（"frag":1）才给它发分片，否则保持单帧上限。
+     * 这个协商是必须的：旧客户端收到 GGWF_MORE 帧会把第一片当完整响应解析。 */
+    cJSON *fj = cJSON_GetObjectItem(p, "frag");
+    int frag = cJSON_IsNumber(fj) ? (fj->valueint != 0) : cJSON_IsTrue(fj);
+    if (frag) clients_set_frag(fd, 1);
+    log_msg("auth: accepted (frag=%d)", frag);
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "authed", 1);
+    if (frag) cJSON_AddNumberToObject(r, "frag", 1);
     if (g_wire_key_ephemeral) cJSON_AddBoolToObject(r, "key_ephemeral", 1);
     send_ok(fd, GGCMD_AUTH, seq, r);
     cJSON_Delete(r);

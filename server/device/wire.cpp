@@ -138,7 +138,9 @@ int AgentClient::ensure_connected() {
 // 连接建立后的握手。协议要求：未认证的连接只能发 PING/AUTH，其余命令一律 GGERR_PERM。
 // 因此这里失败必须让整次连接失败——否则上层会拿到一堆 PERM 却不知道根因是密钥不匹配。
 int AgentClient::auth_locked(Clock::time_point deadline) {
-    json req{{GG_J_REQ, {{"key", cfg_.wire_key}}}};
+    /* "frag":1 = 本端能拼装 GGWF_MORE 分片。agentd 只有看到这个标记才会对大响应
+     * 分片；不带标记的旧客户端行为完全不变（超限仍回 GGERR_CAP）。 */
+    json req{{GG_J_REQ, {{"key", cfg_.wire_key}, {"frag", 1}}}};
     uint32_t seq = ++seq_;
     int wr = write_frame(fd_, GGCMD_AUTH, seq, req.dump(), deadline);
     if (wr != 0) {
@@ -148,7 +150,7 @@ int AgentClient::auth_locked(Clock::time_point deadline) {
     gg_wire_header_t h{};
     std::string resp;
     for (;;) {
-        int rr = read_frame(fd_, &h, &resp, deadline);
+        int rr = read_full_frame(fd_, &h, &resp, deadline);
         if (rr != 0) {
             last_error = (rr == -2) ? "wire auth timed out"
                                     : (rr == -3 ? "malformed frame during wire auth"
@@ -460,6 +462,45 @@ int AgentClient::read_frame(int fd, gg_wire_header_t* h, std::string* payload, C
     return 0;
 }
 
+// 读一个完整响应，必要时拼装 GGWF_MORE 分片。
+//
+// 分片只在客户端 AUTH 时声明 "frag":1 后才会出现（见 wire_protocol.h），
+// 所以旧 agentd 永不触发这条路径。拼接上限 GGWM_MAX_REASSEMBLED 是必要的：
+// 对端（或中间人）可以一直发 MORE 帧，不能无限吃内存。
+int AgentClient::read_full_frame(int fd, gg_wire_header_t* h, std::string* payload, Clock::time_point deadline) {
+    int rr = read_frame(fd, h, payload, deadline);
+    if (rr != 0) return rr;
+    if (!(h->flags & GGWF_MORE)) return 0;
+
+    const uint32_t seq = h->seq;
+    const uint32_t base_flags = h->flags & ~GGWF_MORE;   // 语义位取第一片
+    std::string full = std::move(*payload);
+    for (;;) {
+        gg_wire_header_t part_h{};
+        std::string part;
+        rr = read_frame(fd, &part_h, &part, deadline);
+        if (rr != 0) {
+            GG_LOG(1, "[wire] fragmented read broke at %zu bytes (rc=%d)\n", full.size(), rr);
+            return rr;
+        }
+        if (part_h.seq != seq || (part_h.flags & GGWF_RESP) == 0) {
+            GG_LOG(1, "[wire] fragmented read: unexpected frame (seq %u vs %u)\n", part_h.seq, seq);
+            return -3;
+        }
+        if (full.size() + part.size() > (size_t)GGWM_MAX_REASSEMBLED) {
+            GG_LOG(1, "[wire] fragmented read: exceeds %u bytes\n", (unsigned)GGWM_MAX_REASSEMBLED);
+            return -3;
+        }
+        full += part;
+        if (!(part_h.flags & GGWF_MORE)) break;
+    }
+    h->flags = base_flags;
+    h->seq = seq;
+    h->payload_len = static_cast<uint32_t>(full.size());
+    *payload = std::move(full);
+    return 0;
+}
+
 int AgentClient::call(uint16_t cmd, const json& params, json* out) {
     std::lock_guard<std::mutex> lk(mtx_);
     last_outcome = CallOutcome::Ok;
@@ -526,7 +567,7 @@ int AgentClient::call(uint16_t cmd, const json& params, json* out) {
     gg_wire_header_t h{};
     std::string resp;
     for (;;) {
-        int rr = read_frame(fd_, &h, &resp, deadline);
+        int rr = read_full_frame(fd_, &h, &resp, deadline);
         if (rr < 0) {
             /* 平台错误码先取到局部变量：#ifdef 不能放进宏参数，
              * 否则 cppcheck 报 directiveAsMacroParameter 且读代码的人要跨条件编译看。 */

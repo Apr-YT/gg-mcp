@@ -35,12 +35,27 @@ static inline int gg_payload_fits(size_t len) {
     return len <= (size_t)GGWM_MAX_PAYLOAD;
 }
 
+/* 大响应分片（GGWF_MORE）
+ *
+ * 单帧 1MiB 是硬上限，而响应体没有：gg_get_results limit=10000 就有 510KB，
+ * 一旦将来放宽 limit 或加字段就会越界 —— 那时要么截断要么报错，都不好用。
+ *
+ * 规则：
+ *   - 只有 GGWF_RESP 帧可以带 GGWF_MORE
+ *   - 同一响应的所有分片共用同一个 seq；最后一片不带 MORE
+ *   - 每片 ≤ GGWM_MAX_PAYLOAD，接收端拼起来不得超过 GGWM_MAX_REASSEMBLED
+ *   - **能力协商**：客户端在 AUTH 请求里带 "frag":1 表示能重组，agentd 才分片；
+ *     不带就仍按单帧上限处理（超限回 GGERR_CAP）。这样旧客户端行为完全不变。
+ */
+#define GGWM_MAX_REASSEMBLED (8u << 20)   /* 重组后的上限 8MiB，防对端无限分片 */
+
 /* 帧标志 */
 #define GGWF_REQ    0x0001u   /* 请求 */
 #define GGWF_RESP   0x0002u   /* 响应 */
 #define GGWF_ERR    0x0004u   /* 错误响应（负载为 {"e":{code,message}}） */
 #define GGWF_EVENT  0x0008u   /* 异步事件（无 seq 语义） */
 #define GGWF_ENC    0x0010u   /* 负载已 XOR 混淆（滚动 key，防被动嗅探一眼看穿） */
+#define GGWF_MORE   0x0020u   /* 本帧是大响应的分片，后面还有同 seq 的帧（见上） */
 
 /* 负载混淆（GGWF_ENC）: 滚动 XOR, 每字节异或 (GG_XOR_SEED + 位置)。
  * 同一函数既加密也解密（XOR 自逆）。仅作防"明文秒懂"的轻量混淆，

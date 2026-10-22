@@ -17,8 +17,12 @@
  * driver_read 为独立 ioctl, 线程安全; handler 级 g_eng.mtx 已保证搜索互斥。 */
 #define GG_SEARCH_NTHREADS 4
 
-/* 实现在 main.c。只在诊断路径用（init 的读失败统计），不引入额外依赖。 */
-void log_msg(const char *fmt, ...);
+/* 实现在 main.c。只在诊断路径用（init/refine 的读失败统计），不引入额外依赖。
+ *
+ * 这里给一个 **weak** 默认实现：单元测试往往只链接 search.c、没有 main.c，
+ * 否则每个链接 search.c 的测试都得各补一份 shim（已经踩了两次）。
+ * 产品构建里 main.c 的强符号会覆盖它。 */
+__attribute__((weak)) void log_msg(const char *fmt, ...) { (void)fmt; }
 
 /* 前向声明（定义在本文件后部, worker 先引用） */
 static inline uint64_t gg_fault_advance(uint64_t addr, uint64_t len, size_t rd, int *fail_streak);
