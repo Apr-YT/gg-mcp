@@ -60,7 +60,7 @@ python tests\unit\check_kernel_only.py
 >   直接编译 `/mnt/d/...` 可用但 9p 较慢，重负载建议把源码放 WSL 内部的 `/home`。
 
 设备：Redmi myron（serial `134d2f8`，KernelSU root，内核 6.12.69，SELinux Permissive）。
-adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；当前无设备连接）。
+adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）。2026-10-22 晚设备在位并已跑通 itest。
 服务/窗口排查：`dumpsys window windows | grep ggmcp`；崩溃：`logcat -s AndroidRuntime:E`。
 
 ## 已知债（2026-10-15 复核，2026-10-21 校准，2026-10-22 增补）
@@ -201,3 +201,10 @@ apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdc
    间隙 init，再让目标发生一次明确变化后 refine。
 18. **`gg_search_undo` 只回退模糊搜索**（位图环形栈 3 级，不回退数据快照）。
    精确搜索的 undo 需要另存地址数组副本，尚未实现，调用时会明确报错。
+
+19. **agentd 重启后 PC 端第一条请求会自动重连重放**（2026-10-22 修）。判据是
+   「整帧是否发完」：`wr<0` 才重放，`wr==0` 绝不重放（对端可能已执行）。
+   注意实测里失败通常是 `wr=-1`（帧头塞进缓冲成功、payload 阶段断），
+   不是"零字节"，所以不能只判零字节。
+   **调试 wire 层**：`GG_LOG_LEVEL=1` 才出日志（默认 2），且要重定向到文件，
+   管道给 tail 看不到实时输出。
