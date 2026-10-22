@@ -436,53 +436,69 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    想再进一步只能接受"agentd 不能重启"（删节点 = 断了重连入口），或者
    让驱动主动往指定 pid 塞 fd（`task_work_add`，但 pid 要在 insmod 时传）。
 
-32. **fd 表才是最大的暴露面；hwbp 的匿名通道移植完但没启用**（2026-10-23）。
+32. **fd 表才是最大的暴露面；两个模块现在都走匿名通道**（2026-10-23 定案）。
 
-   ### 先说结论
+   ### fd 表比节点本身更容易被命中
 
    agentd 的 `/proc/<pid>/fd` 里，proc 节点的 fd 会显示成
    `N -> /proc/<key>/<key>` —— **扫一遍 fd 表就能发现节点，不需要知道 key**。
-   这比"按路径探测"更容易命中，之前一直没注意。
+   之前几轮都在优化"怎么藏节点"，没看"谁还开着它"。
 
-   处理结果：
+   现在两个模块都升级到匿名 inode：
 
-   | 模块 | 通信方式 | fd 表里显示 |
+   | 模块 | 通信 | fd 表显示 |
    |---|---|---|
-   | rwNova33（内存） | 匿名 ioctl | `anon_inode:dmabuf` ✅ |
-   | rwNova（断点） | proc read | `/proc/dce377…/dce377…` ❌ 仍是暴露面 |
+   | rwNova33（内存） | ioctl | `anon_inode:dmabuf` |
+   | rwNova（断点） | ioctl | `anon_inode:dmabuf` |
 
-   内存模块拿到匿名 fd 后**立刻关闭 proc fd**（`rwproc_anon_upgrade()`），
-   所以那条节点路径从 fd 表里彻底消失，`rwproc_mem_fd` 直接改指匿名 fd
-   （所有 `rwproc_mem_fd<0` 的判断照旧成立，不需要改调用点）。
+   拿不到匿名 fd 时才退回 proc read（`pmfd<0` 式兜底，不影响功能）。
 
-   匿名 inode 的名字从 `"rwproc"` 改成 **`"dmabuf"`** —— 原名字等于在 fd 表里
-   写着"内存读写通道"；dmabuf 是 Android 上极常见的内核对象。
+   ### 三个改动点（按踩坑顺序）
 
-   ### hwbp 的匿名通道：代码在，但开关关着
+   1. **匿名 inode 名字 `"rwproc"` → `"dmabuf"`**：原名等于在 fd 表里写着
+      "内存读写通道"，dmabuf 是 Android 上极常见的内核对象。
+   2. **拿到匿名 fd 后立刻 close 掉 proc fd**（`rwproc_anon_upgrade()`）：
+      节点路径从 fd 表消失；`rwproc_mem_fd` 直接改指匿名 fd，所有
+      `rwproc_mem_fd < 0` 的判断照旧成立，调用点不用改。
+   3. **⭐ 按 fd 归属取匿名 fd**（这是 hwbp 的 bug，害我排查了两轮）：
 
-   实现已完整移植（`hwBreakpointProc_module/anon_channel.h` 是从内存模块复制的，
-   两者 `DispatchCommand(hdr, buf)` 签名与 33 字节请求头一致；命令码
-   `CMD_ANON_GET_FD=15`；init 里 `anon_channel_set_dispatcher`）。
-   但启用后：**走匿名通道的 `GET_NUM_BRPS(=3)` 返回 -1**，同一节点走 proc read 返回 6。
+      ```c
+      // 错：不管哪个模块都取内存模块的 fd
+      int anon_fd = use_anon ? d->rwproc_anon_fd : -1;
+      // 对：
+      if (d->rwproc_anon_fd >= 0 && fd == d->rwproc_anon_fd)      anon_fd = d->rwproc_anon_fd;
+      else if (d->rwproc_bp_anon_fd >= 0 && fd == d->rwproc_bp_anon_fd) anon_fd = d->rwproc_bp_anon_fd;
+      ```
 
-   已排除：`getCpuNumBrps()` 是纯位运算 `((read_cpuid(ID_AA64DFR0_EL1)>>12)&0xf)+1`，
-   不可能返回 -1 ⇒ 请求在 anon 链路上就没走到正确的 case。
-   二分已验证：关掉 `CONFIG_USE_ANON_CHANNEL` 重编，hwbp 立刻恢复（bps=16/threads=16）。
+      症状极具误导性：断点模块的命令被发到内存模块的匿名 fd 上，
+      `GET_NUM_BRPS(3)` 被当成 `READ_PROCESS_MEMORY` 执行，返回 **-14 (EFAULT)**
+      （空句柄），表现为 `ioctl(cmd=3) failed: Bad address`。
+      而 `getCpuNumBrps()` 是纯位运算 `((read_cpuid(ID_AA64DFR0_EL1)>>12)&0xf)+1`，
+      根本不可能返回负数 —— 这个矛盾就是定位的突破口。
 
-   未排除：`AnonDispatchThunk` 的间接函数指针调用与 `cfi_bypass()` 的 text patch
-   之间的相互作用（内存模块同一套代码是正常的，差异未查）。
+   ### 排查工具（`build/ko/_dev/`，不入库）
 
-   **所以开关保持注释状态**（`ver_control.h` 里的注释写明了现象与已排除项）。
-   重新启用前必须：开开关 → 编译 → 用 `gg_watch_set` 验证 `bps=16` 而不是只跑 itest
-   （itest 的 hwbp 段在探测失败时会 `[skip]`，看起来像通过）。
+   - `anon_probe.c`：单模块 —— 分别测 proc read / 取 anon fd / anon ioctl 三步。
+   - `anon_two.c`：复现 agentd 的双模块 fd 序列，打印每个 anon fd 上 `cmd=3`
+     的返回值，**一眼看出 fd 归属**（返回 6 = 断点模块，返回 -14 = 内存模块）。
+   下次怀疑"fd 发错模块"，先跑 `anon_two`，别再靠日志猜。
 
-   **注意**：`build/` 不入库，hwbp 的 `anon_channel.h` 和 `ver_control.h` 改动
-   换机器会丢。要重做的话按上面三条（复制头文件 / 枚举 / dispatcher 注入）。
+   ### 仍然做不到的（架构限制，别硬试）
 
-   ### 测 hwbp 时的坑
+   - **proc 节点不能删**：`fd_install()` 装的是发起系统调用的进程的 fd 表，
+     只能在用户态触发的路径里执行；而用户态第一次触发的唯一入口就是 proc 节点。
+     节点同时是 agentd 崩溃重启的重连入口。
+   - **key 不能随机化**：key 是路径名，agentd 靠它 open；而 readdir 又被
+     `hide_procfs_dir` 过滤掉了，随机化后 agentd 无从发现（死锁）。
+     要突破只能让驱动用 `task_work_add` 主动往指定 pid 塞 fd，pid 得在 insmod
+     时传、agentd 重启即失效 —— 那是换一种运维约束，不是"修好"。
+
+   ### 测 hwbp 的坑
 
    ARM64 只有 6 个硬件断点槽。`gg_watch_set` 之后**必须 `gg_watch_clear`**，
-   否则后续 itest 的 `hwbp INST` 会返回 -1（表现为"代码坏了"，实际是槽被占）。
+   否则后续 itest 的 `hwbp INST` 返回 -1（表现为"代码坏了"，实际是槽被占）。
+   另：itest 的 hwbp 段在探测失败时会打 `[skip]` 然后继续，
+   **`ITEST ALL PASS` 不等于 hwbp 验过** —— 必须看有没有 `bp id` 那两行。
 
 ## 约定
 

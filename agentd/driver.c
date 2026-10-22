@@ -118,9 +118,18 @@ static ssize_t rwproc_call_ex(gg_driver_t *d, int fd, char cmd,
     if (fd < 0) { set_err(d, "rwproc node not open"); return -1; }
     /* 内存模块若有匿名通道，命令改走 ioctl —— 只对 mem fd 生效，
      * 断点模块（rwproc_bp_fd）仍走 proc read，两个 fd 不能混用。 */
-    int use_anon = (fd >= 0 && ((d->rwproc_anon_fd >= 0 && fd == d->rwproc_anon_fd) ||
-                                (d->rwproc_bp_anon_fd >= 0 && fd == d->rwproc_bp_anon_fd)));
-    int anon_fd = use_anon ? d->rwproc_anon_fd : -1;
+    /* 两个模块各有一个匿名 fd，必须按 fd 归属取**同一个**：
+     * 之前这里写成 `anon_fd = use_anon ? rwproc_anon_fd : -1`，对断点模块
+     * 会拿内存模块的 fd —— 表现为 GET_NUM_BRPS 得到 -14（那是内存模块
+     * READ_PROCESS_MEMORY 对空句柄的返回值），排查了两轮。 */
+    int anon_fd = -1;
+    if (fd >= 0) {
+        if (d->rwproc_anon_fd >= 0 && fd == d->rwproc_anon_fd)
+            anon_fd = d->rwproc_anon_fd;
+        else if (d->rwproc_bp_anon_fd >= 0 && fd == d->rwproc_bp_anon_fd)
+            anon_fd = d->rwproc_bp_anon_fd;
+    }
+    int use_anon = (anon_fd >= 0);
     if (use_anon) fd = anon_fd;
     if (data_size > RWPROC_MAX_IO) {
         snprintf(d->last_error, sizeof(d->last_error),
@@ -385,6 +394,7 @@ static void rwproc_try_anon(gg_driver_t *d) {
         int b = rwproc_anon_upgrade(d, d->rwproc_bp_fd, RWBP_CMD_ANON_GET_FD, "bp");
         if (b >= 0) { d->rwproc_bp_anon_fd = b; d->rwproc_bp_fd = b; }
     }
+    log_msg("anon fd map: mem=%d bp=%d (已用 ioctl 通道)", d->rwproc_mem_fd, d->rwproc_bp_fd);
 }
 
 int rwproc_open_process(gg_driver_t *d, pid_t pid, uint64_t *handle) {
