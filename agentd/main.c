@@ -17,6 +17,7 @@
 #include "watch.h"
 #include "shell_util.h"   // 安全 shell 纯逻辑 helper（与单元测试共享单一事实源）
 #include "engine_internal.h"  // 拆分过渡层：引擎单例/帧API 跨文件共享声明
+#include "last_resp.h"        // 响应存档（cmd_end 摘要），可测头文件
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -66,10 +67,9 @@ static int g_hwbp_probe = -1;
 
 /* 最近一次响应存档（send_ok/send_err 写入，dispatch 的 cmd_end 事件使用）。
  * X3: 改为线程局部——每连接线程独立，快速通道（PING/KERNEL_STATUS 等无锁
- * 执行）与锁内引擎操作不再共享同一 buffer，消除跨线程数据竞争。 */
-static _Thread_local char g_last_resp[8192];
-static _Thread_local int  g_last_resp_ok = 0;
-static _Thread_local int  g_last_resp_set = 0;
+ * 执行）与锁内引擎操作不再共享同一 buffer，消除跨线程数据竞争。
+ * 缓冲/截断语义见 last_resp.h（单独成头以便单测 UTF-8 边界处理）。 */
+static _Thread_local gg_last_resp_t g_last_resp;
 
 /* ---------------- 握手鉴权 + 并发闸门 ---------------- */
 
@@ -207,14 +207,13 @@ int send_frame(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
 
 void send_ok(int fd, uint16_t cmd, uint32_t seq, cJSON *res) {
     char *s = cJSON_PrintUnformatted(res);
-    g_last_resp_ok = 1;
-    g_last_resp_set = 1;
-    snprintf(g_last_resp, sizeof(g_last_resp), "%s", s ? s : "{}");
     if (!s) {
-        /* 序列化失败（OOM）：原实现继续 strlen(NULL) → 在错误处理里再崩一次 */
+        /* 序列化失败（OOM）：原实现继续 strlen(NULL) → 在错误处理里再崩一次。
+         * 交给 send_err 收尾，存档也是错误负载（不要留一个假的 "{}"）。 */
         send_err(fd, cmd, seq, GGERR_INTERNAL, "response serialization failed");
         return;
     }
+    gg_last_resp_snapshot(&g_last_resp, s, 1);
     send_frame(fd, cmd, seq, GGWF_RESP, s, strlen(s));
     free(s);
 }
@@ -226,17 +225,16 @@ void send_err(int fd, uint16_t cmd, uint32_t seq, int code, const char *msg) {
     cJSON_AddStringToObject(e, "message", msg ? msg : "error");
     cJSON_AddItemToObject(root, GG_J_ERR, e);
     char *s = cJSON_PrintUnformatted(root);
-    g_last_resp_ok = 0;
-    g_last_resp_set = 1;
-    snprintf(g_last_resp, sizeof(g_last_resp), "%s", s ? s : "{}");
     if (!s) {
         /* 连错误帧都序列化不出来：发一个静态最小负载。send_frame 不改写调用者
          * 缓冲，所以这里可以安全传字符串字面量。 */
         static const char kFallback[] = "{\"e\":{\"code\":12,\"message\":\"serialization failed\"}}";
+        gg_last_resp_snapshot(&g_last_resp, kFallback, 0);
         send_frame(fd, cmd, seq, GGWF_RESP | GGWF_ERR, (char *)kFallback, sizeof(kFallback) - 1);
         cJSON_Delete(root);
         return;
     }
+    gg_last_resp_snapshot(&g_last_resp, s, 0);
     send_frame(fd, cmd, seq, GGWF_RESP | GGWF_ERR, s, strlen(s));
     free(s);
     cJSON_Delete(root);
@@ -494,10 +492,20 @@ static void event_cmd_end(uint16_t cmd, uint64_t t0) {
     cJSON_AddNumberToObject(ev, "ts", (double)now_ms());
     cJSON *data = cJSON_CreateObject();
     cJSON_AddStringToObject(data, "cmd", cmd_name(cmd));
-    cJSON_AddBoolToObject(data, "success", g_last_resp_set ? (g_last_resp_ok ? 1 : 0) : 0);
-    if (g_last_resp_set) {
-        cJSON *res = cJSON_Parse(g_last_resp);
-        if (res) cJSON_AddItemToObject(data, "result", res);
+    cJSON_AddBoolToObject(data, "success", g_last_resp.set ? (g_last_resp.ok ? 1 : 0) : 0);
+    if (g_last_resp.set) {
+        if (!g_last_resp.truncated) {
+            cJSON *res = cJSON_Parse(g_last_resp.buf);
+            if (res) cJSON_AddItemToObject(data, "result", res);
+            else cJSON_AddStringToObject(data, "result_raw", g_last_resp.buf);
+        } else {
+            /* 超长响应（典型：gg_get_results 的 610–740KB）。存档里只有前缀，
+             * 硬 parse 会失败并让 result 静默消失 —— 那正是原缺陷。这里改成
+             * 显式告知：多大、前面长什么样，订阅端据此决定显示摘要还是去拉详情。 */
+            cJSON_AddBoolToObject(data, "result_truncated", 1);
+            cJSON_AddNumberToObject(data, "result_bytes", (double)g_last_resp.full_len);
+            cJSON_AddStringToObject(data, "result_preview", g_last_resp.buf);
+        }
     }
     cJSON_AddNumberToObject(data, "duration_ms", (double)(now_ms() - t0));
     cJSON_AddItemToObject(ev, "data", data);
@@ -1874,7 +1882,7 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
     }
 
     uint64_t t0 = now_ms();
-    g_last_resp_set = 0;
+    gg_last_resp_reset(&g_last_resp);
     event_cmd_start(h->cmd, p);
 
     /* X3 快速通道：只读健康命令不持引擎锁——大进程搜索（可数十秒）期间
