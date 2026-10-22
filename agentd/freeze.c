@@ -4,6 +4,7 @@
  * 进程退出（写入 ESRCH）时自动停掉对应条目并记 last_err。
  */
 #include "freeze.h"
+#include "process.h"   /* process_starttime */
 
 #include <errno.h>
 #include <pthread.h>
@@ -25,6 +26,21 @@ int freeze_init(gg_freeze_t *f, gg_driver_t *drv) {
 static void *freeze_loop(void *arg) {
     gg_freeze_t *f = (gg_freeze_t *)arg;
     while (atomic_load(&f->running)) {
+        /* ★ pid 复用守卫：pid 只是编号，目标退出后内核会把它分给新进程。
+         * 裸 pid 继续写下去，改的就是别人的内存（写成功、无报错，只能靠现象
+         * 才发现）。starttime 在同一个 pid 上对新进程必然不同，是唯一可靠判据。
+         * 每轮都查（100ms 一次，一次 open+read，代价远低于写错进程的后果）。 */
+        uint64_t st = process_starttime(f->pid);
+        if (st == 0 || (f->pid_starttime != 0 && st != f->pid_starttime)) {
+            pthread_mutex_lock((pthread_mutex_t *)f->mtx);
+            for (size_t i = 0; i < f->count; i++) {
+                f->entries[i].active = 0;
+                f->entries[i].last_err = ESRCH;
+            }
+            atomic_store(&f->running, 0);
+            pthread_mutex_unlock((pthread_mutex_t *)f->mtx);
+            break;
+        }
         pthread_mutex_lock((pthread_mutex_t *)f->mtx);
         for (size_t i = 0; i < f->count; i++) {
             gg_freeze_entry_t *e = &f->entries[i];
@@ -56,6 +72,7 @@ int freeze_start(gg_freeze_t *f, pid_t pid) {
         return -1;
     }
     f->pid = pid;
+    f->pid_starttime = process_starttime(pid);
     atomic_store(&f->running, 1);
     pthread_mutex_unlock((pthread_mutex_t *)f->mtx);
     if (pthread_create((pthread_t *)f->thread, NULL, freeze_loop, f) != 0) {

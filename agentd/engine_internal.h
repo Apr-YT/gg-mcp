@@ -18,6 +18,7 @@
 #define GG_ENGINE_INTERNAL_H
 
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <sys/types.h>
 
@@ -34,6 +35,9 @@ typedef struct gg_engine {
     gg_driver_t  drv;
     gg_freeze_t  freeze;
     pid_t        session_pid;      /* -1 = 未附加 */
+    /* attach 时目标的 starttime。每个请求分发前比对，用来识别 pid 复用：
+     * 目标退出后 pid 会被回收再分配，session_pid 仍"有效"却已指向别的进程。 */
+    uint64_t     session_starttime;
     char         session_name[256];
     gg_results_t results;
     size_t       result_cap;

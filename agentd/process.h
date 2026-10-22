@@ -63,6 +63,13 @@ int process_resolve_addr(pid_t pid, uint64_t addr,
                          uint64_t *offset);
 
 int process_exists(pid_t pid);
+/* 进程启动时间（/proc/<pid>/stat 第 22 字段，开机后的 clock tick）。
+ * 0 = 进程不存在或读不到。
+ *
+ * 用途是 pin 住"哪个进程"而不是"哪个 pid"：目标退出后内核会回收 pid，
+ * 新进程可能拿到同一个号，只比对 pid 会认错人（写到无关进程内存里，
+ * 而且没有任何报错）。 */
+uint64_t process_starttime(pid_t pid);
 int process_is_64bit(pid_t pid);   /* 1=64 位, 0=32 位, -1=未知 */
 int process_uid(pid_t pid);        /* -1=未知 */
 

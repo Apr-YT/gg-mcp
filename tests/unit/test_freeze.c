@@ -16,6 +16,13 @@ ssize_t driver_write(gg_driver_t *d, pid_t pid, uint64_t addr,
     return -1;
 }
 
+/* freeze_loop 现在每轮比对 process_starttime 防 pid 复用；本测试不起线程，
+ * 只需满足链接。返回 0 表示"进程不存在"——正好是本测试里 pid 的实际情况。 */
+uint64_t process_starttime(pid_t pid) {
+    (void)pid;
+    return 0;
+}
+
 static int failures = 0;
 #define CHECK(cond, msg) do { \
     if (cond) { printf("ok  : %s\n", msg); } \

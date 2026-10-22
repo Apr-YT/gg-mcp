@@ -317,6 +317,39 @@ int process_exists(pid_t pid) {
     return access(path, F_OK) == 0;
 }
 
+/* /proc/<pid>/stat 第 22 字段 = starttime（进程启动时刻，单位 clock tick）。
+ * 这是判定"还是不是同一个进程"的唯一可靠手段：comm 可改、uid 可换、maps 内容
+ * 也会与同类进程雷同，只有 starttime 在新进程上必然不同。
+ *
+ * 解析要点：comm 在括号里且**允许含空格与右括号**（进程名可由用户控制），
+ * 所以不能按空格切分后直接取第 22 个 —— 必须先找到最后一个 ')' 再从其后数。
+ * 去掉 "(comm)" 之后 state 是第 3 字段，故 starttime 是 ')' 后的第 20 个 token。 */
+uint64_t process_starttime(pid_t pid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[1024];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return 0; }
+    fclose(f);
+
+    char *rp = strrchr(line, ')');
+    if (!rp) return 0;
+    char *s = rp + 1;
+    /* ')' 之后：state(3) ppid(4) ... itrealvalue(21) starttime(22) */
+    for (int field = 3; field < 22; field++) {
+        while (*s == ' ') s++;
+        while (*s && *s != ' ') s++;
+        if (!*s) return 0;          /* 字段不足：截断或格式异常 */
+    }
+    while (*s == ' ') s++;
+    if (!*s) return 0;
+    errno = 0;
+    unsigned long long v = strtoull(s, NULL, 10);
+    if (errno) return 0;
+    return (uint64_t)v;
+}
+
 int process_is_64bit(pid_t pid) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/exe", (int)pid);

@@ -26,6 +26,9 @@ typedef struct gg_freeze_entry {
 typedef struct gg_freeze {
     gg_driver_t *drv;
     pid_t        pid;
+    /* attach 时目标的 starttime（见 process_starttime）。循环线程每轮比对，
+     * 不等就说明 pid 已被复用 —— 必须立刻停写，否则会持续改写一个无关进程。 */
+    uint64_t     pid_starttime;
     gg_freeze_entry_t entries[GG_FREEZE_MAX];
     size_t       count;
     _Atomic int running;    /* 跨线程可见性: freeze_loop 轮询、freeze_stop 置 0，用原子读避免数据竞争 */

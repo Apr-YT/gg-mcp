@@ -32,6 +32,7 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -260,7 +261,22 @@ typedef struct gg_client {
 static gg_client_t *g_clients = NULL;
 static pthread_mutex_t g_clients_mtx = PTHREAD_MUTEX_INITIALIZER;
 
+/* 客户端 socket 的发送超时。默认无超时：对端不读（客户端被 SIGSTOP、进程僵死、
+ * 只 connect 不 recv 的扫描器）时 send() 会在内核缓冲满后**永久阻塞**。
+ * 由于 send_frame 持 g_send_mtx（全局串行），一个这样的连接就能让所有响应与
+ * 事件广播一起停住。1s 对正常客户端（响应通常 <10ms）完全无感，只在僵死时兜底。 */
+#define GG_SOCK_SEND_TIMEOUT_MS 1000
+
+static void client_set_send_timeout(int fd) {
+    struct timeval tv;
+    tv.tv_sec  = GG_SOCK_SEND_TIMEOUT_MS / 1000;
+    tv.tv_usec = (GG_SOCK_SEND_TIMEOUT_MS % 1000) * 1000;
+    /* 非 socket（单元测试用管道）会失败，忽略即可 */
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
 static void clients_register(int fd) {
+    client_set_send_timeout(fd);
     pthread_mutex_lock(&g_clients_mtx);
     gg_client_t *c = malloc(sizeof(*c));
     if (c) {
@@ -312,27 +328,76 @@ static uint64_t now_ms(void) {
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
-/* 广播一条事件。ev 所有权移交（本函数负责 cJSON_Delete）。 */
+/* 发送失败的订阅者从注册表摘除（fd 由连接线程关闭）。 */
+static void clients_drop(int fd) {
+    pthread_mutex_lock(&g_clients_mtx);
+    gg_client_t **pp = &g_clients;
+    while (*pp) {
+        gg_client_t *c = *pp;
+        if (c->fd == fd) {
+            *pp = c->next;
+            free(c);
+            break;
+        }
+        pp = &c->next;
+    }
+    pthread_mutex_unlock(&g_clients_mtx);
+}
+
+#define GG_EVENT_MAX_SUBS 32
+
+/* 广播一条事件。ev 所有权移交（本函数负责 cJSON_Delete）。
+ *
+ * ⚠ 发送必须在 g_clients_mtx **之外**。send_frame 是阻塞写：订阅者不读
+ * （悬浮窗被冻结、手机端进程僵死、只订阅不读的调试客户端）时，写会卡在
+ * 内核缓冲满上。持注册表锁卡住 = clients_register / subscribe 全部堵死；
+ * 而本函数又被 dispatch 调用（那里持 g_eng.mtx），连锁起来就是整个守护进程
+ * "假死"——进程在、端口在、所有请求无响应，且从外部看不出是订阅者拖的。
+ *
+ * 做法：锁内只做快照 + dup，锁外逐条发送。
+ * dup 是必需的：原 fd 归连接线程所有，广播期间可能被 close，而 fd 号会立刻
+ * 被复用——拿裸 fd 去写就可能写到别的连接上（帧内容串线）。dup 出来的句柄
+ * 指向同一 socket，原 fd 关闭不影响它，写完 close 掉即可。
+ * 发送超时在 clients_register 里统一设过（SO_SNDTIMEO），dup 副本共享该 socket
+ * 选项，所以慢订阅者最多拖 GG_SOCK_SEND_TIMEOUT_MS 就被判失败并摘除。 */
 static void broadcast_event(cJSON *ev) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddItemToObject(root, GG_J_EVT, ev);
     char *s = cJSON_PrintUnformatted(root);
     size_t len = s ? strlen(s) : 0;
-    if (len) {
-        pthread_mutex_lock(&g_clients_mtx);
-        gg_client_t **pp = &g_clients;
-        while (*pp) {
-            gg_client_t *c = *pp;
-            if (!c->subscribed) { pp = &c->next; continue; }
-            if (send_frame(c->fd, 0, 0, GGWF_EVENT, s, len) < 0) {
-                /* best-effort：发送失败移除注册表项（fd 由连接线程关闭） */
-                *pp = c->next;
-                free(c);
-                continue;
-            }
-            pp = &c->next;
+    if (!len) {
+        free(s);
+        cJSON_Delete(root);
+        return;
+    }
+
+    struct { int orig; int dupfd; } subs[GG_EVENT_MAX_SUBS];
+    size_t n = 0;
+    int truncated = 0;
+    pthread_mutex_lock(&g_clients_mtx);
+    for (gg_client_t *c = g_clients; c; c = c->next) {
+        if (!c->subscribed) continue;
+        if (n >= GG_EVENT_MAX_SUBS) { truncated = 1; break; }
+        int d = dup(c->fd);
+        if (d < 0) continue;          /* 已被关闭：跳过，下次广播自然清掉 */
+        subs[n].orig  = c->fd;
+        subs[n].dupfd = d;
+        n++;
+    }
+    pthread_mutex_unlock(&g_clients_mtx);
+
+    if (truncated)
+        log_msg("broadcast: more than %d subscribers, some event copies dropped",
+                GG_EVENT_MAX_SUBS);
+
+    for (size_t i = 0; i < n; i++) {
+        if (send_frame(subs[i].dupfd, 0, 0, GGWF_EVENT, s, len) < 0) {
+            /* best-effort：摘掉该项（发送失败多半是连接已断或对端不读）。
+             * 按原 fd 摘除而不是 dupfd —— 二者号不同，且新连接初始未订阅，
+             * 误删也只会让它下次 subscribe 时重新登记。 */
+            clients_drop(subs[i].orig);
         }
-        pthread_mutex_unlock(&g_clients_mtx);
+        close(subs[i].dupfd);
     }
     free(s);
     cJSON_Delete(root);
@@ -719,6 +784,45 @@ static pid_t resolve_pid(cJSON *p) {
     return -1;
 }
 
+/* 会话自愈：目标已退出、或 pid 已被内核复用给别的进程时清理会话。
+ *
+ * 为什么必须做：session_pid 只是个编号。目标被杀后内核会回收它，很快又分配
+ * 给新进程（最典型的就是刚被 kill 又自动重启的同一个 App），此后所有读写都会
+ * 落到这个无关进程上 —— 而且**写操作会成功、不报任何错**，只有目标莫名崩溃或
+ * 数据异常时才暴露。starttime（进程启动时刻）在同一个 pid 的新进程上必然不同，
+ * 是唯一可靠判据；comm/uid/maps 都可能雷同。
+ *
+ * 调用方持 g_eng.mtx（与 h_attach/h_detach 同一临界区），内部不再加锁。
+ * 返回 1 = 有可用会话；0 = 无会话或刚被清理（handler 会照常回 NO_SESSION，
+ * 与"从未 attach"走同一条路径，客户端无需区分两种情形）。 */
+static int session_guard(void) {
+    if (g_eng.session_pid <= 0) return 0;
+    uint64_t st = process_starttime(g_eng.session_pid);
+    int gone   = (st == 0);
+    int reused = (!gone && g_eng.session_starttime != 0 &&
+                  st != g_eng.session_starttime);
+    if (!gone && !reused) return 1;
+
+    pid_t old_pid = g_eng.session_pid;
+    char old_name[sizeof(g_eng.session_name)];
+    snprintf(old_name, sizeof(old_name), "%s", g_eng.session_name);
+    log_msg("session self-heal: pid %d %s (starttime now=%llu expected=%llu)",
+            (int)old_pid, gone ? "exited" : "reused by another process",
+            (unsigned long long)st, (unsigned long long)g_eng.session_starttime);
+
+    watch_stop(&g_watch);
+    freeze_stop(&g_eng.freeze);
+    /* 结果集必须一起清：里面存的都是**旧进程**的地址，留着会被当成新会话的
+     * 结果直接拿去读写（正是上面要防的错进程写）。 */
+    results_clear(&g_eng.results);
+    maps_cache_invalidate();
+    g_eng.session_pid = -1;
+    g_eng.session_starttime = 0;
+    g_eng.session_name[0] = 0;
+    event_session_change(gone ? "target_exit" : "pid_reused", old_pid, old_name);
+    return 0;
+}
+
 static void h_attach(int fd, uint32_t seq, cJSON *p) {
     pid_t pid = resolve_pid(p);
     if (pid <= 0 || !process_exists(pid)) {
@@ -738,6 +842,7 @@ static void h_attach(int fd, uint32_t seq, cJSON *p) {
     maps_cache_invalidate();   /* maps 会话缓存随会话切换失效 */
 
     g_eng.session_pid = pid;
+    g_eng.session_starttime = process_starttime(pid);
     snprintf(g_eng.session_name, sizeof(g_eng.session_name), "%d", (int)pid);
     size_t n = 0;
     gg_proc_entry_t *arr = process_list(&n, NULL);
@@ -773,6 +878,7 @@ static void h_detach(int fd, uint32_t seq, cJSON *p) {
     char old_name[256];
     snprintf(old_name, sizeof(old_name), "%s", g_eng.session_name);
     g_eng.session_pid = -1;
+    g_eng.session_starttime = 0;
     g_eng.session_name[0] = 0;
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", 1);
@@ -1787,6 +1893,12 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
     }
 
     pthread_mutex_lock(&g_eng.mtx);   /* 串行化全部引擎操作（含静态搜索缓冲） */
+    /* 会话自愈：目标已退出 / pid 被复用就在这里清掉会话（见 session_guard）。
+     * 放在锁内是因为它要改 session_* 并停 freeze 线程，与 attach/detach 同临界区；
+     * 放在分发前是为了让所有依赖会话的 handler 都受保护，而不是逐个加检查。
+     * 返回值刻意不用：清掉之后 handler 自己会回 GG_NO_SESSION，走的是"从未
+     * attach"的同一条路径，客户端不需要区分两种情况。 */
+    session_guard();
     switch (h->cmd) {
     case GGCMD_PING:               h_ping(fd, seq, p); break;
     case GGCMD_SELF_TEST:          h_self_test(fd, seq, p); break;
