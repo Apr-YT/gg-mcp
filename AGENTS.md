@@ -93,7 +93,9 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
    —— §十二 会让设备重启的那个操作现在正常收尾。
    关键修正：**不能用 `si.totalram` 当物理地址上界**（真机实测合法 pfn 可达 0x926afc=39.3GB，
    RAM 只有 11.6GB，PA_BITS=48），合法性只由 `virt_addr_valid()` 判。
-   遗留：客户端以**数字**形式传 `value` 会被拒（`bad value`），字符串形式正常，待修。
+   地址/值参数的两种形式（`"0x..."` 字符串与 JSON 数字）在真机逐项一致 —— 但**前提是先部署新
+   `gdm`**：`run_itest.ps1` 用的是自带 itest 二进制（链接 `driver.c`），它绿了不代表设备上
+   跑的 agentd 是新版。本轮就踩过：数字 `value` 报 `bad value`，实为设备还是 00:17 的旧 gdm。
    详见 `docs/audit/RWPROC33_2026-10-22.md`「真机验证结论」节。
 8. **本轮（2026-10-22）已修但设备端未验**：地址参数两端类型约定不一致（数字地址让 `gg_watch_inject`
    `strtoull(NULL)` 段错误、`gg_write {value:100}` 误报缺参）、`parse_value_str` 缺 endptr、HEX_DUMP 响应 cmd 错位、
