@@ -113,6 +113,21 @@ if (-not $SkipKo) {
     if ($koFiles) {
         # 同 [1/6]：/data/adb 是 root 0700，chmod 子目录没用（父目录不可穿），
         # adb shell 仍无法直接 push 到 $DevDir/ko/。改走 /data/local/tmp 中转 + su 复制。
+        #
+        # ⚠️ staging 目录跨次保留，**每次必须先清空**。这个目录曾经害过一次：
+        # 2026-10-21 首次部署时 build\ko\ 里还有 apr_dlkm.ko（rwProcMem 的原始编译名，
+        # build_rwproc_ko.sh 的产物就叫这个），它被拷进 staging；后来 build\ko\ 改用
+        # 「rwProcMem_<内核版本>.ko」命名，apr_dlkm.ko 从 build 目录消失，但 staging
+        # 里那份一直留着。而下面推送是按 staging 目录遍历的（为了不漏掉后补的 rwNova）
+        # —— 于是每次部署都会把这份 10-21 的旧模块一起推上去。
+        #
+        # 后果：设备上同时存在 apr_dlkm.ko（39KB prebuilt）和 rwProcMem_*.ko（自编译），
+        # 两个都是 rwProcMem、都 insmod 成功，但 proc 节点只有一个 —— 先加载的占住
+        # /proc/<key>/<key>，后加载的 fallback 到 /proc 根。agentd 永远打开先加载那个，
+        # 于是「换了 KO 但行为没变 / 变成另一个模块的行为」这类灵异现象就来了。
+        if (Test-Path "$Stage\ko") {
+            Remove-Item "$Stage\ko\*" -Recurse -Force -ErrorAction SilentlyContinue
+        }
         New-Item -ItemType Directory -Force -Path "$Stage\ko" | Out-Null
         foreach ($f in $koFiles) { Copy-Item $f.FullName "$Stage\ko\" -Force }
         # 硬件断点模块必须用自编译版（scripts/build_hwbp_ko.sh 产出）。
