@@ -353,3 +353,36 @@ apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdc
    这两条硬事实。日志里会留 `self-test: WARN self-read returned wrong values`。
    **真正的驱动根因没修**（属于 `docs/audit/RWPROC33` 里没查完的那节），
    所以别把这个 WARN 当噪音删掉。
+
+32. **rwproc 读路径排查进度（2026-10-23 凌晨，未结案）**。这一条是给下一轮接手用的，
+   不是结论 —— 上一个版本的措辞（"两个 KO 各有一半"）是在证据不足时写的，已作废。
+
+   **已确认的事实**：
+   - **页表遍历是对的**。用带 `CONFIG_DEBUG_PRINTK` 的 `_dev/rwproc_dbg.ko` 打日志，
+     读自身进程时 `pgd_index=397 / pud_val / pte_val` 全正常，`paddr` 也正确算出
+     （0x89b68124c、0x92bae5648）。**所以问题不在 get_proc_phy_addr**，
+     别再往页表偏移/pgd 偏移上查。
+   - **失败发生在物理内存读取阶段**：read 返回请求长度、内容全 0。
+     `read_ram_physical_addr` 由 `CONFIG_ENABLE_FAST_PHYMEM`（`ver_control.h:53`
+     硬编码开启）分流，快路径第一步就是 `virt_addr_valid()` 守卫
+     （`phy_mem_fast.h:181/225`），不成立就 break。
+     **首要嫌疑：该守卫在本机误判了合法 pfn**（prebuilt 没有这个守卫，用
+     `xlate_dev_mem_ptr` 慢路径，能读到；但没有守卫时大搜索会崩机）。
+   - **设备上曾同时存在两个 rwProcMem 实例**：`apr_dlkm.ko`（39KB，afei prebuilt，
+     `strings` 里能看到 `[rwProcMem] proc_mkdir failed, fallback to /proc root`）
+     与 `rwProcMem_6.12.69.ko`（307KB 自编译）。两个都会 insmod 成功，
+     但只有先加载的那个能建 `/proc/<key>/<key>`，另一个 fallback 到 /proc 根。
+     **agentd 永远打开的是先加载那个** —— 也就是说前几轮所有"换 KO 后行为变了"的
+     观察，很可能只是在观察不同的实例。
+
+   **还没做、但必须先做的对照实验**：
+   1. 干净重启 + **只装 39KB prebuilt** → 跑 itest / 读自身。这是唯一能确定
+      "prebuilt 到底能不能读自身"的实验，之前一直是双实例，结论不可信。
+   2. 干净重启 + **只装 307KB gki** → 同上（已做过一次：itest FAIL，读自身 0）。
+   3. 两者都做完，才谈得上"改守卫"：把 `virt_addr_valid` 换成
+      `pfn_to_online_page`（它对稀疏内存段更准确），或者在快路径失败时
+      **回退慢路径**而不是直接 break。
+
+   **部署要求（确定要做）**：`deploy.ps1` / `install_ko.sh` 必须让
+   `apr_dlkm.ko` 与 `rwProcMem_*.ko` 互斥（同一模块的两个版本，不能都装）。
+   现在设备上是把两个都装上的状态，先别依赖"换文件就生效"这种判断。
