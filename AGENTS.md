@@ -372,8 +372,10 @@ apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdc
    `pfn_to_online_page(PHYS_PFN(cur - PAGE_OFFSET))`，但**没编译验证过**
    （WSL 里的内核树 /root/hwbp-src 缺 `modules` 目标），v2 是不是这么修的也没确认。
 
-   **部署源现状**：`build/ko/rwProcMem_6.12.69.ko` = v2，`build/ko_built/` 同步。
-   这两个目录都不入库（build/ 被 ignore），换机器时必须重新确认大小是 **307640**。
+   **部署源现状**：`build/ko/rwProcMem_6.12.69.ko` = v2（307640，**已入库** ——
+   `build/*` 虽在 .gitignore 里，但 `build/ko/*.ko` 这几个是早期就被跟踪的，
+   所以修复版会跟着 commit 走）；`build/ko_built/` 那份未跟踪、只在本机。
+   换机器后 `ls -la` 确认大小是 307640 就够了。
 
 33. **「一个驱动变成两个」的根因：deploy 的 staging 目录从不清理**（2026-10-23 修）。
 
