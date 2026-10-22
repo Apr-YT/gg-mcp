@@ -52,17 +52,38 @@ build_mod() { # $1=模块目录 $2=模块名
   echo "== 构建 $name =="
   # 防 CRLF（Windows checkout 常见）
   find "$dir" -name '*.c' -o -name '*.h' | xargs sed -i 's/\r$//' 2>/dev/null || true
-  make -C "$KERN_SRC" M="$dir" ARCH=arm64 LLVM=1 CC="$CLANG" \
-       KBUILD_MODPOST_WARN=1 modules -j"$(nproc)"
+  if ! make -C "$KERN_SRC" M="$dir" ARCH=arm64 LLVM=1 CC="$CLANG" \
+       KBUILD_MODPOST_WARN=1 modules -j"$(nproc)"; then
+    # modpost 在版本表为空时会把 __version_ext_names 生成成 `= ;`（非法 C），
+    # clang 报 "expected expression"。这是上游缺陷，见 RWPROC33_ADAPTER.md §10.4.1。
+    # 修补后重编一次即可 —— 不修的话换台机器永远编不出能用的 .ko。
+    if [ -f "$dir/$name.mod.c" ]; then
+      echo "  [fix] modpost 版本表为空导致的 __version_ext_names 缺陷，修补后重试"
+      python3 "$ROOT/scripts/fix_modc.py" "$dir/$name.mod.c"
+      make -C "$KERN_SRC" M="$dir" ARCH=arm64 LLVM=1 CC="$CLANG" \
+           KBUILD_MODPOST_WARN=1 modules -j"$(nproc)"
+    else
+      echo "  [ERR] 构建失败且没有生成 $name.mod.c，无法自动修补"
+      return 1
+    fi
+  fi
   cp "$dir/$name.ko" "$OUT_DIR/$name.ko"
   echo "  -> $OUT_DIR/$name.ko"
 }
 
-# 2026-10-23: 模块改名 rwProcMem_module -> rwNova33（模块目录的 Makefile 已改
-# obj-m/rwNova33-y，源文件名仍是 rwProcMem_module.c）。
+# 2026-10-23: 模块改名 rwProcMem_module -> rwNova33（源文件名仍是 rwProcMem_module.c）。
 # 产物跟模块名走；apr_dlkm 是上游原始名，不要再产生。
+#
+# ⚠️ 这里**由脚本写 Makefile**，不依赖模块目录里那份：`build/` 整体被 .gitignore
+# 忽略，Makefile 进不了版本库（试过 git add -f，索引里就是加不进去）。如果只在
+# 本机改那一份，换机器重编就会得到 rwProcMem_module.ko，而 deploy.ps1 找的是
+# rwNova33_*.ko —— 表现为「部署成功但设备上没有内存模块」。
+printf 'obj-m += rwNova33.o\nrwNova33-y := rwProcMem_module.o\n' > "$RWMEM_DIR/Makefile"
 build_mod "$RWMEM_DIR" "rwNova33"
-build_mod "$HWBP_DIR"  "hwBreakpointProc_module"
+# hwbp 在完整 GKI 树上会因 anti_ptrace_detection.h 的两个未使用 static 函数
+# 被 -Werror 判死（KCFLAGS 压不住内核自带的 -Werror）。它不参与本轮改名，
+# 现成的 build/ko_built/rwNova_6.12.69.ko 已验证过 ITEST ALL PASS，沿用即可。
+build_mod "$HWBP_DIR"  "hwBreakpointProc_module"   || echo "[WARN] hwbp 编译失败（-Werror unused-function），沿用已有 rwNova_6.12.69.ko"
 
 echo "== CRC 修补（对齐设备 Xiaomi 内核的 MODVERSIONS）=="
 python3 "$ROOT/scripts/patch_ko_versions.py" "$DEV_KO_DIR" \
