@@ -25,6 +25,16 @@ extern "C" {
 #define GGWM_HEADER_LEN  20u
 #define GGWM_MAX_PAYLOAD (1u << 20)    /* 单帧负载上限 1MiB：防恶意/异常超大帧耗尽内存（后续大响应可分片/流式帧） */
 
+/* 响应负载能否装进单帧。
+ *
+ * 超限时**不要**直接把负载交给发送函数：帧头里的 payload_len 是 uint32，
+ * 而超限帧会被拒发 —— 客户端什么也收不到，只能等到连接层超时（PC 端 300s），
+ * 从外部完全看不出是"结果太大"。正确做法是回一个 GGERR_CAP 错误帧，
+ * 把实际字节数和上限一起告诉调用方（见 agentd 的 send_ok）。 */
+static inline int gg_payload_fits(size_t len) {
+    return len <= (size_t)GGWM_MAX_PAYLOAD;
+}
+
 /* 帧标志 */
 #define GGWF_REQ    0x0001u   /* 请求 */
 #define GGWF_RESP   0x0002u   /* 响应 */

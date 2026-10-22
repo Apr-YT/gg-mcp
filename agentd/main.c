@@ -213,8 +213,27 @@ void send_ok(int fd, uint16_t cmd, uint32_t seq, cJSON *res) {
         send_err(fd, cmd, seq, GGERR_INTERNAL, "response serialization failed");
         return;
     }
+    size_t len = strlen(s);
+    if (!gg_payload_fits(len)) {
+        /* 超限帧 send_frame 会直接拒发，客户端什么也收不到，只能等到连接层
+         * 超时（PC 端 300s），从外部完全看不出是"结果太大"。改成明确的错误帧：
+         * 把实际大小、上限和该怎么调一起告诉调用方。
+         * 目前所有 handler 的输出都远低于上限（get_results 10000 条约 610–740KB，
+         * hex_dump 单次 256KB → 512KB），这里是给「将来加大 limit / 字段变长」
+         * 留的兜底，不是当前常见路径。 */
+        log_msg("send_ok: response %zu bytes exceeds GGWM_MAX_PAYLOAD %u (cmd=%u)",
+                len, (unsigned)GGWM_MAX_PAYLOAD, (unsigned)cmd);
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "response too large: %zu bytes exceeds the %u-byte frame limit; "
+                 "reduce limit/len and page the results",
+                 len, (unsigned)GGWM_MAX_PAYLOAD);
+        free(s);
+        send_err(fd, cmd, seq, GGERR_CAP, msg);
+        return;
+    }
     gg_last_resp_snapshot(&g_last_resp, s, 1);
-    send_frame(fd, cmd, seq, GGWF_RESP, s, strlen(s));
+    send_frame(fd, cmd, seq, GGWF_RESP, s, len);
     free(s);
 }
 

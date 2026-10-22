@@ -101,6 +101,17 @@ int main() {
         }
     }
 
+    // 7) 单帧上限判定：超限的响应必须由调用方转成错误帧，而不是交给发送层
+    //    （发送层会拒发，客户端只能等到连接超时，看不出是"结果太大"）
+    {
+        check(gg_payload_fits(0), "payload limit: 0 fits");
+        check(gg_payload_fits(1), "payload limit: 1 fits");
+        check(gg_payload_fits(GGWM_MAX_PAYLOAD - 1), "payload limit: max-1 fits");
+        check(gg_payload_fits(GGWM_MAX_PAYLOAD), "payload limit: max fits (inclusive)");
+        check(!gg_payload_fits((size_t)GGWM_MAX_PAYLOAD + 1), "payload limit: max+1 rejected");
+        check(!gg_payload_fits((size_t)64 * 1024 * 1024), "payload limit: 64MiB rejected");
+    }
+
     if (fails == 0) {
         std::printf("== ALL PASS ==\n");
         return 0;
