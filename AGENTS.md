@@ -126,6 +126,13 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
    **改这里的注意点**：不要再把「截断后的串」当 JSON 解析 —— 那是原缺陷的成因；
    新增事件字段时先用 `test_last_resp` 覆盖 UTF-8 三种相位（`s[256]` 落在
    continuation / lead byte / ASCII）。
+14. GG-U4（无 key 即放行）已修：未指定 `--wire-key`/`--wire-key-file` 时生成
+   16 字节临时密钥，落盘 `/data/adb/GG-Ghost/wire.key.ephemeral`（0600）并复用，
+   stderr 打印；`/dev/urandom` 不可读才拒绝启动。AUTH 的空 key 分支改为拒绝。
+   **手工调试须知**：不传 key 启动时，客户端要改用启动日志里打印的临时 key
+   （或在设备上读那个 .ephemeral 文件）。正常部署不受影响。
+   **另一个坑**：`start_agentd.sh start` 在端口被别的实例占用时会**误报"已启动"**
+   （只按 pidfile 判断存活）。手工 `setsid` 起过实例后一定要先 `kill $(pidof gdm)`。
 
 ### 已清（2026-10-15，本机实测）
 
