@@ -345,7 +345,7 @@ watch_poll:
 ### 5.3 加载流程
 
 ```
-1. insmod rwProcMem_module.ko
+1. insmod rwNova33.ko      # 2026-10-23 改名，原 rwProcMem_module.ko
 2. insmod hwBreakpointProc_module.ko
 3. （可选）CMD_HIDE_KERNEL_MODULE 隐藏两个模块
 4. agentd 自动发现 /proc/<key>/<key> 节点

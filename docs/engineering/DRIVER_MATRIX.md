@@ -246,7 +246,8 @@ cmd=3 (GET_NUM_BRPS) → 自编译模块返回 6（执行断点槽数）
 
 | 文件 | 大小 | 读写 | 全量搜索（systemui 341MB） | 结论 |
 |---|---|---|---|---|
-| `rwproc_v2.ko` | 307640 | ITEST ALL PASS | 3.6s / 21892 条 / 不崩 | **现役**（`build/ko/rwProcMem_6.12.69.ko`） |
+| `rwNova33_6.12.69.ko` | 307096 | ITEST ALL PASS | 3.3s / 13681 条 / 不崩 | **现役**（模块名 rwNova33，2026-10-23 改名后从当前源码重编） |
+| `rwproc_v2.ko` | 307640 | ITEST ALL PASS | 3.6s / 21892 条 / 不崩 | 改名前的等价物，保留备查 |
 | `rwProcMem_gki.ko` | 307584 | read 全 0 | 正常 | `virt_addr_valid` 误判合法 pfn，弃用 |
 | `rwproc_dbg.ko` | 330712 | — | — | 唯一带 `CONFIG_DEBUG_PRINTK`，抓页表日志用 |
 | `prebuilt/rwProcMem_slim.ko` | 39552 | — | — | vermagic 不匹配，insmod 报 `module_layout` 版本不符 |

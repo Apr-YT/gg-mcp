@@ -18,7 +18,7 @@
 #   OUT_DIR     可选: 输出目录（默认 build/ko）
 #
 # 产物:
-#   $OUT_DIR/apr_dlkm.ko  $OUT_DIR/hwBreakpointProc_module.ko（已 CRC 修补）
+#   $OUT_DIR/rwNova33.ko  $OUT_DIR/hwBreakpointProc_module.ko（已 CRC 修补）
 #
 # 注意: 若在 Windows checkout 上运行, 先处理 CRLF（sed -i 's/\r$//' 本脚本与全部 .c/.h）,
 #       并补齐大小写撞名文件（见 RWPROC33_ADAPTER.md §十 构建节）。
@@ -58,13 +58,16 @@ build_mod() { # $1=模块目录 $2=模块名
   echo "  -> $OUT_DIR/$name.ko"
 }
 
-build_mod "$RWMEM_DIR" "apr_dlkm"
+# 2026-10-23: 模块改名 rwProcMem_module -> rwNova33（模块目录的 Makefile 已改
+# obj-m/rwNova33-y，源文件名仍是 rwProcMem_module.c）。
+# 产物跟模块名走；apr_dlkm 是上游原始名，不要再产生。
+build_mod "$RWMEM_DIR" "rwNova33"
 build_mod "$HWBP_DIR"  "hwBreakpointProc_module"
 
 echo "== CRC 修补（对齐设备 Xiaomi 内核的 MODVERSIONS）=="
 python3 "$ROOT/scripts/patch_ko_versions.py" "$DEV_KO_DIR" \
        "$OUT_DIR/hwBreakpointProc_module.ko" \
-       "$OUT_DIR/apr_dlkm.ko"
+       "$OUT_DIR/rwNova33.ko"
 
 echo "== 完成 =="
 ls -l "$OUT_DIR"/*.ko

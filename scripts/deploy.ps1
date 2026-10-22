@@ -154,19 +154,22 @@ if (-not $SkipKo) {
         }
         # 中转目录也要先清：它跨次保留，旧文件会被一起 cp 过去
         # ── 内存模块必须是自编译修复版 ────────────────────────────────────
-        # build\ko\ 里那份 rwProcMem_6.12.69.ko 原本是 afei 的 prebuilt slim
-        # （39KB）。它在全量匿名搜索时会打崩内核、设备直接重启
-        # （2026-10-22 深夜复现四次，换自编译 307KB 版后同一目标搜索
-        #  正常返回）。prebuilt 与自编译版不同名不同大小，靠"同名覆盖"
+        # build\ko\ 里那份原本是 afei 的 prebuilt slim（39KB）。它在全量匿名搜索时
+        # 会打崩内核、设备直接重启（2026-10-22 深夜复现四次，换自编译 307KB 版后
+        # 同一目标搜索正常返回）。prebuilt 与自编译版不同名不同大小，靠"同名覆盖"
         # 消灭它的老办法在这里从来就没成立过 —— 必须显式替换。
-        $selfMem = "$Root\build\ko_built\rwProcMem_6.12.69.ko"
+        #
+        # 2026-10-23：模块改名 rwProcMem_module -> rwNova33（只改加载名与产物名，
+        # 源文件名仍是 rwProcMem_module.c）。hwbp 那边叫 rwNova，两个不能同名。
+        $selfMem = "$Root\build\ko_built\rwNova33_6.12.69.ko"
         if (Test-Path $selfMem) {
             Remove-Item "$Stage\ko\rwProcMem_6.12.69.ko" -Force -ErrorAction SilentlyContinue
-            Copy-Item $selfMem "$Stage\ko\rwProcMem_6.12.69.ko" -Force
-            Write-Host "  内存模块: 使用自编译修复版 rwProcMem（已剔除 afei prebuilt）" -ForegroundColor DarkYellow
+            Remove-Item "$Stage\ko\rwNova33_6.12.69.ko" -Force -ErrorAction SilentlyContinue
+            Copy-Item $selfMem "$Stage\ko\rwNova33_6.12.69.ko" -Force
+            Write-Host "  内存模块: 自编译 rwNova33（模块名 rwNova33，已剔除 afei prebuilt）" -ForegroundColor DarkYellow
         } else {
-            Write-Host "  [WARN] 没有 build\ko_built\rwProcMem_6.12.69.ko —— 将部署 prebuilt，" -ForegroundColor Yellow
-            Write-Host "         全量搜索可能打崩内核。自编译来源见 AGENTS 第 29 条。" -ForegroundColor Yellow
+            Write-Host "  [WARN] 没有 build\ko_built\rwNova33_6.12.69.ko —— 将部署 prebuilt，" -ForegroundColor Yellow
+            Write-Host "         全量搜索可能打崩内核。自编译来源见 AGENTS 第 27/32 条。" -ForegroundColor Yellow
         }
         Adb-Sh "rm -rf $TmpDir/ko" | Out-Null
         Adb-Sh "mkdir -p $TmpDir/ko" | Out-Null

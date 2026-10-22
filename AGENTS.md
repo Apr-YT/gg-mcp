@@ -157,7 +157,29 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 19. **search.c 的 log_msg 是 weak 默认实现**。单元测试常只链接 search.c，
    没有 main.c —— 加诊断日志不用再给每个测试补 shim。产品构建里 main.c 的
    强符号会覆盖它。同理，新增其他跨文件依赖时优先考虑 weak 默认实现。
-20. **内核模块已改名 `hwBreakpointProc_module` → `rwNova`**（2026-10-22）。只在
+20. **两个内核模块都改过名**（2026-10-22 改 hwbp，2026-10-23 改内存模块）。
+   改法一致：模块目录的 Makefile 换 `obj-m`，源文件名保持不变。
+
+   | 原模块名 | 现模块名 | 产物 | 改法 |
+   |---|---|---|---|
+   | `hwBreakpointProc_module` | **rwNova** | `rwNova_6.12.69.ko` | `obj-m += rwNova.o` / `rwNova-y := hwBreakpointProc_module.o` |
+   | `rwProcMem_module` | **rwNova33** | `rwNova33_6.12.69.ko` | `obj-m += rwNova33.o` / `rwNova33-y := rwProcMem_module.o` |
+
+   **两个名字不能相同** —— 同名模块第二个 `insmod` 直接 `-EEXIST`。
+
+   ⚠️ **`build/rwProcMem33/` 整个驱动源码目录不在版本库里**（`.gitignore` 的 `build/*`），
+   所以 `obj-m` 的改动只体现在**本机的 Makefile 和入库的 `.ko` 产物**上。
+   换机器/重新 clone 后要重做这两处改：
+   - `build/rwProcMem33/rwProcMem33Module/rwProcMem_module/Makefile`：
+     `obj-m += rwNova33.o` / `rwNova33-y := rwProcMem_module.o`
+   - 编出的 `rwNova33.ko` → 放 `build/ko/rwNova33_<内核版本>.ko`
+   编译要用 `/root/gki`（有完整 `modules` 目标），且必须跑
+   `build/ko/_dev/fix_modc.py` 修 `__version_ext_names[] = ;` 那个上游缺陷，
+   见 RWPROC33_ADAPTER.md §10.4.1。
+   **proc 节点名不受影响**：它来自 `CONFIG_PROC_NODE_AUTH_KEY`
+   （内存 `e84523…` / 断点 `dce377…`），跟模块名无关，所以 agentd 的探测路径照旧。
+
+   原来
    `build_hwbp_ko.sh` 里做了 `obj-m += rwNova.o` + `rwNova-y := hwBreakpointProc_module.o`
    （源文件名不变，只改加载名与产物名）。**proc 节点名不受影响** —— 它来自
    `CONFIG_PROC_NODE_AUTH_KEY`（`dce3771681d4c7a143d5d06b7d32548e`），所以
@@ -248,7 +270,8 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 
    | 文件 | 大小 | 读写 | 全量搜索 | 结论 |
    |---|---|---|---|---|
-   | `rwproc_v2.ko` | 307640 | **ITEST ALL PASS** | **3.6s，不崩** | **用这个** |
+   | `rwNova33_6.12.69.ko` | 307096 | **ITEST ALL PASS** | **3.3s，不崩** | **现役**（改名后从当前源码重编，模块名 rwNova33） |
+   | `rwproc_v2.ko` | 307640 | ITEST ALL PASS | 3.6s，不崩 | 改名前的等价物，保留备查 |
    | `rwProcMem_gki.ko` | 307584 | 读全 0 | 正常 | 有回归，别用 |
    | `rwproc_dbg.ko` | 330712 | — | — | 唯一带 `CONFIG_DEBUG_PRINTK`，只用来抓页表日志 |
    | `rwProcMem_new.ko` | 160288 | 未测 | 未测 | — |
@@ -260,10 +283,10 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    `pfn_to_online_page(PHYS_PFN(cur - PAGE_OFFSET))`，但**没编译验证过**
    （WSL 里的内核树 /root/hwbp-src 缺 `modules` 目标），v2 是不是这么修的也没确认。
 
-   **部署源现状**：`build/ko/rwProcMem_6.12.69.ko` = v2（307640，**已入库** ——
+   **部署源现状**：`build/ko/rwNova33_6.12.69.ko` = 307096（**已入库** ——
    `build/*` 虽在 .gitignore 里，但 `build/ko/*.ko` 这几个是早期就被跟踪的，
    所以修复版会跟着 commit 走）；`build/ko_built/` 那份未跟踪、只在本机。
-   换机器后 `ls -la` 确认大小是 307640 就够了。
+   换机器后 `ls -la` 确认大小是 307096（或 v2 的 307640）就够了。
 28. **「一个驱动变成两个」的根因：deploy 的 staging 目录从不清理**（2026-10-23 修）。
 
    `deploy.ps1` 把 `build\ko\*.ko` 拷到 `%TEMP%\ggmcp_stage\ko\`，再**按 staging
