@@ -533,6 +533,27 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 
    当前实测：**PASS=12 FAIL=0**。
 
+34. **CFI 补丁无法消除（别再试编译期方案）**（2026-10-23 论证）。
+
+   `cfi_bypass.h` 干的事：用 `aarch64_insn_write` 逐 4 字节把
+   **`__cfi_check_fail` / `__cfi_slowpath` / `__ubsan_handle_cfi_check_fail_abort`**
+   这几个失败处理函数改成空操作。它不碰检查逻辑本身，只让"检查失败"不 panic。
+
+   为什么必须这么做：内核开 `CONFIG_CFI_CLANG=y` 后，**所有间接调用点**都插了
+   `__cfi_check()`。hwbp 把 handler 注册成 perf_event 回调，内核在**自己的调用点**
+   用函数指针调它 —— 这个检查在调用方，不在模块里。
+
+   所以**编译期关掉模块的 KCFI 插桩（`-fno-sanitize=kcfi`）解决不了**：
+   模块自己少插几个检查，内核侧的检查照旧，回调一进来就 panic。
+   真要用编译期方案得连内核一起改（不现实）。
+
+   现状风险：patch 常驻 → 内核 text 与磁盘 Image 不一致，理论上完整性自检能抓到。
+   判据是"需要 root + 主动算 text hash"，比 dmesg/fd 表那类被动暴露面高得多。
+   **做隐藏性优化时不要动这块** —— 关掉直接 panic，且没有替代路径。
+
+   顺带：`disable_kprobe_blacklist()` 也在同一个 `#ifdef` 里，它是给
+   `rw_sym_lookup` 探敏感符号用的（`modules` 链表等），关掉会让 UNHIDE 逃生舱失效。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
