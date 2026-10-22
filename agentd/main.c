@@ -572,7 +572,7 @@ static uint64_t parse_value_str(int vtype, const char *s, int *ok) {
     char *end = NULL;
     if (vtype == VT_FLOAT || vtype == VT_DOUBLE) {
         double d = strtod(s, &end);
-        if (end == s) return 0;
+        if (end == s || *end != '\0') return 0;
         uint64_t bits = 0;
         if (vtype == VT_FLOAT) {
             float f = (float)d;
@@ -586,9 +586,43 @@ static uint64_t parse_value_str(int vtype, const char *s, int *ok) {
     }
     errno = 0;
     unsigned long long v = strtoull(s, &end, 0);
-    if (end == s || errno == ERANGE) return 0;
+    /* endptr 必须吃到结尾：只判 end==s 时 "123abc" / "1.5x" 会被当成 123 / 1
+     * 当「合法值」写进目标进程，调用方永远看不出自己参数写错了。 */
+    if (end == s || *end != '\0' || errno == ERANGE) return 0;
     *ok = 1;
     return (uint64_t)v;
+}
+
+/* 取 string / number / bool 形式的标量参数，统一转成字符串。
+ * 存在原因：cJSON 数字节点的 valuestring 恒为 NULL。AI 客户端发
+ * {"value":100} 是常态，直接取 valuestring 会得到 NULL —— 轻则误报
+ * "value required"，重则把它交给 strtoull 直接段错误。 */
+static const char *j_scalar_str(cJSON *node, char *buf, size_t bufsz) {
+    if (!node) return NULL;
+    if (cJSON_IsString(node)) return node->valuestring;
+    if (cJSON_IsNumber(node)) {
+        /* %.17g 保证 double 可无损回读（int 类型下 "1.5" 会被严格解析拒绝，
+         * 这正确：整数型不该接受小数）。 */
+        snprintf(buf, bufsz, "%.17g", node->valuedouble);
+        return buf;
+    }
+    if (cJSON_IsBool(node)) return cJSON_IsTrue(node) ? "1" : "0";
+    return NULL;
+}
+
+/* 从 cJSON 节点取地址，接受 "0x..." 字符串与 JSON 数字两种形态。
+ * 嵌套在数组里的地址（set_results 的 values[].addr）走不到 dispatch 的
+ * 顶层地址闸门，必须在这里单独兜住，否则同样是 strtoull(NULL)。 */
+static int j_addr_u64(cJSON *node, uint64_t *out) {
+    if (!node) return 0;
+    if (cJSON_IsString(node)) return parse_u64_strict(node->valuestring, out);
+    if (cJSON_IsNumber(node)) {
+        double dv = node->valuedouble;
+        if (!(dv >= 0) || dv >= 18446744073709551616.0) return 0;   /* 2^64 */
+        if (out) *out = (uint64_t)dv;
+        return 1;
+    }
+    return 0;
 }
 
 /* ---------------- 各命令处理 ---------------- */
@@ -875,7 +909,8 @@ static void h_search(int fd, uint32_t seq, cJSON *p) {
     int region = parse_region(p, REGION_ANONYMOUS);
     if (type < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "invalid " VT_HINT); return; }
     if (region < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "invalid " REGION_HINT); return; }
-    const char *vs = cJSON_GetObjectItem(p, "value") ? cJSON_GetObjectItem(p, "value")->valuestring : NULL;
+    char vbuf[64];
+    const char *vs = j_scalar_str(cJSON_GetObjectItem(p, "value"), vbuf, sizeof(vbuf));
     int64_t prev = (int64_t)g_eng.results.count;
     int64_t found = 0;
 
@@ -1210,18 +1245,21 @@ static void h_read(int fd, uint32_t seq, cJSON *p) {
     cJSON_Delete(r);
 }
 
-static void h_read_bytes(int fd, uint32_t seq, cJSON *p) {
-    if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_READ_BYTES, seq, GGERR_NO_SESSION, "no session"); return; }
+/* cmd 由调用方传入：HEX_DUMP 与 READ_BYTES 共用本函数，响应帧的 cmd 必须
+ * 回填请求里的那个值。旧实现硬编码 GGCMD_READ_BYTES，导致 gg_hex_dump 的
+ * 响应 cmd=16 而请求是 17 —— 违反「响应 cmd 回填请求 cmd」的协议约定。 */
+static void h_read_bytes(int fd, uint16_t cmd, uint32_t seq, cJSON *p) {
+    if (g_eng.session_pid <= 0) { send_err(fd, cmd, seq, GGERR_NO_SESSION, "no session"); return; }
     const char *as = cJSON_GetObjectItem(p, "addr") ? cJSON_GetObjectItem(p, "addr")->valuestring : NULL;
     double len_d = cJSON_GetObjectItem(p, "len") ? cJSON_GetObjectItem(p, "len")->valuedouble : 64;
-    if (!as) { send_err(fd, GGCMD_READ_BYTES, seq, GGERR_BAD_REQUEST, "addr required"); return; }
+    if (!as) { send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "addr required"); return; }
     /* len 走 double 再转 size_t：负数/0 会变成巨大值或 0 长度。必须先判范围再转。 */
-    if (!(len_d >= 1)) { send_err(fd, GGCMD_READ_BYTES, seq, GGERR_BAD_REQUEST, "len must be >= 1"); return; }
+    if (!(len_d >= 1)) { send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "len must be >= 1"); return; }
     size_t len = (size_t)len_d;
     if (len > GG_SEARCH_CHUNK) len = GG_SEARCH_CHUNK;   /* 单次读上限 256KB（= RWPROC_MAX_IO） */
     uint64_t addr = strtoull(as, NULL, 0);
     uint8_t *buf = malloc(len);
-    if (!buf) { send_err(fd, GGCMD_READ_BYTES, seq, GGERR_INTERNAL, "out of memory"); return; }
+    if (!buf) { send_err(fd, cmd, seq, GGERR_INTERNAL, "out of memory"); return; }
     ssize_t got = driver_read_ex(&g_eng.drv, g_eng.session_pid, addr, buf, len, parse_force(p));
     cJSON *r = cJSON_CreateObject();
     if (got < 0) {
@@ -1230,7 +1268,7 @@ static void h_read_bytes(int fd, uint32_t seq, cJSON *p) {
         cJSON_AddStringToObject(r, "error", g_eng.drv.last_error);
     } else {
         char *hex = malloc((size_t)got * 2 + 1);
-        if (!hex) { free(buf); send_err(fd, GGCMD_READ_BYTES, seq, GGERR_INTERNAL, "out of memory"); return; }
+        if (!hex) { free(buf); send_err(fd, cmd, seq, GGERR_INTERNAL, "out of memory"); return; }
         for (ssize_t i = 0; i < got; i++) snprintf(hex + i * 2, 3, "%02x", buf[i]);
         cJSON_AddStringToObject(r, "hex", hex);
         cJSON_AddNumberToObject(r, "bytes", (double)got);
@@ -1244,7 +1282,7 @@ static void h_read_bytes(int fd, uint32_t seq, cJSON *p) {
                 "Try an address in an executing/active mapping, or gg_search_range within a mapped region");
     }
     free(buf);
-    send_ok(fd, GGCMD_READ_BYTES, seq, r);
+    send_ok(fd, cmd, seq, r);
     cJSON_Delete(r);
 }
 
@@ -1253,7 +1291,8 @@ static void h_write(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_WRITE, seq, GGERR_NO_SESSION, "no session"); return; }
     const char *as = cJSON_GetObjectItem(p, "addr") ? cJSON_GetObjectItem(p, "addr")->valuestring : NULL;
     int type = parse_vt(p, VT_DWORD);
-    const char *vs = cJSON_GetObjectItem(p, "value") ? cJSON_GetObjectItem(p, "value")->valuestring : NULL;
+    char vbuf[64];
+    const char *vs = j_scalar_str(cJSON_GetObjectItem(p, "value"), vbuf, sizeof(vbuf));
     if (!as || !vs) { send_err(fd, GGCMD_WRITE, seq, GGERR_BAD_REQUEST, "addr+value required"); return; }
     int ok = 0;
     uint64_t value = parse_value_str(type, vs, &ok);
@@ -1285,6 +1324,11 @@ static void h_set_results(int fd, uint32_t seq, cJSON *p) {
     int type = parse_vt(p, VT_DWORD);
     cJSON *vals = cJSON_GetObjectItem(p, "values");
     if (!cJSON_IsArray(vals)) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_BAD_REQUEST, "values array required"); return; }
+    /* vt_size(VT_BYTES)=0、非法 type 为负：逐条写 0 字节会被计成成功，
+     * written 虚报成「全改完了」。与 h_write / h_freeze 对齐，入口一次拒绝。 */
+    int isz = vt_size(type);
+    if (isz <= 0) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_BAD_REQUEST,
+                             "type bytes not supported for set_results"); return; }
     if (g_eng.results.fuzzy_active) results_materialize(&g_eng.results);
 
     int n = cJSON_GetArraySize(vals);
@@ -1292,31 +1336,38 @@ static void h_set_results(int fd, uint32_t seq, cJSON *p) {
 
     /* 逐条: 按 index 或 addr 解析目标地址, 按 value 写入 */
     size_t written = 0;
+    size_t skipped = 0;   /* 解析失败/写入失败的条目：必须回报，否则 written 偏小却像是「全成功」 */
     int m = 0;
     for (int i = 0; i < n && m < n; i++) {
         cJSON *o = cJSON_GetArrayItem(vals, i);
+        if (!cJSON_IsObject(o)) { skipped++; continue; }
         cJSON *idxj = cJSON_GetObjectItem(o, "index");
         cJSON *addj = cJSON_GetObjectItem(o, "addr");
         cJSON *vj = cJSON_GetObjectItem(o, "value");
-        if (!vj) continue;
+        char vbuf[64];
         int ok = 0;
-        uint64_t value = parse_value_str(type, vj->valuestring, &ok);
-        if (!ok) continue;
+        uint64_t value = parse_value_str(type, j_scalar_str(vj, vbuf, sizeof(vbuf)), &ok);
+        if (!ok) { skipped++; continue; }
         uint64_t addr = 0;
-        if (addj && addj->valuestring) {
-            addr = strtoull(addj->valuestring, NULL, 0);
-        } else if (idxj && idxj->valuedouble >= 0 && (size_t)idxj->valuedouble < g_eng.results.count) {
+        if (addj) {
+            /* 数字形式与字符串形式都要吃：这里在数组元素里，走不到 dispatch 的顶层地址闸门 */
+            if (!j_addr_u64(addj, &addr)) { skipped++; continue; }
+        } else if (idxj && cJSON_IsNumber(idxj) && idxj->valuedouble >= 0 &&
+                   (size_t)idxj->valuedouble < g_eng.results.count) {
             addr = g_eng.results.addrs[(size_t)idxj->valuedouble];
-        } else continue;
+        } else { skipped++; continue; }
         uint8_t buf[8];
         encode_value_local(type, value, buf);
-        if (driver_write(&g_eng.drv, g_eng.session_pid, addr, buf, (size_t)vt_size(type)) == (ssize_t)vt_size(type)) {
+        if (driver_write(&g_eng.drv, g_eng.session_pid, addr, buf, (size_t)isz) == (ssize_t)isz) {
             written++;
+        } else {
+            skipped++;
         }
         m++;
     }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "written", (double)written);
+    cJSON_AddNumberToObject(r, "skipped", (double)skipped);
     send_ok(fd, GGCMD_SET_RESULTS, seq, r);
     cJSON_Delete(r);
     event_results_update();
@@ -1327,7 +1378,8 @@ static void h_freeze(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_FREEZE, seq, GGERR_NO_SESSION, "no session"); return; }
     const char *as = cJSON_GetObjectItem(p, "addr") ? cJSON_GetObjectItem(p, "addr")->valuestring : NULL;
     int type = parse_vt(p, VT_DWORD);
-    const char *vs = cJSON_GetObjectItem(p, "value") ? cJSON_GetObjectItem(p, "value")->valuestring : NULL;
+    char vbuf[64];
+    const char *vs = j_scalar_str(cJSON_GetObjectItem(p, "value"), vbuf, sizeof(vbuf));
     if (!as || !vs) { send_err(fd, GGCMD_FREEZE, seq, GGERR_BAD_REQUEST, "addr+value required"); return; }
     int ok = 0;
     uint64_t value = parse_value_str(type, vs, &ok);
@@ -1661,10 +1713,24 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
         for (int i = 0; addr_keys[i]; i++) {
             cJSON *a = cJSON_GetObjectItem(p, addr_keys[i]);
             if (!a) continue;
-            int ok;
-            if (cJSON_IsString(a))      ok = parse_u64_strict(a->valuestring, NULL);
-            else if (cJSON_IsNumber(a)) ok = (a->valuedouble >= 0);
-            else                        ok = 0;
+            int ok = 0;
+            if (cJSON_IsString(a)) {
+                ok = parse_u64_strict(a->valuestring, NULL);
+            } else if (cJSON_IsNumber(a)) {
+                /* 数字形式必须就地规范化为 "0x..." 字符串，不能只「放行」：
+                 * 下游 handler 一律按 ->valuestring 取地址，而 cJSON 数字节点的
+                 * valuestring 恒为 NULL —— 放行而不转换等于把 NULL 交给 strtoull
+                 * （gg_watch_inject 曾因此让 agentd 直接段错误）。
+                 * double 只有 53 位整数精度：更大的地址本就该用字符串传，
+                 * 这里按客户端实际给出的值规范化，不替它猜。 */
+                double dv = a->valuedouble;
+                if (dv >= 0 && dv < 18446744073709551616.0) {
+                    char hexbuf[32];
+                    snprintf(hexbuf, sizeof(hexbuf), "0x%llx", (unsigned long long)dv);
+                    ok = cJSON_ReplaceItemInObjectCaseSensitive(
+                             p, addr_keys[i], cJSON_CreateString(hexbuf)) ? 1 : 0;
+                }
+            }
             if (!ok) {
                 log_msg("gate: cmd %u bad address arg '%s'", (unsigned)h->cmd, addr_keys[i]);
                 send_err(fd, h->cmd, seq, GGERR_BAD_REQUEST,
@@ -1681,7 +1747,11 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
      * 位于锁与事件之外, 拦截时直接返回, 不泄漏引擎状态。 */
     static const uint16_t g_destructive_cmds[] = {
         GGCMD_WRITE, GGCMD_SET_RESULTS, GGCMD_FREEZE, GGCMD_UNFREEZE,
-        GGCMD_SHELL, GGCMD_PAUSE, GGCMD_RESUME, GGCMD_WATCH
+        GGCMD_SHELL, GGCMD_PAUSE, GGCMD_RESUME, GGCMD_WATCH,
+        /* 虚拟触摸会操作系统 UI（可替用户点掉授权弹窗、走完应用内确认），
+         * 属「改变外部状态」而非只读。旧清单只按「写内存类」列举，漏了这两个，
+         * 于是 --safe 自称只读却仍能注入输入。 */
+        GGCMD_GHOST_TAP, GGCMD_GHOST_SWIPE
     };
     if (g_eng.safe_mode) {
         for (size_t i = 0; i < sizeof(g_destructive_cmds) / sizeof(g_destructive_cmds[0]); i++) {
@@ -1733,8 +1803,8 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
     case GGCMD_GET_RESULTS:        h_get_results(fd, seq, p); break;
     case GGCMD_CLEAR_RESULTS:      h_clear_results(fd, seq, p); break;
     case GGCMD_READ:               h_read(fd, seq, p); break;
-    case GGCMD_READ_BYTES:         h_read_bytes(fd, seq, p); break;
-    case GGCMD_HEX_DUMP:           h_read_bytes(fd, seq, p); break;  /* 同 READ_BYTES */
+    case GGCMD_READ_BYTES:         h_read_bytes(fd, h->cmd, seq, p); break;
+    case GGCMD_HEX_DUMP:           h_read_bytes(fd, h->cmd, seq, p); break;  /* 同 READ_BYTES，仅 cmd 回填不同 */
     case GGCMD_WRITE:              h_write(fd, seq, p); break;
     case GGCMD_SET_RESULTS:        h_set_results(fd, seq, p); break;
     case GGCMD_FREEZE:             h_freeze(fd, seq, p); break;
@@ -1873,7 +1943,17 @@ int main(int argc, char **argv) {
     wire_key_buf[0] = wire_key_file_buf[0] = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) port = atoi(argv[++i]);
+        if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+            /* atoi 对 "70000"/"abc" 分别给出 70000/0，随后被 (uint16_t) 静默截断成
+             * 4464/0 —— 端口 0 表示随机端口，adb forward 必然连不上，而日志里看不出
+             * 任何异常。这里显式校验范围，把配置错误变成启动失败。 */
+            uint64_t pv = 0;
+            if (!parse_u64_strict(argv[++i], &pv) || pv == 0 || pv > 65535) {
+                fprintf(stderr, "gg-agentd: --port must be 1..65535 (got '%s')\n", argv[i]);
+                return 2;
+            }
+            port = (int)pv;
+        }
         else if (strcmp(argv[i], "--driver") == 0 && i + 1 < argc)
             snprintf(dtype_buf, sizeof(dtype_buf), "%s", argv[++i]);
         else if (strcmp(argv[i], "--rwproc-key") == 0 && i + 1 < argc)

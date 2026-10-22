@@ -25,6 +25,11 @@
 
 #define SHN_UNDEF   0
 
+/* 字符串表上限（32MiB）。合法的 .dynstr/.strtab 通常几 KB 到几 MB；
+ * 这个值只用于挡住「被解析文件谎报 sh_size 让 root 进程大块分配」，
+ * 正常模块不会被它拒绝。 */
+#define ELFSYM_MAX_STRTAB (32u * 1024u * 1024u)
+
 /* ELF64 头关键偏移（本文件按偏移读，避免依赖系统 elf.h） */
 #define EH_E_SH_OFF   40   /* e_shoff  u64 */
 #define EH_E_SHENTSZ  58   /* e_shentsize u16 */
@@ -76,6 +81,14 @@ static int read_at(elf_rd_t *r, uint64_t off, void *buf, size_t len) {
     return fread(buf, 1, len, r->f) == len ? 0 : -1;
 }
 
+/* 有界 strlen：最多看 max 字节，不依赖 strnlen（MinGW/MSVC 声明条件不同，
+ * 这里自带一份保证两端编译一致）。 */
+static size_t bounded_strlen(const char *s, size_t max) {
+    size_t n = 0;
+    while (n < max && s[n] != '\0') n++;
+    return n;
+}
+
 /* 逐符号扫描，返回最近命中数（0/1）；-1 读取失败 */
 static int scan_table(elf_rd_t *r, uint64_t sym_off, uint64_t sym_size,
                       uint64_t str_off, uint64_t str_size,
@@ -84,6 +97,10 @@ static int scan_table(elf_rd_t *r, uint64_t sym_off, uint64_t sym_size,
                       uint64_t *value_out, uint64_t *delta_out, int *kind_out) {
     uint8_t ent[SYM_ENT_SIZE];
     uint8_t *strtab = NULL;
+    /* 字符串表大小完全来自被解析文件的头部。agentd 以 root 跑，目标可以是
+     * 任意（可被攻击者伪造的）ELF —— 不设上限就是一个「读一个文件让 root
+     * 进程申请数 GB」的可用性缺口。合法 .so 的 dynstr 远小于此。 */
+    if (str_size > ELFSYM_MAX_STRTAB) return -1;
     if (str_size > 0) {
         strtab = malloc((size_t)str_size);
         if (!strtab) return -1;
@@ -110,8 +127,18 @@ static int scan_table(elf_rd_t *r, uint64_t sym_off, uint64_t sym_size,
         uint64_t st_value = rd_u64(r, ent + SYM_ST_VALUE);
         uint16_t st_shndx = rd_u16(r, ent + 6);
         int st_kind = st_info & 0x0f;
-        const char *nm = (strtab && st_name < str_size) ? (const char *)strtab + st_name : NULL;
+        /* 只保证起点落在表内，**不保证**该处有 NUL 结尾：伪造的 .so 可以让
+         * 最后一个 st_name 指向表尾。直接 strlen 就是 root 进程的堆越界读，
+         * 读到的堆内容还会随 JSON 返回（信息泄露）。用 strnlen 限定可见范围。 */
+        const char *nm = NULL;
+        size_t nm_avail = 0;
+        if (strtab && st_name < str_size) {
+            nm = (const char *)strtab + st_name;
+            nm_avail = (size_t)(str_size - st_name);
+        }
         if (!nm || !nm[0] || nm[0] == '$') continue;   /* 空名 / ARM 映射符号($a/$d/$x) 跳过 */
+        size_t nm_len = bounded_strlen(nm, nm_avail);
+        if (nm_len == 0) continue;
 
         if (st_value == 0 || st_value > offset) continue;
         if (st_shndx == SHN_UNDEF) continue;           /* 未定义（导入）符号跳过 */
@@ -121,12 +148,12 @@ static int scan_table(elf_rd_t *r, uint64_t sym_off, uint64_t sym_size,
             best_kind = st_kind;
             best_delta = offset - st_value;
             best_name = nm;
-            best_name_len = strlen(nm);
+            best_name_len = nm_len;
         }
     }
 
     int rc = 0;
-    if (best_name && best_name_len > 0) {
+    if (best_name && best_name_len > 0 && name_sz > 0) {
         size_t cp = best_name_len < name_sz ? best_name_len : name_sz - 1;
         memcpy(name_out, best_name, cp);
         name_out[cp] = 0;

@@ -156,6 +156,27 @@ int main(int argc, char **argv) {
         check(rc == 1 && strcmp(name, "func_a") == 0 && delta == 0, "symtab 回退: func_a delta=0");
         remove("elfsym_st.bin");
 
+        /* 畸形字符串表：整段没有 NUL 结尾，且有一个符号的 st_name 落在表外。
+         * 旧实现只校验「起点在表内」，随后 strlen 会一路读穿堆（agentd 是 root），
+         * 读到的堆内容还会随 JSON 返回。修复后：名字按可用长度截断，越界项跳过。 */
+        {
+            static const char bad_strtab[] = "truncated";   /* 9 字节有效，无 NUL */
+            test_sym_t bad_syms[2] = {
+                {0, 0x12, 1, 0x1000},   /* 名字从表头开始 */
+                {0, 0x12, 1, 0x2000},   /* name_off 落到表尾之外 */
+            };
+            bad_syms[1].name_off = 9;
+            check(make_elf("elfsym_badstr.bin", 0, 0, bad_syms, 2, bad_strtab, 9) == 0,
+                  "make_elf: 无 NUL 字符串表");
+            int r = elfsym_nearest("elfsym_badstr.bin", 0x1000, name, sizeof(name), &val, &delta, &kind);
+            check(r == 1 && strcmp(name, "truncated") == 0,
+                  "无 NUL 表: 名字按可用长度截断，不越界");
+            r = elfsym_nearest("elfsym_badstr.bin", 0x2000, name, sizeof(name), &val, &delta, &kind);
+            check(r == 1 && strcmp(name, "truncated") == 0,
+                  "st_name 越界: 该项被跳过，回落到最近合法符号");
+            remove("elfsym_badstr.bin");
+        }
+
         /* 损坏/非 ELF 文件 -> -1 */
         FILE *bad = fopen("elfsym_bad.bin", "wb");
         fputs("not an elf file at all", bad);
