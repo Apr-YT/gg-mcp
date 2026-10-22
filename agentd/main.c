@@ -1942,6 +1942,19 @@ int main(int argc, char **argv) {
     rwproc_key_buf[0] = rwproc_bp_key_buf[0] = logpath_buf[0] = 0;
     wire_key_buf[0] = wire_key_file_buf[0] = 0;
 
+    /* 【2026-10-22 修复】引擎状态必须在**参数解析之前**清零。
+     * 原顺序是「先解析参数、后 memset(&g_eng)」，而 --shell / --safe / --hwbp
+     * 这三个开关是直接写 g_eng 字段的 —— 解析完立刻被 memset 抹掉：
+     *   --shell → shell_enabled 恒 0，gg_shell 永远返回 "shell disabled"
+     *   --safe  → safe_mode 恒 0，**只读保护形同虚设**（这个最严重）
+     *   --hwbp  → hwbp_allowed 恒 0
+     * 表现是「参数照收、行为不变」，而且 cmdline 被 hide_process() 清空后
+     * 从外部也看不出参数到底有没有生效。 */
+    memset(&g_eng, 0, sizeof(g_eng));
+    g_eng.session_pid = -1;
+    g_eng.result_cap = GG_RESULT_CAP_DEFAULT;
+    pthread_mutex_init(&g_eng.mtx, NULL);
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             /* atoi 对 "70000"/"abc" 分别给出 70000/0，随后被 (uint16_t) 静默截断成
@@ -2015,10 +2028,8 @@ int main(int argc, char **argv) {
 
     hide_process(argc, argv);   /* 清 cmdline 参数与环境（防 ACE 扫 /proc/PID/cmdline） */
 
-    memset(&g_eng, 0, sizeof(g_eng));
-    g_eng.session_pid = -1;
-    g_eng.result_cap = GG_RESULT_CAP_DEFAULT;
-    pthread_mutex_init(&g_eng.mtx, NULL);
+    /* 注意：g_eng 的清零与锁初始化已前移到参数解析之前（见 main() 开头），
+     * 否则 --shell / --safe / --hwbp 会被这里的 memset 抹掉。 */
     if (logpath) g_eng.logf = fopen(logpath, "a");
     log_msg("starting (port=%d driver=%s safe=%d)",
             port, dtype, g_eng.safe_mode);
