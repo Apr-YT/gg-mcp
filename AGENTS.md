@@ -120,6 +120,12 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
    `g_clients_mtx`），修复后 0.01s。
    **测试方法有坑**：从 PC 侧测不出这个场景 —— `adb forward` 会替客户端读走数据，
    发送缓冲永远填不满。必须用 `build/ko/_dev/sub_stuck.c` 在**设备本地**建连接且不读。
+13. GG-U6（cmd_end 丢 result）已修：`agentd/last_resp.h` 记 `full_len`/`truncated`，
+   超长时只留 256B 预览并回退 UTF-8 边界，cmd_end 改给
+   `result_truncated`/`result_bytes`/`result_preview`。
+   **改这里的注意点**：不要再把「截断后的串」当 JSON 解析 —— 那是原缺陷的成因；
+   新增事件字段时先用 `test_last_resp` 覆盖 UTF-8 三种相位（`s[256]` 落在
+   continuation / lead byte / ASCII）。
 
 ### 已清（2026-10-15，本机实测）
 
