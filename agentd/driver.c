@@ -517,8 +517,13 @@ int rwproc_hwbp_get_hits(gg_driver_t *d, uint64_t bp_id,
     int take = (int)(avail < (uint64_t)cap ? avail : (uint64_t)cap);
     if (take <= 0) return 0;
     size_t bytes = (size_t)take * sizeof(rwproc_hwbp_hit_item_t);
+    /* data_size 必须是 bytes，不能是 0：模块端读的是 hdr->buf_size
+     * （`size_t size = hdr->buf_size; if (size < sizeof(HWBP_HIT_ITEM)) return -EINVAL;`），
+     * 而 resp_cap 只决定用户态 read() 的 count，不写进协议头。
+     * 原来这里传 0 → 每命中一次 DETAIL 都 EINVAL → watch_poll 永远 0 条，
+     * 表现是「断点注册成功但 hits 恒为 0」。内容不需要下发，所以 data 仍传 NULL。 */
     ssize_t r2 = rwproc_call_ex(d, d->rwproc_bp_fd, RWBP_CMD_GET_HWBP_HIT_DETAIL,
-                                bp_id, 0, 0, NULL, 0, bytes, out, bytes);
+                                bp_id, 0, 0, NULL, bytes, bytes, out, bytes);
     if (r2 < 0) return -1;
     int got = (int)((size_t)r2 / sizeof(rwproc_hwbp_hit_item_t));
     if (real) *real = got;

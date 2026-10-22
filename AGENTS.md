@@ -282,8 +282,27 @@ apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdc
    顺序注册，第 17 个起全部 ENOSPC 被 `continue` 跳过）。systemui 这种 200+ 线程的
    进程，只有前 16 个线程的命中能被看到 —— 别把"没命中"当成"地址不对"。
 
+28. **hwbp 命中链路已真机验证**（2026-10-22 夜，`hits=64` + 寄存器/反汇编都对）。
+   验证用自建靶子而不是猜地址：`build/ko/_dev/bp_target.c`（每秒写 1000 次全局变量，
+   打印 `&g_var` 和 `tick` 的地址，`-static` 非 PIE 所以地址稳定），
+   `hwbp_hits.c` 直连模块看 COUNT/DETAIL。游戏进程会冻结、栈地址又挑不出稳定可写点，
+   拿它们验证命中率纯靠运气。
 
-26. **AI-Root 侧（AR）审计项已全部关闭**（2026-10-22 夜）。改 policy / consent /
+   **踩到的真 bug（`driver.c` 的 `rwproc_hwbp_get_hits`）**：33 字节请求头里的
+   `buf_size` 才是内核决定回写多少的字段，`resp_cap`（read() 的 count）不进协议头。
+   原来 DETAIL 调用传的是 `NULL, 0, bytes`（data_size=0）→ 模块
+   `if (size < sizeof(HWBP_HIT_ITEM)) return -EINVAL;` 恒失败 →
+   **watch_poll 永远 0 条**，而 COUNT 正常（它不检查 size），所以表面上
+   "断点能注册、就是没命中"。已改为 `NULL, bytes, bytes`,并加了结构护栏
+   `tests/unit/check_hwbp_detail.py`（`run_tests.bat` 会自动跑，正反两向验过）。
+
+   **能力边界**：模块 `hit_arr` 只在 `hit_count < HWBP_HIT_CAP(1024)` 时写入
+   （`record_hit_details`），满了就不再记录 —— 高频断点看到的是**最早 1024 次**
+   命中，游标推完就永远 0。watch 适合低频事件（某函数被调用、某变量被改几次），
+   不适合监控高频写。
+
+
+29. **AI-Root 侧（AR）审计项已全部关闭**（2026-10-22 夜）。改 policy / consent /
    config 前必读这三条实测结论：
    - **自保护路径判定是两段式**：词法不命中后再用 `GetFinalPathNameByHandleW`
      解析真实路径。别把第二段删掉当"性能优化"——它挡的正是 8.3 短名

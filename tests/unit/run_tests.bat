@@ -211,6 +211,12 @@ rem the mutex, otherwise threads overwrite each other's data (silent corruption)
 echo === rwproc locking guardrail: shared buffer inside the critical section ===
 "%PYEXE%" "%ROOT%\tests\unit\check_rwproc_locking.py" "%ROOT%"
 if errorlevel 1 ( echo [FAIL] rwproc locking guardrail & exit /b 1 )
+rem hwbp detail guard: the module reads hdr->buf_size (the 8th argument of
+rem rwproc_call_ex), not the read() count. Passing 0 there made every hit
+rem detail fail with -EINVAL while watch_poll silently returned 0 hits.
+echo === hwbp detail guardrail: GET_HWBP_HIT_DETAIL carries a non-zero buf_size ===
+"%PYEXE%" "%ROOT%\tests\unit\check_hwbp_detail.py" "%ROOT%"
+if errorlevel 1 ( echo [FAIL] hwbp detail guardrail & exit /b 1 )
 goto :gg_guardrails_done
 
 :gg_skip_guardrails
