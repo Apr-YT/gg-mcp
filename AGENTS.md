@@ -226,3 +226,21 @@ apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdc
 23. **search.c 的 log_msg 是 weak 默认实现**。单元测试常只链接 search.c，
    没有 main.c —— 加诊断日志不用再给每个测试补 shim。产品构建里 main.c 的
    强符号会覆盖它。同理，新增其他跨文件依赖时优先考虑 weak 默认实现。
+
+24. **内核模块已改名 `hwBreakpointProc_module` → `rwNova`**（2026-10-22）。只在
+   `build_hwbp_ko.sh` 里做了 `obj-m += rwNova.o` + `rwNova-y := hwBreakpointProc_module.o`
+   （源文件名不变，只改加载名与产物名）。**proc 节点名不受影响** —— 它来自
+   `CONFIG_PROC_NODE_AUTH_KEY`（`dce3771681d4c7a143d5d06b7d32548e`），所以
+   agentd 的探测路径照旧。
+
+   **改这里最容易出事的一点**：原来 `build/ko/` 里的 afei prebuilt 靠「与自编译版
+   **同名覆盖**」被消灭。改名后不再同名 → prebuilt 会以 `hwBreakpointProc_*.ko`
+   留在 staging，而 `install_ko.sh` 会遍历目录里所有 `.ko` 逐个 insmod →
+   **那份 prebuilt 一加载就可能打崩整机**（枚举从 0 起始、命中回调用 mutex）。
+   `deploy.ps1` 现在显式 `Remove-Item $Stage\ko\hwBreakpointProc_*.ko`，别删这行。
+   同理 push 要按 **staging 目录**遍历，不能按 `$koFiles`（rwNova 是后补进 staging 的）。
+
+25. **hwbp / watch 当前不可用**（遗留，非部署问题）：模块加载成功、proc 节点存在，
+   但探测返回 `模块命令码基准不符 (GET_NUM_BRPS=-1, 期望 6)` —— 自编译模块的 ioctl
+   命令码编号与 `agentd/driver.h` 不一致。修它要改模块源码重编 + 刷机验证，
+   别在部署脚本里绕（绕不过去）。其余功能（内存读写/搜索/冻结）不受影响。
