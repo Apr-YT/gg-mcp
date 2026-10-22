@@ -138,6 +138,21 @@ if (-not $SkipKo) {
             Write-Host "  需要时先执行: bash scripts/build_hwbp_ko.sh（WSL，需完整 GKI 源码树）" -ForegroundColor Yellow
         }
         # 中转目录也要先清：它跨次保留，旧文件会被一起 cp 过去
+        # ── 内存模块必须是自编译修复版 ────────────────────────────────────
+        # build\ko\ 里那份 rwProcMem_6.12.69.ko 原本是 afei 的 prebuilt slim
+        # （39KB）。它在全量匿名搜索时会打崩内核、设备直接重启
+        # （2026-10-22 深夜复现四次，换自编译 307KB 版后同一目标搜索
+        #  正常返回）。prebuilt 与自编译版不同名不同大小，靠"同名覆盖"
+        # 消灭它的老办法在这里从来就没成立过 —— 必须显式替换。
+        $selfMem = "$Root\build\ko_built\rwProcMem_6.12.69.ko"
+        if (Test-Path $selfMem) {
+            Remove-Item "$Stage\ko\rwProcMem_6.12.69.ko" -Force -ErrorAction SilentlyContinue
+            Copy-Item $selfMem "$Stage\ko\rwProcMem_6.12.69.ko" -Force
+            Write-Host "  内存模块: 使用自编译修复版 rwProcMem（已剔除 afei prebuilt）" -ForegroundColor DarkYellow
+        } else {
+            Write-Host "  [WARN] 没有 build\ko_built\rwProcMem_6.12.69.ko —— 将部署 prebuilt，" -ForegroundColor Yellow
+            Write-Host "         全量搜索可能打崩内核。自编译来源见 AGENTS 第 29 条。" -ForegroundColor Yellow
+        }
         Adb-Sh "rm -rf $TmpDir/ko" | Out-Null
         Adb-Sh "mkdir -p $TmpDir/ko" | Out-Null
         # 按 staging 目录推送，而不是按 $koFiles：自编译的 rwNova 是后补进

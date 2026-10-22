@@ -75,4 +75,40 @@ int parse_u64_strict(const char *s, uint64_t *out);
 /* force 布尔参数解析（只接受 0/1）。实现在 main.c。 */
 int parse_force(const cJSON *p);
 
+/* ---------------- 参数解析 helper（跨域共用，实现仍在 main.c） ----------------
+ *
+ * 这几个原本是 main.c 里的 static，cmd_search.c 拆出去后必须共享：
+ *   parse_vt        值类型（数字 1-7 或 byte/word/dword/... 字符串），被搜索、
+ *                   读、写、冻结、指针扫描五个域用到，是跨域最广的一个。
+ *   j_scalar_str    cJSON 标量（数字/字符串/布尔）→ 字符串。写类命令的 value
+ *                   既可能是字符串也可能是数字，必须统一入口，否则各处各写一套。
+ *   parse_value_str 值字符串 → u64（带 endptr 校验）。
+ *   j_addr_u64      地址节点 → u64，同时吃 "0x..." 字符串与 JSON 数字。
+ *                   数组元素里的地址走不到 dispatch 的顶层地址闸门，只能靠它。 */
+int parse_vt(const cJSON *p, int def);
+const char *j_scalar_str(cJSON *node, char *buf, size_t bufsz);
+uint64_t parse_value_str(int vtype, const char *s, int *ok);
+int j_addr_u64(cJSON *node, uint64_t *out);
+
+/* type/region 无效值的统一报错文案（搜索/读/写/冻结共用，避免各处措辞漂移） */
+#define VT_HINT "type: 1-7 或 byte/word/dword/qword/float/double/bytes"
+#define REGION_HINT "region: 1-3 或 anonymous/writable/all"
+
+/* ---------------- 事件广播（实现在 main.c，cmd_*.c 域内要用） ---------------- */
+
+void event_search_update(long prev_count, long cur_count);
+void event_results_update(void);
+
+/* ---------------- 外迁命令 handler（实现见各自的 cmd_*.c） ---------------- */
+
+/* cmd_search.c — 搜索与结果集 */
+void h_search(int fd, uint32_t seq, cJSON *p);
+void h_search_range(int fd, uint32_t seq, cJSON *p);
+void h_unknown_init(int fd, uint32_t seq, cJSON *p);
+void h_refine(int fd, uint32_t seq, cJSON *p);
+void h_result_count(int fd, uint32_t seq, cJSON *p);
+void h_get_results(int fd, uint32_t seq, cJSON *p);
+void h_clear_results(int fd, uint32_t seq, cJSON *p);
+void h_set_results(int fd, uint32_t seq, cJSON *p);
+
 #endif /* GG_ENGINE_INTERNAL_H */

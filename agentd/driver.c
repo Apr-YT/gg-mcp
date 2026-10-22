@@ -594,17 +594,55 @@ int driver_self_test(gg_driver_t *d) {
      * 真实加载（节点在、ioctl 注册、数据可读），名字无关。 */
     d->ko_loaded = 0;
 
-    /* rwproc33 型: 打开自身进程句柄 + 读回环 */
+    /* rwproc33 型: 打开自身进程句柄 + 读回环自检。
+     *
+     * ⚠️ 这个自检**不能当硬门禁**（2026-10-22 真机）：
+     *   同一台设备、同一个 KO（build/ko/_dev/rwProcMem_gki.ko，307KB 修复版），
+     *   干净重启后第一次跑 `channel OK`，之后再启动几次就变成
+     *   `data r=4 0x0, stack r=4 0x0`（读成功、内容全 0）——
+     *   HEAD 版和拆分版的二进制都复现，与代码无关。
+     *   而同一时刻读**目标进程**完全正常（systemui/phone 搜索拿到 2500 条合理结果）。
+     *
+     *   也就是说：驱动对「目标 == 当前进程」这条路径有缺陷（返回成功但填 0），
+     *   对正常跨进程读没有影响。拿它判死整条通道，等于让一个自检缺陷把
+     *   内存读写/搜索/冻结全废掉 —— 得不偿失。
+     *
+     * 现在的口径：
+     *   读到期望值          -> 通道 OK（正常路径）
+     *   读成功但值不对      -> 通道按可用处理，但留 WARN（真问题，别让它静默）
+     *   读失败 / 打不开句柄 -> 仍判不可用（那才是真的不通）
+     *
+     * 依据"节点能打开 + CMD_INIT_DEVICE_INFO 成功"这两条硬事实：attach 阶段
+     * 已经跑过 INIT，走到这里说明驱动活着。 */
     if (d->rwproc_mem_fd >= 0) {
+        volatile uint32_t s_stack_magic = 0x5a5a1234u;
+        uint32_t back2 = 0;
         uint64_t h = 0;
         if (rwproc_open_process(d, self, &h) == 0) {
-            ssize_t r = rwproc_read_mem(d, self, (uint64_t)(uintptr_t)&s_magic,
-                                        &back, sizeof(back), 0);
-            if (r == (ssize_t)sizeof(back) && back == 0x12345678u) {
+            ssize_t r1 = rwproc_read_mem(d, self, (uint64_t)(uintptr_t)&s_magic,
+                                         &back, sizeof(back), 0);
+            ssize_t r2 = rwproc_read_mem(d, self, (uint64_t)(uintptr_t)&s_stack_magic,
+                                         &back2, sizeof(back2), 0);
+            int ok1 = (r1 == (ssize_t)sizeof(back) && back == 0x12345678u);
+            int ok2 = (r2 == (ssize_t)sizeof(back2) && back2 == 0x5a5a1234u);
+            if (ok1 && ok2) {
                 d->state = ST_DRIVER;
                 d->ko_loaded = 1;
                 return 1;
             }
+            if ((r1 > 0 || r2 > 0) && !ok1 && !ok2) {
+                log_msg("self-test: WARN self-read returned wrong values "
+                        "(data r=%zd 0x%x, stack r=%zd 0x%x) — 驱动读自身进程有缺陷，"
+                        "跨进程读不受影响；通道按可用处理", r1, (unsigned)back,
+                        r2, (unsigned)back2);
+                d->state = ST_DRIVER;
+                d->ko_loaded = 1;
+                return 1;
+            }
+            log_msg("self-test: both reads FAILED (handle=0x%llx data r=%zd, stack r=%zd)",
+                    (unsigned long long)h, r1, r2);
+        } else {
+            log_msg("self-test: open_process(self=%d) failed: %s", (int)self, d->last_error);
         }
         set_err(d, "rwproc self-test read failed");
     }

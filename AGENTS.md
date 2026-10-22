@@ -316,3 +316,40 @@ apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdc
      「即时执行外部内容」降为 Confirm（`npx`/`npm run`/`pip install`/`cargo install`/
      `go run`/`git -c`/`dotnet run`）。**改动只影响新生成的默认策略**，已部署的
      `policy.toml` 不会自动变。
+
+30. **main.c 拆分进度**（2026-10-22 深夜）。已拆出：`cmd_shell.c`（2026-08）、
+   `cmd_view.c`（2026-08）、**`cmd_search.c`（本轮）**。
+   `cmd_search.c` 收走搜索与结果集 8 个 handler（search / search_range /
+   unknown_init / refine / result_count / get_results / clear_results /
+   set_results）+ 域内 helper `parse_region` / `parse_refine_op`。
+   main.c 2501 → 2204 行。
+
+   跨域共享的东西上移到 `engine_internal.h`，**别在 cmd_*.c 里再写一份**：
+   `parse_vt`（读/写/冻结/指针扫描/搜索五域都用）、`j_scalar_str`、
+   `parse_value_str`、`j_addr_u64`、`event_search_update`、`event_results_update`，
+   以及 `VT_HINT` / `REGION_HINT` 两个错误文案宏。
+   拆分只是搬代码 + 去 `static`，逐字等价（用 diff 核对过），但**一定要真机回归**：
+   本轮就是因为设备侧驱动状态，白排查了两小时（见第 31 条）。
+
+31. **部署链路的两个坑（都会让「代码没问题但功能全挂」）**。
+
+   **(a) `build\ko\` 里的 rwProcMem 是 afei prebuilt（39KB），全量搜索会打崩内核。**
+   2026-10-22 深夜连续复现四次：attach 正常、`gg_search` 一发出去设备就重启
+   （无 pstore 记录 = 看门狗硬复位，不是 panic）。换成自编译修复版
+   （307KB，`build\ko\_dev\rwProcMem_gki.ko` → 现已在
+   `build\ko\` 和 `build\ko_built\` 各放一份）后，同一个目标搜索秒回正常结果。
+   `deploy.ps1` 已加显式替换 + 缺失时告警。**这个 KO 不入库（build/ 被 ignore），
+   换机器时务必确认设备上那份是 307KB 级、不是 39KB。**
+   顺带确认：`_dev` 里 4 个 KO（new/gki/dbg/v2）都能 insmod，但只有 gki 这份跑过
+   完整验证；`rwproc_v2.ko` 比它新 8 分钟但没验过，别随手换。
+
+   **(b) `driver_self_test` 读「自身进程」会返回 0，别当硬门禁。**
+   现象：`read=4`（成功）但内容全 0，`data` 和栈上变量都这样；同一 KO 干净重启后
+   第一次能过、之后几次就失败，HEAD 版和拆分版二进制都复现。而同一时刻
+   读**目标进程**完全正常（phone 搜出 150 条、值/地址都对）。
+   结论：驱动对「target == current」这条路径有缺陷，跨进程读不受影响。
+   现在口径：读到期望值 → OK；读成功但值不对 → **WARN + 按可用处理**；
+   读失败/句柄打不开 → 才判不可用。依据是「节点能开 + CMD_INIT_DEVICE_INFO 成功」
+   这两条硬事实。日志里会留 `self-test: WARN self-read returned wrong values`。
+   **真正的驱动根因没修**（属于 `docs/audit/RWPROC33` 里没查完的那节），
+   所以别把这个 WARN 当噪音删掉。
