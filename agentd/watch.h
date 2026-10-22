@@ -5,7 +5,7 @@
  * SIGTRAP(TRAP_HWBKPT)，由本模块捕获并记录 {tid, pc, 寄存器}，
  * 据此可反查写者指令 → 找到权威变量（如金币本体）。
  *
- * 与 QX 驱动无关（走 ptrace，内核提供），不依赖 qx-对接.h。
+ * 
  *
  * 命中日志增强（缺口 3）：poll 时对每条命中自动
  *   1) 解析 pc 所属模块 + 偏移（process_resolve_addr）

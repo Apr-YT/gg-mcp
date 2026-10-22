@@ -138,8 +138,8 @@ read(fd, buf, 33 + data_size)   // 头在 buf[0..32], 数据区在 buf[33..]
 
 协议细节（dev 型 `0x7e1a/0x7e1b` ioctl、qx 型 `0x800–0x803` 与 `COPY_MEMORY`/`MODULE_BASE`
 自然对齐布局）只在 git 历史与 `DRIVER_MATRIX.md` 里可查，现行代码不再支持。
-`agentd/driver.c` 里还留着 `ko_ioctl_req_t` / `qx_copy_memory_t` / `qx_module_base_t` 三个
-结构体定义，无任何调用 —— 属待清死代码。
+`agentd/driver.c` 里原有 `ko_ioctl_req_t` / `qx_copy_memory_t` / `qx_module_base_t`
+三个无调用结构体，**已于 2026-10-23 删除**（需要时从 git 历史恢复）。
 
 ### 2.4 自检标准（gg_kernel_status）
 

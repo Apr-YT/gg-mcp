@@ -43,28 +43,14 @@ void log_msg(const char *fmt, ...);
 #include <sys/uio.h>
 #endif
 
-/* ---- dev 型 ioctl 请求结构（packed, 与 KO 驱动约定一致） ---- */
-typedef struct __attribute__((packed)) ko_ioctl_req {
-    uint32_t pid;
-    uint32_t pad;
-    uint64_t addr;
-    uint64_t buf;
-    uint64_t size;
-} ko_ioctl_req_t;
-
-/* ---- qx 型请求结构（自然对齐, 与 qx-对接.h 的 COPY_MEMORY/MODULE_BASE 一致） ---- */
-typedef struct qx_copy_memory {
-    pid_t     pid;      /* offset 0  */
-    uintptr_t addr;     /* offset 8  */
-    void     *buffer;   /* offset 16 */
-    size_t    size;     /* offset 24 */
-} qx_copy_memory_t;     /* sizeof 32 */
-
-typedef struct qx_module_base {
-    pid_t     pid;      /* offset 0  */
-    char     *name;     /* offset 8  */
-    uintptr_t base;     /* offset 16 */
-} qx_module_base_t;     /* sizeof 24 */
+/* 死代码已于 2026-10-23 清掉（原来这里有三个无调用结构体）：
+ *   ko_ioctl_req_t   —— dev 型 KO 的 ioctl 请求（0x7e1a/0x7e1b）
+ *   qx_copy_memory_t / qx_module_base_t —— qx 型（0x800–0x803 ioctl）
+ * dev / qx / hook 三型通道在 2026-10-21 整体删除，只剩 rwproc33 一种后端
+ * （proc read 33B 头协议，见 RWPROC33_ADAPTER.md）。这三个结构体一直没人调用，
+ * 留着只会让人以为还有别的后端。需要时从本文件 2026-10-23 之前的 git 历史恢复，
+ * 协议细节见 docs/engineering/PROTOCOL.md §2.3 与 DRIVER_MATRIX.md §6。
+ */
 
 static void set_err(gg_driver_t *d, const char *msg) {
     snprintf(d->last_error, sizeof(d->last_error), "%s", msg ? msg : "");
