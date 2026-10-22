@@ -122,6 +122,18 @@ static size_t pm_skip_absent(int fd, uint64_t va, size_t len) {
     return done;
 }
 
+/* 模糊路径（快照/refine）用：若 va 处是 absent，返回应跳过的字节数；
+ * 返回 0 表示当前位置是 present（或 pagemap 不可用），调用方正常读。
+ * 语义与 got<=0 分支一致 —— absent 段在快照里补 0、并从候选位图里清掉。 */
+static size_t pm_try_skip(int pmfd, uint64_t va, size_t rd, size_t len) {
+    size_t skip;
+    if (pmfd < 0) return 0;
+    if (pm_present_run(pmfd, va, rd) != 0) return 0;
+    skip = pm_skip_absent(pmfd, va, len);
+    if (skip == 0) skip = GG_PAGE_SIZE;
+    return skip > len ? len : skip;
+}
+
 /* 单 worker 扫描 rbegin..rend 的 region 子集（模式由 w->mode 决定） */
 static void *search_worker_main(void *arg) {
     search_worker_t *w = arg;
@@ -579,6 +591,7 @@ int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
     size_t nreg = 0;
     gg_map_region_t *regs = process_search_regions(pid, &nreg, region_type);
     if (!regs) return -1;
+    int pmfd = pm_open(pid);   /* <0 = pagemap 不可用，退回逐页探测 */
 
     size_t keep_cap = r->cap ? r->cap : GG_RESULT_CAP_DEFAULT;
     results_clear(r);
@@ -597,7 +610,7 @@ int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
         n_used++;
         if (total >= GG_FUZZY_MAX_BYTES) break;
     }
-    if (n_used == 0 || total == 0) { free(regs); return -1; }
+    if (n_used == 0 || total == 0) { free(regs); if (pmfd >= 0) close(pmfd); return -1; }
 
     uint64_t elem_total = total / (uint64_t)sz;
     r->fuzzy_vt = vtype;
@@ -610,6 +623,7 @@ int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
     if (!r->fuzzy_bitmap || !r->fuzzy_snapshot || !r->fuzzy_regions) {
         results_clear(r);
         free(regs);
+        if (pmfd >= 0) close(pmfd);
         return -1;
     }
 
@@ -634,7 +648,18 @@ int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
         uint64_t off = 0;
         while (off < l) {
             size_t rd = (l - off) > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)(l - off);
-            ssize_t got = driver_read(d, pid, regs[k].start + off, r->fuzzy_snapshot + snap_off + off, rd);
+            size_t skip = pm_try_skip(pmfd, regs[k].start + off, rd, (size_t)(l - off));
+            ssize_t got;
+            if (skip) {
+                /* absent 段：快照补 0 + 从候选里清掉（等价于原 got<=0 分支） */
+                memset(r->fuzzy_snapshot + snap_off + off, 0, skip);
+                bm_clear_span(r->fuzzy_bitmap, fr->elem_begin, off, elem_total, skip, sz);
+                fail_pages++;
+                fail_bytes += skip;
+                off += skip;
+                continue;
+            }
+            got = driver_read(d, pid, regs[k].start + off, r->fuzzy_snapshot + snap_off + off, rd);
             if (got <= 0) {
                 /* 故障推进(见 search_exact: C2 逐页 + X4 大步)；跳过区快照填 0 */
                 uint64_t abs = regs[k].start + off;
@@ -672,6 +697,7 @@ int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
     r->fuzzy_undo_head = -1;
     r->fuzzy_undo_count = 0;
     free(regs);
+    if (pmfd >= 0) close(pmfd);
     /* 诊断：读不到的页会让候选被清掉，这里把规模记下来 —— 真机上
      * "refine 后 remaining 不动 / 立刻归零" 这两个相反症状都源于这块。 */
     if (fail_pages || short_reads)
@@ -728,6 +754,7 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
     fuzzy_undo_push(r);
 
     static uint8_t chunk[GG_SEARCH_CHUNK];
+    int pmfd = pm_open(pid);   /* <0 = pagemap 不可用，退回逐页探测 */
     uint64_t rf_fails = 0, cmp_n = 0, keep_n = 0;
     for (size_t k = 0; k < r->fuzzy_region_count; k++) {
         fz_region_t *fr = &r->fuzzy_regions[k];
@@ -735,7 +762,17 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
         int fail_streak = 0;
         while (off < fr->len) {
             size_t rd = (fr->len - off) > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)(fr->len - off);
-            ssize_t got = driver_read(d, pid, fr->start + off, chunk, rd);
+            size_t skip = pm_try_skip(pmfd, fr->start + off, rd, (size_t)(fr->len - off));
+            ssize_t got;
+            if (skip) {
+                memset(r->fuzzy_snapshot + fr->snap_off + off, 0, skip);
+                bm_clear_span(r->fuzzy_bitmap, fr->elem_begin, off,
+                              r->fuzzy_elem_count, skip, sz);
+                rf_fails++;
+                off += skip;
+                continue;
+            }
+            got = driver_read(d, pid, fr->start + off, chunk, rd);
             if (got <= 0) {
                 /* 模糊 refine 读: 容错推进(见 search_exact 注释: C2 逐页 + X4 大步) */
                 uint64_t abs = fr->start + off;
@@ -780,6 +817,7 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
             off += rd;
         }
     }
+    if (pmfd >= 0) close(pmfd);
     int64_t remain = (int64_t)bm_count(r->fuzzy_bitmap, r->fuzzy_elem_count);
     if (rf_fails || cmp_n)
         log_msg("fuzzy refine: op=%d fails=%llu compared=%llu kept=%llu remaining=%lld",

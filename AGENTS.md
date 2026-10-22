@@ -396,8 +396,16 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    逐地址比对 —— 实测 192 vs 192、集合完全相同。只在两边数量相等还不够，
    要比**集合**。
 
-   **未覆盖**：`fuzzy_snapshot`（search.c:549）和 `refine`（:650）仍走原
-   `driver_read` 循环，没接 pagemap 筛选，模糊搜索首帧仍可能慢。
+   模糊路径（`search_unknown_init` / `search_refine`）也接了，用 `pm_try_skip()`
+   统一处理：absent 段在快照里补 0、并从候选位图清掉，语义与原来的 `got<=0`
+   分支完全一致。实测模糊首帧 **0.31s / 6710 万元素（256MB 快照）**，
+   refine 0.26s，undo 正常。
+
+   **改搜索逻辑的验收步骤（务必照做）**：
+   1. `run_itest.ps1` 必须 ALL PASS
+   2. 精确搜索的 count 与改前同量级、抽查结果值正确
+   3. 取命中密集的 64KB 区间做「集合比对」（`gg_read_bytes` 分块拉回本地扫）
+   4. 模糊：init → refine → undo 状态机走通，remaining 数合理
 
 ## 约定
 
