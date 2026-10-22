@@ -47,3 +47,7 @@ gg-mcp-*.pptx
 slide-outline.md
 
 __pycache__/
+
+# gg-ui（imgui PC 界面）本地状态
+gg-ui.ini
+gg-ui-font.log

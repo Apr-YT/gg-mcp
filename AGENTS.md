@@ -554,6 +554,43 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    顺带：`disable_kprobe_blacklist()` 也在同一个 `#ifdef` 里，它是给
    `rw_sym_lookup` 探敏感符号用的（`modules` 链表等），关掉会让 UNHIDE 逃生舱失效。
 
+35. **PC 侧搜索界面 `gg-ui`（imgui + Win32 + D3D11）**（2026-10-23）。
+
+   ```
+   scripts\build_ui.bat            # 产物 build\pc\gg-ui.exe（静态链接，只有系统 DLL 依赖）
+   build\pc\gg-ui.exe --pid 5462 --search --value 100 --type dword
+   ```
+
+   **刻意不走 MCP 传输层**：UI 直接链接 `server/session.cpp`，调
+   `Session::call_tool(name, args)`。协议、参数校验、新工具全部自动继承 ——
+   再加一个前端不用碰 wire。改 UI 时只要认 `call_tool` 这一个入口。
+
+   ### 三个坑（都踩过，别再踩）
+
+   1. **imgui 必须用稳定 tag**（现在 vendored 的是 **v1.91.9**）。
+      先用 master（当时是 1.93.0 WIP）：字体明明加载成功（标题栏
+      `font=build\msyh.ttc nfonts=1`），界面中文却全是方块 ——
+      那一版的 font system 正在改。换 1.91.9 立刻正常。
+   2. **字形范围用 `ImFontGlyphRangesBuilder` 手动拼**（Default + 常用 2500 字）。
+      只传自己列的字符表一定漏字（第一版漏了"模糊/首次/进程"，界面上是方块）。
+   3. **字体文件放 `build/`**：本机实测直接从 `C:\Windows\Fonts\msyh.ttc`
+      加载会失败，复制一份到项目内就正常。`build_ui.bat` 会自动复制
+      （19MB，**不入库**）。
+
+   ### 调试技巧
+
+   窗口标题带 `font=<实际加载的路径> nfonts=<字体数>`。字体出问题时截个图就能
+   区分"没加载"和"加载了但 glyph 没烘进去"，不用加日志、不用猜。
+
+   ### 现状
+
+   已实测：启动自动连接 → 913 个进程列表 → attach systemui →
+   搜索 dword=100 得 23168 条 → 表格显示前 1000 条。中文全正常。
+
+   已知限制：结果不分页（只显示前 N 条）、没有 watch/断点面板（低频操作仍走 MCP）、
+   进程列表一次拉全量靠过滤框缩小。搜索是同步调用（全量 0.2s / 模糊首帧 0.3s），
+   会短暂卡界面 —— 要异步就把操作丢线程，别在 UI 线程里 sleep 等。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
