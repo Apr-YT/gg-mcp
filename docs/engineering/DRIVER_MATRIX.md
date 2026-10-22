@@ -240,21 +240,50 @@ cmd=3 (GET_NUM_BRPS) → 自编译模块返回 6（执行断点槽数）
    见 §8。
 3. `gg_disassemble` 对由 ELF 头起始的地址返回 `count=0`，待确认是 capstone 行为还是缺陷。
 
-## 8. KO 版本谱系（2026-10-23 实测）
+## 8. KO 版本谱系（2026-10-23 实测定案）
 
-`build/ko/_dev/` 下四个自编译 KO 只有一个可用，**别按文件时间戳选**：
+**现役**（`build/ko/` 与 `build/ko_built/`）：
 
-| 文件 | 大小 | 读写 | 全量搜索（systemui 341MB） | 结论 |
-|---|---|---|---|---|
-| `rwNova33_6.12.69.ko` | 307096 | ITEST ALL PASS | 3.3s / 13681 条 / 不崩 | **现役**（模块名 rwNova33，2026-10-23 改名后从当前源码重编） |
-| `rwproc_v2.ko` | 307640 | ITEST ALL PASS | 3.6s / 21892 条 / 不崩 | 改名前的等价物，保留备查 |
-| `rwProcMem_gki.ko` | 307584 | read 全 0 | 正常 | `virt_addr_valid` 误判合法 pfn，弃用 |
-| `rwproc_dbg.ko` | 330712 | — | — | 唯一带 `CONFIG_DEBUG_PRINTK`，抓页表日志用 |
-| `prebuilt/rwProcMem_slim.ko` | 39552 | — | — | vermagic 不匹配，insmod 报 `module_layout` 版本不符 |
+| 文件 | 大小 | 模块名 | 职责 |
+|---|---|---|---|
+| `rwNova33_6.12.69.ko` | 305824 | rwNova33 | 内存读写（原 rwProcMem33） |
+| `rwNova_6.12.69.ko` | 359504 | rwNova | 硬件断点（原 hwBreakpointProc） |
 
-另有历史遗留：设备上曾长期并存 `apr_dlkm.ko`（rwProcMem 的原始编译名，
-`build_rwproc_ko.sh` 的产物就叫这个）与 `rwProcMem_<ver>.ko`。两者模块名不同
-（`apr_dlkm` / `rwProcMem_module`）所以都能 insmod，但 proc 节点只有一个 ——
-先加载的占 `/proc/<key>/<key>`，后加载的 `proc_mkdir` 失败 fallback 到 /proc 根。
+两者均 `ITEST ALL PASS`；systemui 341MB 全量搜索 3.3s / 20698 条 / 设备不崩。
+
+历史产物（`build/ko/_dev/`，别按时间戳选）：
+
+| 文件 | 大小 | 结论 |
+|---|---|---|
+| `rwproc_v2.ko` | 307640 | 历史最好的旧版，保留备查 |
+| `rwProcMem_gki.ko` | 307584 | 读全 0，弃用（pfn 判据写错，见下） |
+| `rwproc_dbg.ko` | 330712 | 唯一带 `CONFIG_DEBUG_PRINTK`，抓页表日志用 |
+| `prebuilt/rwProcMem_slim.ko` | 39552 | vermagic 不匹配，insmod 报 `module_layout` 版本不符 |
+
+### 8.1 「部分页静默读不到」的根因
+
+`phy_mem_fast.h` 的 pfn 守卫曾写成 `PHYS_PFN((unsigned long)cur - PAGE_OFFSET)`。
+arm64 线性映射为 `__va(p) = p - memstart_addr + PAGE_OFFSET`，
+故 `cur - PAGE_OFFSET = p - memstart_addr`，**不是 p**（本机 memstart_addr ≈ 2GB
+= 0x80000 页）。诊断版实测同一次读：`pfn_calc=0xa6238e` vs `virt_to_pfn=0xae238e`。
+
+后果：真实 paddr 合法，但错位 pfn 落进 MMIO 空洞时 `pfn_to_online_page` 返回 NULL，
+整页被静默丢弃 —— 是否被丢取决于地址，所以表现为"self-test 时好时坏"。
+
+修法：`pfn_to_online_page(virt_to_pfn((void *)cur))`。修复后 count 13681 → 20698（+51%）、
+耗时不变。
+
+### 8.2 编译 hwbp 的两个前提
+
+- `ccflags-y += -Wno-error`：`anti_ptrace_detection.h` 里两个未引用的 static 函数
+  会被完整 GKI 树的 `-Werror` 判死，`KCFLAGS` 压不住（那是内核自带的）。
+- `hwbp_proc.c` **不参与编译**（Makefile 只有 `obj-m += hwBreakpointProc_module.o`），
+  其中的 cdev / `/dev` 节点是死代码 —— 设备上不会出现 `/dev/rwNova`。
+
+### 8.3 历史遗留：两个 rwProcMem 并存
+
+设备上曾长期并存 `apr_dlkm.ko`（rwProcMem 的原始编译名）与 `rwProcMem_<ver>.ko`。
+两者模块名不同所以都能 insmod，但 proc 节点只有一个 —— 先加载的占
+`/proc/<key>/<key>`，后加载的 `proc_mkdir` 失败 fallback 到 /proc 根。
 **agentd 永远打开先加载那个**，导致「换 KO 不生效」的假象。
-根因（deploy staging 从不清理）与修法见 `AGENTS.md` 第 33 条。
+根因（deploy staging 从不清理）与修法见 `AGENTS.md` 第 28 条。

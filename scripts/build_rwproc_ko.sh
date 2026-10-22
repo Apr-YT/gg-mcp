@@ -83,7 +83,13 @@ build_mod "$RWMEM_DIR" "rwNova33"
 # hwbp 在完整 GKI 树上会因 anti_ptrace_detection.h 的两个未使用 static 函数
 # 被 -Werror 判死（KCFLAGS 压不住内核自带的 -Werror）。它不参与本轮改名，
 # 现成的 build/ko_built/rwNova_6.12.69.ko 已验证过 ITEST ALL PASS，沿用即可。
-build_mod "$HWBP_DIR"  "hwBreakpointProc_module"   || echo "[WARN] hwbp 编译失败（-Werror unused-function），沿用已有 rwNova_6.12.69.ko"
+# hwbp 的 Makefile 同样由脚本写：anti_ptrace_detection.h 里两个未被引用的 static
+# 函数会被完整 GKI 树的 -Werror 判死，KCFLAGS 压不住（那是内核自带的），
+# 必须用模块级 ccflags-y。这份 Makefile 也在 .gitignore 的 build/ 下面。
+printf 'obj-m += hwBreakpointProc_module.o
+ccflags-y += -Wno-error
+' > "$HWBP_DIR/Makefile"
+build_mod "$HWBP_DIR"  "hwBreakpointProc_module"   || echo "[WARN] hwbp 编译失败，沿用已有 rwNova_6.12.69.ko"
 
 echo "== CRC 修补（对齐设备 Xiaomi 内核的 MODVERSIONS）=="
 python3 "$ROOT/scripts/patch_ko_versions.py" "$DEV_KO_DIR" \

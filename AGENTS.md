@@ -80,11 +80,12 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    期间不得把设备端改动当作「已验证」上报（2026-10-21）。
 4. **rwproc33 崩内核的四点修复（2026-10-22）—— 现状见第 27 条**。
    根因在驱动侧：`__pa(si.totalram)` 当物理地址上界、`get_proc_phy_addr` 不判 pmd 大页、
-   `__va()` 后无 `virt_addr_valid` 兜底、页表遍历在 `mmap_lock` 外。四处都改在
-   `build/rwProcMem33` 源码里。**其中「加 virt_addr_valid 兜底」后来证明会把合法 pfn
-   判成非法**（读全 0），版本选型见第 27 条。
-   「不能用 totalram 当上界」这条本身成立：真机实测合法 pfn 可达 0x926afc=39.3GB，
-   而 RAM 只有 11.6GB（PA_BITS=48）。
+   `__va()` 后无 pfn 有效性守卫、页表遍历在 `mmap_lock` 外。四处都改在
+   `build/rwProcMem33` 源码里。
+   ⚠️ 第四点「加守卫」当时的实现写错了地址基准（`PHYS_PFN(cur - PAGE_OFFSET)` 少减
+   `memstart_addr`），反而引入"部分页静默丢弃"的回归；真因分析与修法见第 27 条。
+   「不能用 totalram 当上界」这条本身成立：真机实测合法 paddr 可达 0xaffffefff
+   （末端 bank），而 RAM 只有 11.6GB（PA_BITS=48）。
 5. **`--safe` / `--shell` / `--hwbp` 曾长期静默失效**（2026-10-22 已修，真机验证）：
    `main()` 的 `memset(&g_eng,0,...)` 在参数解析**之后**，三个开关解析完立刻被清零。
    `--safe` 失效 = **只读保护形同虚设**（write/freeze/shell 全放行）；`--shell` 永远打不开；
@@ -264,29 +265,54 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    以及 `VT_HINT` / `REGION_HINT` 两个错误文案宏。
    拆分只是搬代码 + 去 `static`，逐字等价（用 diff 核对过），但**一定要真机回归**：
    本轮就是因为设备侧驱动状态，白排查了两小时（见第 27 条）。
-27. **KO 版本谱系 —— 用错一个就白查一晚**（2026-10-23 凌晨定案）。
+27. **KO 版本谱系 + 读路径的 memstart_addr 陷阱**（2026-10-23 两次实测定案）。
 
-   `build/ko/_dev/` 里四个自编译 KO，只有一个是好的。别凭时间戳选：
+   **现役 KO**：`rwNova33_6.12.69.ko`（305824 = 内存读写）+ `rwNova_6.12.69.ko`
+   （359504 = 硬件断点），都由 `scripts/build_rwproc_ko.sh` 从当前源码重编，
+   ITEST ALL PASS、全量搜索 3.3s / 20698 条不崩。
 
-   | 文件 | 大小 | 读写 | 全量搜索 | 结论 |
-   |---|---|---|---|---|
-   | `rwNova33_6.12.69.ko` | 307096 | **ITEST ALL PASS** | **3.3s，不崩** | **现役**（改名后从当前源码重编，模块名 rwNova33） |
-   | `rwproc_v2.ko` | 307640 | ITEST ALL PASS | 3.6s，不崩 | 改名前的等价物，保留备查 |
-   | `rwProcMem_gki.ko` | 307584 | 读全 0 | 正常 | 有回归，别用 |
-   | `rwproc_dbg.ko` | 330712 | — | — | 唯一带 `CONFIG_DEBUG_PRINTK`，只用来抓页表日志 |
-   | `rwProcMem_new.ko` | 160288 | 未测 | 未测 | — |
-   | `prebuilt/rwProcMem_slim.ko` | 39552 | — | — | **vermagic 不匹配**，insmod 报 `disagrees about version of symbol module_layout` |
+   | 文件 | 大小 | 状态 |
+   |---|---|---|
+   | `rwNova33_6.12.69.ko` | 305824 | **现役**（含 memstart_addr 修复 + 隐藏项） |
+   | `rwNova_6.12.69.ko` | 359504 | **现役**（hwbp，加 `ccflags-y += -Wno-error` 后可编） |
+   | `rwproc_v2.ko` | 307640 | 历史最好的旧版，保留备查 |
+   | `rwProcMem_gki.ko` | 307584 | 读全 0，弃用 |
+   | `_dev/rwproc_dbg.ko` | 330712 | 唯一带 `CONFIG_DEBUG_PRINTK`，只用来抓页表日志 |
+   | `prebuilt/rwProcMem_slim.ko` | 39552 | **vermagic 不匹配**，insmod 直接 Exec format error |
 
-   `rwProcMem_gki.ko` 的回归点在 `phy_mem_fast.h` 的 `virt_addr_valid()` 守卫：
-   它在本机把合法 pfn 判成非法，读到全 0（页表遍历本身是对的 —— 用 dbg 版抓日志
-   能看到 pgd/pud/pte 正常、paddr 正确算出）。源码里已改成
-   `pfn_to_online_page(PHYS_PFN(cur - PAGE_OFFSET))`，但**没编译验证过**
-   （WSL 里的内核树 /root/hwbp-src 缺 `modules` 目标），v2 是不是这么修的也没确认。
+   ### 读路径的真实根因（推翻此前两次结论）
 
-   **部署源现状**：`build/ko/rwNova33_6.12.69.ko` = 307096（**已入库** ——
-   `build/*` 虽在 .gitignore 里，但 `build/ko/*.ko` 这几个是早期就被跟踪的，
-   所以修复版会跟着 commit 走）；`build/ko_built/` 那份未跟踪、只在本机。
-   换机器后 `ls -la` 确认大小是 307096（或 v2 的 307640）就够了。
+   现象：`driver self-test` 读**自身进程**时好时坏（"both reads FAILED, r=4 但内容 0"），
+   部分页静默读不到；跨进程读低地址却正常。
+
+   此前写过两个错误结论，都废弃：~~"virt_addr_valid 把合法 pfn 判成非法"~~、
+   ~~"paddr 越界"~~（paddr 0x89b68124c 落在 0x880000000–0x8af8fdfff 段内，合法）。
+
+   **真因**：`phy_mem_fast.h` 的守卫算 pfn 时用了
+   `PHYS_PFN((unsigned long)cur - PAGE_OFFSET)` —— 少减了 `memstart_addr`。
+   arm64 线性映射是 `__va(p) = p - memstart_addr + PAGE_OFFSET`，所以
+   `cur - PAGE_OFFSET = p - memstart_addr`，**不是 p**。本机 memstart_addr ≈ 2GB
+   （0x80000 页）。诊断版实测同一次读：
+
+   ```
+   rwdbg[0] pfn_calc=0xa6238e   ← PHYS_PFN(cur - PAGE_OFFSET)，少了 2GB
+            pfn_v2p =0xae238e   ← virt_to_pfn(cur)，正确
+   ```
+
+   后果：真实 paddr 有效、但错位的 pfn 落进 MMIO 空洞时 `pfn_to_online_page` 返回
+   NULL → 整页静默丢弃。**每页是否被丢取决于地址，所以表现为"时好时坏"，
+   而不是稳定失败 —— 这是它查了两轮才揪出来的原因。**
+
+   修法（已落地）：两处守卫改成 `pfn_to_online_page(virt_to_pfn((void *)cur))`，
+   `virt_to_pfn` 内部走 `__virt_to_phys`，已扣 memstart_addr。
+
+   **修复前后实测（同一台设备、同一进程类型）**：全量搜索 count 13681 → **20698
+   （+51%）**，耗时 3.3s 基本不变 —— 也就是说**之前约三分之一的页根本没被读到**，
+   搜索结果是"漏"的。这条对所有读写路径生效，不只是 self-test。
+
+   **部署源**：`build/ko/rwNova33_6.12.69.ko` 已入库（`build/ko/*.ko` 是早期就被
+   跟踪的少数文件）；`build/ko_built/` 未跟踪、只在本机。换机器先 `ls -la` 对大小。
+
 28. **「一个驱动变成两个」的根因：deploy 的 staging 目录从不清理**（2026-10-23 修）。
 
    `deploy.ps1` 把 `build\ko\*.ko` 拷到 `%TEMP%\ggmcp_stage\ko\`，再**按 staging
@@ -305,6 +331,38 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    已修：`deploy.ps1` 每次部署前 `Remove-Item "$Stage\ko\*"`。
    若再看到设备上出现 `apr_dlkm.ko`，说明 staging 又被污染了 —— 直接删掉即可
    （它没有任何独立功能，就是 rwProcMem 的别名）。
+
+29. **隐蔽性基线（2026-10-23 落地，动驱动前先读这条）**。
+
+   两个内核模块原本各 10 处裸 `printk`（含 `Hello/Goodbye <设备名>`、
+   `[rwProcMem] module hidden by default`），dmesg 里 `grep -i rwproc` 能直接看到；
+   proc 节点权限是 `S_IRUGO|S_IWUGO`（0666）。**任何 App 都能打开它**，等于
+   "藏了个地址但没锁门"。现在：
+
+   | 项 | 改法 |
+   |---|---|
+   | 20 处裸 `printk` | → `printk_debug`（受 `CONFIG_DEBUG_PRINTK`，当前关闭＝空函数） |
+   | 4 处 `proc_create` 权限 | `S_IRUGO\|S_IWUGO` → `S_IRUSR\|S_IWUSR`（0600） |
+
+   真机实测（重启后干净状态）：`dmesg` 里 rwproc/rwnova **0 条**；节点 `-rw-------`；
+   非 root 打开 → `Permission denied`；`ls /proc` / `/proc/modules` / `/sys/module`
+   均查不到。**改完必须同时验证这三条，缺一条就是没生效。**
+
+   **仍是暴露面，按性价比排**（要动之前先确认目标）：
+   - `CONFIG_PROC_NODE_AUTH_KEY` 是**编译期固定值**（内存 `e84523…` / 断点 `dce377…`），
+     全设备同一把钥匙 —— .ko 一旦外流就永久失效。`strings` 能直接读出来。
+   - 目录项只在 readdir 里被过滤（kprobe hook `proc_root_readdir`），
+     **知道路径就能 open**。真正的"不存在"要靠 `anon_channel.h`（匿名 inode，不建
+     proc 节点），代码已写好但 `ver_control.h` 里是 `//#define CONFIG_USE_ANON_CHANNEL`。
+   - `cfi_bypass.h` 只 patch、**没有 restore**，内核 text 长期处于被改状态，
+     完整性自检能抓到。
+   - debugfs 挂上后 `/sys/kernel/debug/kprobes/list` 会列出 `proc_root_readdir` 探针。
+
+   **hwbp 编不过的坑（已解）**：`anti_ptrace_detection.h` 里两个未引用的 static 函数
+   被完整 GKI 树的 `-Werror` 判死，`KCFLAGS=-Wno-error` **压不住**（那是内核自带的），
+   必须用模块级 `ccflags-y += -Wno-error`。另外 `hwbp_proc.c` **不参与编译**
+   （Makefile 只有 `obj-m += hwBreakpointProc_module.o`），里面的 cdev/`/dev` 节点
+   全是死代码 —— 别照着它找 `/dev/rwNova`。
 
 ## 约定
 
