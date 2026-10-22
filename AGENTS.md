@@ -3,7 +3,7 @@
 ## 项目一句话
 
 内核驱动式内存修改 MCP 服务：PC 上的 AI agent 通过 MCP 直接读写安卓游戏进程内存。
-**只走 KO 内核驱动通道**（QX / rwproc33 / hook / dev 四型），GG 核心采用外挂圈子加载（ELF 桩 + hook syscall 270）。
+**只走 KO 内核驱动通道**（rwproc33），GG 核心采用外挂圈子加载（ELF 桩 + hook syscall 270）。
 
 ## 项目结构
 
@@ -435,6 +435,54 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    **仍然存在的暴露面**：proc 节点还在（0600 + readdir 隐藏），知道 key 就能开。
    想再进一步只能接受"agentd 不能重启"（删节点 = 断了重连入口），或者
    让驱动主动往指定 pid 塞 fd（`task_work_add`，但 pid 要在 insmod 时传）。
+
+32. **fd 表才是最大的暴露面；hwbp 的匿名通道移植完但没启用**（2026-10-23）。
+
+   ### 先说结论
+
+   agentd 的 `/proc/<pid>/fd` 里，proc 节点的 fd 会显示成
+   `N -> /proc/<key>/<key>` —— **扫一遍 fd 表就能发现节点，不需要知道 key**。
+   这比"按路径探测"更容易命中，之前一直没注意。
+
+   处理结果：
+
+   | 模块 | 通信方式 | fd 表里显示 |
+   |---|---|---|
+   | rwNova33（内存） | 匿名 ioctl | `anon_inode:dmabuf` ✅ |
+   | rwNova（断点） | proc read | `/proc/dce377…/dce377…` ❌ 仍是暴露面 |
+
+   内存模块拿到匿名 fd 后**立刻关闭 proc fd**（`rwproc_anon_upgrade()`），
+   所以那条节点路径从 fd 表里彻底消失，`rwproc_mem_fd` 直接改指匿名 fd
+   （所有 `rwproc_mem_fd<0` 的判断照旧成立，不需要改调用点）。
+
+   匿名 inode 的名字从 `"rwproc"` 改成 **`"dmabuf"`** —— 原名字等于在 fd 表里
+   写着"内存读写通道"；dmabuf 是 Android 上极常见的内核对象。
+
+   ### hwbp 的匿名通道：代码在，但开关关着
+
+   实现已完整移植（`hwBreakpointProc_module/anon_channel.h` 是从内存模块复制的，
+   两者 `DispatchCommand(hdr, buf)` 签名与 33 字节请求头一致；命令码
+   `CMD_ANON_GET_FD=15`；init 里 `anon_channel_set_dispatcher`）。
+   但启用后：**走匿名通道的 `GET_NUM_BRPS(=3)` 返回 -1**，同一节点走 proc read 返回 6。
+
+   已排除：`getCpuNumBrps()` 是纯位运算 `((read_cpuid(ID_AA64DFR0_EL1)>>12)&0xf)+1`，
+   不可能返回 -1 ⇒ 请求在 anon 链路上就没走到正确的 case。
+   二分已验证：关掉 `CONFIG_USE_ANON_CHANNEL` 重编，hwbp 立刻恢复（bps=16/threads=16）。
+
+   未排除：`AnonDispatchThunk` 的间接函数指针调用与 `cfi_bypass()` 的 text patch
+   之间的相互作用（内存模块同一套代码是正常的，差异未查）。
+
+   **所以开关保持注释状态**（`ver_control.h` 里的注释写明了现象与已排除项）。
+   重新启用前必须：开开关 → 编译 → 用 `gg_watch_set` 验证 `bps=16` 而不是只跑 itest
+   （itest 的 hwbp 段在探测失败时会 `[skip]`，看起来像通过）。
+
+   **注意**：`build/` 不入库，hwbp 的 `anon_channel.h` 和 `ver_control.h` 改动
+   换机器会丢。要重做的话按上面三条（复制头文件 / 枚举 / dispatcher 注入）。
+
+   ### 测 hwbp 时的坑
+
+   ARM64 只有 6 个硬件断点槽。`gg_watch_set` 之后**必须 `gg_watch_clear`**，
+   否则后续 itest 的 `hwbp INST` 会返回 -1（表现为"代码坏了"，实际是槽被占）。
 
 ## 约定
 

@@ -81,7 +81,8 @@ enum {
     RWBP_CMD_GET_HWBP_HIT_DETAIL = 10,
     RWBP_CMD_SET_HOOK_PC         = 11,
     RWBP_CMD_HIDE_KERNEL_MODULE  = 12,
-    RWBP_CMD_INST_PROCESS_HWBP_ALL = 13  /* 驱动内 for_each_thread 全线程批量注册 */
+    RWBP_CMD_INST_PROCESS_HWBP_ALL = 13, /* 驱动内 for_each_thread 全线程批量注册 */
+    RWBP_CMD_ANON_GET_FD         = 15   /* 在当前进程装一个匿名通道 fd（14 是驱动的 UNHIDE） */
 };
 
 /* hwBreakpointProc_module 的命中条目（packed, 与源码 HWBP_HIT_ITEM 一致, sizeof 312） */
@@ -119,6 +120,7 @@ typedef struct gg_driver {
      * ioctl(fd, 33, buf)，proc fd 只作为引导/重连入口保留。
      * install_fd 必须由用户态触发，所以它只能靠 proc 通道拿到 —— 不能纯匿名。 */
     int    rwproc_anon_fd;
+    int    rwproc_bp_anon_fd;   /* 断点模块的匿名 fd（同样>=0 时 bp 命令走 ioctl） */
     int    rwproc_bp_fd;      /* hwBreakpointProc_module 节点 fd（-1=未打开） */
     uint64_t rwproc_handle;   /* 当前 OPEN_PROCESS 的进程句柄（0=未打开） */
     pid_t  rwproc_pid;        /* 句柄对应的 pid（换 pid 时自动关旧开新） */

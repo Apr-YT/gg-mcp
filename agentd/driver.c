@@ -118,7 +118,8 @@ static ssize_t rwproc_call_ex(gg_driver_t *d, int fd, char cmd,
     if (fd < 0) { set_err(d, "rwproc node not open"); return -1; }
     /* 内存模块若有匿名通道，命令改走 ioctl —— 只对 mem fd 生效，
      * 断点模块（rwproc_bp_fd）仍走 proc read，两个 fd 不能混用。 */
-    int use_anon = (d->rwproc_anon_fd >= 0 && fd == d->rwproc_mem_fd);
+    int use_anon = (fd >= 0 && ((d->rwproc_anon_fd >= 0 && fd == d->rwproc_anon_fd) ||
+                                (d->rwproc_bp_anon_fd >= 0 && fd == d->rwproc_bp_anon_fd)));
     int anon_fd = use_anon ? d->rwproc_anon_fd : -1;
     if (use_anon) fd = anon_fd;
     if (data_size > RWPROC_MAX_IO) {
@@ -298,6 +299,7 @@ int driver_init_rwproc(gg_driver_t *d, const char *mem_key, const char *bp_key) 
     d->state = ST_UNAVAILABLE;
     d->rwproc_mem_fd = -1;
     d->rwproc_anon_fd = -1;
+    d->rwproc_bp_anon_fd = -1;
     d->rwproc_bp_fd = -1;
     d->rwproc_handle = 0;
     d->rwproc_pid = -1;
@@ -358,15 +360,31 @@ int rwproc_attach(gg_driver_t *d) {
  * 用 rwproc_call（out=NULL）而不是 rwproc_call_ex：驱动的返回值就是 fd 号，
  * 而 call_ex 的 out 长度校验会把 "r=fd号" 当成回写长度，fd 号大一点就误报溢出。
  * 失败不致命 —— proc 通道继续可用。 */
-static void rwproc_try_anon(gg_driver_t *d) {
-    ssize_t r = rwproc_call(d, d->rwproc_mem_fd, RWPROC_CMD_ANON_GET_FD,
-                            0, 0, 0, NULL, 0);
+/* 把一个 proc fd 升级成匿名通道 fd（成功则关掉原 proc fd）。
+ * 失败返回 -1 —— 调用方保持原 proc fd，功能不受影响。 */
+static int rwproc_anon_upgrade(gg_driver_t *d, int fd, char cmd, const char *what) {
+    ssize_t r = rwproc_call(d, fd, cmd, 0, 0, 0, NULL, 0);
     if (r < 0) {
-        log_msg("anon channel unavailable, keep using proc read: %s", d->last_error);
-        return;
+        log_msg("%s anon channel unavailable, keep using proc read: %s", what, d->last_error);
+        return -1;
     }
-    d->rwproc_anon_fd = (int)r;
-    log_msg("anon channel ready: fd=%d (mem commands now use ioctl)", (int)r);
+    /* ★ 关掉 proc fd：它在 /proc/<pid>/fd 里显示成 /proc/<key>/<key>，
+     *   扫 fd 表**不需要知道 key** 就能发现节点，比按路径探测更容易命中。 */
+    if (fd >= 0 && fd != (int)r) close(fd);
+    log_msg("%s anon channel ready: fd=%d (commands use ioctl; proc fd closed)",
+            what, (int)r);
+    return (int)r;
+}
+
+/* 两个模块都升级成匿名通道。任一失败则那条通道继续走 proc read。 */
+static void rwproc_try_anon(gg_driver_t *d) {
+    int a = rwproc_anon_upgrade(d, d->rwproc_mem_fd, RWPROC_CMD_ANON_GET_FD, "mem");
+    if (a >= 0) { d->rwproc_anon_fd = a; d->rwproc_mem_fd = a; }
+
+    if (d->rwproc_bp_fd >= 0) {
+        int b = rwproc_anon_upgrade(d, d->rwproc_bp_fd, RWBP_CMD_ANON_GET_FD, "bp");
+        if (b >= 0) { d->rwproc_bp_anon_fd = b; d->rwproc_bp_fd = b; }
+    }
 }
 
 int rwproc_open_process(gg_driver_t *d, pid_t pid, uint64_t *handle) {
@@ -728,8 +746,11 @@ void driver_close(gg_driver_t *d) {
                         d->rwproc_handle, 0, 0, NULL, 0);
             d->rwproc_handle = 0;
         }
+        /* 拿到匿名通道后 rwproc_mem_fd 就是 anon fd，关一次就够 */
         if (d->rwproc_mem_fd >= 0) { close(d->rwproc_mem_fd); d->rwproc_mem_fd = -1; }
+        d->rwproc_anon_fd = -1;
         if (d->rwproc_bp_fd >= 0) { close(d->rwproc_bp_fd); d->rwproc_bp_fd = -1; }
+        d->rwproc_bp_anon_fd = -1;
         return;
     }
 }
