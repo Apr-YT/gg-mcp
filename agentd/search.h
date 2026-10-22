@@ -28,6 +28,13 @@ typedef struct fz_region {
     uint64_t snap_off;     /* 快照内字节偏移 */
 } fz_region_t;
 
+/* 精确搜索 refine 的撤销副本（地址数组 + 各自的上一轮值） */
+typedef struct gg_exact_undo {
+    uint64_t *addrs;
+    uint64_t *vals;
+    size_t    count;
+} gg_exact_undo_t;
+
 typedef struct gg_results {
     /* 物化结果（精确/区间搜索直接写入；模糊搜索在小到阈值后物化） */
     uint64_t *addrs;
@@ -63,6 +70,13 @@ typedef struct gg_results {
     size_t    fuzzy_undo_bytes;    /* 单级位图字节数（0 = 尚未分配） */
     int       fuzzy_undo_head;     /* 最近一次保存的下标，-1 = 空 */
     int       fuzzy_undo_count;    /* 当前可回退步数 */
+
+    /* 精确搜索 refine 的撤销栈（同一深度）。精确 refine 是原地压缩 addrs，
+     * 同样只减不增 —— 不存副本就没法回退。每级最多 cap × 16 字节
+     * （默认 cap=100000 → 1.6MB），比模糊的位图副本便宜得多。 */
+    gg_exact_undo_t exact_undo[GG_FUZZY_UNDO_DEPTH];
+    int       exact_undo_head;
+    int       exact_undo_depth;
 } gg_results_t;
 
 void results_init(gg_results_t *r, size_t cap);
@@ -92,6 +106,10 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op);
 /* 撤销最近一次模糊 refine（恢复候选位图）。返回恢复后的候选数；
  * -1 = 没有可回退的步骤（或当前不是模糊搜索）。 */
 int64_t search_refine_undo(gg_results_t *r);
+
+/* 撤销最近一次精确/区间搜索的 refine（恢复地址数组）。返回恢复后的条目数；
+ * -1 = 没有可回退的步骤。 */
+int64_t search_refine_undo_exact(gg_results_t *r);
 
 /* 精确搜索 refine：对 search_exact 的候选按 op 比较（当前值 vs 各自快照）。
  * 语义同 GG：increased=值变大 / decreased=变小 / unchanged=不变 / changed=变化。

@@ -1241,14 +1241,12 @@ static void h_refine(int fd, uint32_t seq, cJSON *p) {
     }
     int64_t prev = (int64_t)g_eng.results.count;
     if (op == 0) {
-        /* 撤销上一步模糊 refine。只支持模糊搜索 —— 精确搜索的 undo 需要另存
-         * 地址数组副本，属于另一件事，这里明确报错而不是假装成功。 */
+        /* 撤销上一步 refine：模糊搜索回退位图，精确/区间搜索回退地址数组。 */
         int64_t back = search_refine_undo(&g_eng.results);
+        if (back < 0) back = search_refine_undo_exact(&g_eng.results);
         if (back < 0) {
             send_err(fd, GGCMD_SEARCH_REFINE, seq, GGERR_BAD_REQUEST,
-                     g_eng.results.fuzzy_active
-                         ? "nothing to undo (no refine yet)"
-                         : "undo supports fuzzy (unknown-value) scans only");
+                     "nothing to undo (no refine step on record)");
             return;
         }
         cJSON *r = cJSON_CreateObject();
@@ -1290,6 +1288,15 @@ static void h_disassemble(int fd, uint32_t seq, cJSON *p) {
         cJSON_GetObjectItem(p, "length")->valueint : 64;
     if (length <= 0) length = 64;
     if (length > 4096) length = 4096;   /* 上限 4KB */
+
+    /* ARM64 指令必须 4 字节对齐。给个非对齐地址，Capstone 会从错误边界解码，
+     * 吐出一两条"看着像指令"的垃圾然后停住 —— 这比直接报错更误导：调用方
+     * 会以为那里真有个奇怪函数（实测 base+0x76392e 只回 1 条 `and w0,w0,w13`）。 */
+    if (addr % 4 != 0) {
+        send_err(fd, GGCMD_DISASSEMBLE, seq, GGERR_BAD_REQUEST,
+                 "addr must be 4-byte aligned for arm64");
+        return;
+    }
 
     uint8_t *buf = malloc((size_t)length);
     if (!buf) { send_err(fd, GGCMD_DISASSEMBLE, seq, GGERR_INTERNAL, "oom"); return; }

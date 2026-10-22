@@ -83,8 +83,8 @@ static const std::vector<ToolDef>& build() {
              },
              json{"op"}),
         tool("gg_search_undo",
-             "撤销最近一步模糊细化：恢复上一步的候选集（最多回退 3 步）。"
-             "只对模糊搜索（unknown_init）有效；精确搜索的 refine 无法回退",
+             "撤销最近一步细化：恢复上一步的候选集（最多回退 3 步）。"
+             "模糊搜索恢复位图，精确/区间搜索恢复地址数组",
              json::object(), json::array()),
         tool("gg_search_range",
              "区间搜索：min <= 值 <= max（按类型解释）",

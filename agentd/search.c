@@ -294,6 +294,7 @@ void results_init(gg_results_t *r, size_t cap) {
     memset(r, 0, sizeof(*r));
     r->cap = cap ? cap : GG_RESULT_CAP_DEFAULT;
     r->fuzzy_undo_head = -1;   /* memset 后是 0，会被误当成「有一级可回退」 */
+    r->exact_undo_head = -1;
 }
 
 void results_clear(gg_results_t *r) {
@@ -303,8 +304,13 @@ void results_clear(gg_results_t *r) {
     free(r->fuzzy_snapshot);
     free(r->fuzzy_regions);
     for (int i = 0; i < GG_FUZZY_UNDO_DEPTH; i++) free(r->fuzzy_undo[i]);
+    for (int i = 0; i < GG_FUZZY_UNDO_DEPTH; i++) {
+        free(r->exact_undo[i].addrs);
+        free(r->exact_undo[i].vals);
+    }
     memset(r, 0, sizeof(*r));
     r->fuzzy_undo_head = -1;
+    r->exact_undo_head = -1;
 }
 
 static int results_push(gg_results_t *r, uint64_t addr) {
@@ -692,6 +698,47 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
 
 /* 精确搜索 refine：候选在搜索时都 == exact_value（已入快照），
  * 逐地址读当前值对比快照，命中 op 的保留并更新快照（支持多轮 refine）。 */
+/* 精确 refine 前保存地址数组副本（环形栈）。分配失败只影响这次能否回退。 */
+static void exact_undo_push(gg_results_t *r) {
+    if (!r->addrs || r->count == 0) return;
+    size_t bytes = r->count * sizeof(uint64_t);
+    int next = (r->exact_undo_head + 1) % GG_FUZZY_UNDO_DEPTH;
+    gg_exact_undo_t *u = &r->exact_undo[next];
+    uint64_t *a = malloc(bytes);
+    uint64_t *v = malloc(bytes);
+    if (!a || !v) { free(a); free(v); return; }
+    memcpy(a, r->addrs, bytes);
+    if (r->exact_vals) memcpy(v, r->exact_vals, bytes);
+    else memset(v, 0, bytes);
+    free(u->addrs);
+    free(u->vals);
+    u->addrs = a;
+    u->vals = v;
+    u->count = r->count;
+    r->exact_undo_head = next;
+    if (r->exact_undo_depth < GG_FUZZY_UNDO_DEPTH) r->exact_undo_depth++;
+}
+
+int64_t search_refine_undo_exact(gg_results_t *r) {
+    if (!r->addrs || r->exact_undo_depth <= 0 || r->exact_undo_head < 0) return -1;
+    gg_exact_undo_t *u = &r->exact_undo[r->exact_undo_head];
+    if (!u->addrs || u->count == 0) return -1;
+    if (u->count > r->cap) return -1;   /* 容量不该变，防越界写 */
+    size_t bytes = u->count * sizeof(uint64_t);
+    if (!r->exact_vals) {
+        r->exact_vals = malloc((size_t)r->cap * sizeof(uint64_t));
+        if (!r->exact_vals) return -1;
+    }
+    memcpy(r->addrs, u->addrs, bytes);
+    memcpy(r->exact_vals, u->vals, bytes);
+    r->count = u->count;
+    r->exact_undo_head = (r->exact_undo_head - 1 + GG_FUZZY_UNDO_DEPTH) % GG_FUZZY_UNDO_DEPTH;
+    r->exact_undo_depth--;
+    log_msg("exact undo: restored %zu candidates (%d step(s) left)",
+            r->count, r->exact_undo_depth);
+    return (int64_t)r->count;
+}
+
 int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
     if (!r->addrs || r->count == 0) return 0;
     if (r->exact_vt <= 0 || r->exact_vt > VT_DOUBLE) return -1;
@@ -702,6 +749,8 @@ int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) 
         if (!r->exact_vals) return -1;
         for (size_t i = 0; i < r->count; i++) r->exact_vals[i] = r->exact_value;
     }
+    /* 这一步会原地压缩 addrs（只减不增），先存副本供 undo */
+    exact_undo_push(r);
 
     uint64_t *dst = r->addrs;
     uint64_t *dstv = r->exact_vals;
