@@ -110,7 +110,16 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
    **改 main() 初始化顺序时别再把它挪回解析之后。**
 10. GG-U1（shell 无超时锁死守护进程）已修：`read`+`waitpid` 双超时，超时 SIGKILL 返回
    `GGERR_TIMEOUT`。真机：`cat /dev/zero` 10.0s 超时、其后 ping 0.040s 返回。
-   仍开放：GG-U2（pid 复用无 starttime 校验）、GG-U3（事件广播锁内阻塞 send）。
+11. GG-U2（pid 复用）已修：会话身份改为 (pid, `process_starttime()`)，attach 记录、
+   dispatch 每请求校验、`freeze_loop` 每轮校验，不一致即清会话（含结果集）。
+   真机两条分支都实测到：目标退出 → `exited (expected=182255)`；用 `pidspin` 让新进程
+   占住同一 pid → `reused by another process (227844 vs 221527)`，读写均 NO_SESSION。
+   **改会话相关逻辑时注意**：判"还是不是同一个进程"只能靠 starttime，comm/uid/maps 都不可靠。
+12. GG-U3（事件广播锁内阻塞）已修：锁内只快照 + `dup`，锁外发送，socket 设 `SO_SNDTIMEO=1s`。
+   A/B 实测：旧实现下不读的订阅者让**新连接 auth 卡 7.44s**（`clients_register` 抢不到
+   `g_clients_mtx`），修复后 0.01s。
+   **测试方法有坑**：从 PC 侧测不出这个场景 —— `adb forward` 会替客户端读走数据，
+   发送缓冲永远填不满。必须用 `build/ko/_dev/sub_stuck.c` 在**设备本地**建连接且不读。
 
 ### 已清（2026-10-15，本机实测）
 
