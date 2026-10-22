@@ -4,6 +4,10 @@ build/*
 # 两套 6.12.x 分别对应 K90(6.12.23) 与 myron(6.12.69)，vermagic 与符号 CRC 已按设备适配，
 # 生成/复用方法见 docs/engineering/RWPROC33_ADAPTER.md §十一。改动前先读那一节。
 !build/ko/
+# 真机调试的中间产物（设备 BTF 7.8MB、试编的 .ko、设备 config）不入库；
+# 其中 fix_modc.py 是 modpost 空表缺陷的修补脚本，保留在本地即可，需要时按
+# docs/audit/RWPROC33_2026-10-22.md 复现。
+build/ko/_dev/
 *.exe
 *.o
 *.obj
