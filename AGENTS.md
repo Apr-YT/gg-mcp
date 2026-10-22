@@ -133,6 +133,12 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
    （或在设备上读那个 .ephemeral 文件）。正常部署不受影响。
    **另一个坑**：`start_agentd.sh start` 在端口被别的实例占用时会**误报"已启动"**
    （只按 pidfile 判断存活）。手工 `setsid` 起过实例后一定要先 `kill $(pidof gdm)`。
+15. GG-U5 的「超限静默丢弃」已修：`send_ok` 序列化后先用 `gg_payload_fits()`
+   判上限，超限回 `GGERR_CAP` 错误帧（带实际字节数 + 修法），不再是"什么帧都不发、
+   客户端等 300s"。**协议分片仍未做** —— 单帧 1MiB 是硬上限，`get_results
+   limit=10000` 已占 510KB，**加 limit 之前必须先分片**。
+   调这块时的注意点：验证超限分支现在没有可构造路径，需要临时把
+   `GGWM_MAX_PAYLOAD` 改小重编设备端（PC 端不用动），测完立即恢复。
 
 ### 已清（2026-10-15，本机实测）
 
