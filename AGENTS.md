@@ -282,3 +282,18 @@ apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdc
    顺序注册，第 17 个起全部 ENOSPC 被 `continue` 跳过）。systemui 这种 200+ 线程的
    进程，只有前 16 个线程的命中能被看到 —— 别把"没命中"当成"地址不对"。
 
+
+26. **AI-Root 侧（AR）审计项已全部关闭**（2026-10-22 夜）。改 policy / consent /
+   config 前必读这三条实测结论：
+   - **自保护路径判定是两段式**：词法不命中后再用 `GetFinalPathNameByHandleW`
+     解析真实路径。别把第二段删掉当"性能优化"——它挡的正是 8.3 短名
+     （`PROGRA~1`）、junction、尾随点空格。解析结果若是 `C:\$Extend\$Deleted\*`
+     必须丢弃（那是"已删除但仍有句柄"的返回值，拿去比对会得出假的"不命中"）。
+   - **Windows 上 delete / rename 不能当并发抢占点**。多线程可以各自打开同一文件
+     句柄（默认共享删除），对同一 file object 的删除/改名**每个调用都返回成功** ——
+     实测 8 线程并发 `remove_file` 出现 2 个成功、`rename` 出现 4 个。要用
+     `dwShareMode = 0` 独占打开 + `SetFileInformationByHandle(FileDispositionInfo)`。
+   - **`default_autonomy` 允许解释器 = 允许任意代码执行**，这是刻意取舍。只把
+     「即时执行外部内容」降为 Confirm（`npx`/`npm run`/`pip install`/`cargo install`/
+     `go run`/`git -c`/`dotnet run`）。**改动只影响新生成的默认策略**，已部署的
+     `policy.toml` 不会自动变。
