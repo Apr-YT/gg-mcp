@@ -398,7 +398,9 @@ int AgentClient::write_frame(int fd, uint16_t cmd, uint32_t seq, const std::stri
         if (n > 0) { off += static_cast<size_t>(n); continue; }
         if (n < 0 && gg_is_eintr()) continue;   // 信号中断重试
         if (n < 0 && gg_is_sock_timeout()) return -2;
-        return -1;
+        /* 一个字节都没发出去 → 远端什么都没收到，调用方可以安全重连重放。
+         * 发过一部分就只能断开：远端会读到半个帧头（返回 -1 表示不可重放）。 */
+        return (off == 0) ? -3 : -1;
     }
     {
         char hex[64] = {0};
@@ -485,6 +487,29 @@ int AgentClient::call(uint16_t cmd, const json& params, json* out) {
 
     uint32_t seq = ++seq_;
     int wr = write_frame(fd_, cmd, seq, payload, deadline);
+    /* 发送失败 → 这一帧**没有完整交给内核**，对端不可能执行完整请求，
+     * 可以安全重连重放一次（wr == -4 是本地负载超限，重放没有意义）。
+     *
+     * 判据为什么不是「一个字节都没发」：实测 agentd 重启后，帧头那 20 字节
+     * 往往能塞进仍有余量的发送缓冲（send 成功），失败发生在 payload 阶段。
+     * 只看 wr == -3 会漏掉这个最常见的情形。
+     * 真正的安全边界是「整帧是否发完」：发完（wr == 0）绝不重放，因为对端可能
+     * 已执行，重放会让 gg_write 做两次；没发完则对端连帧都解析不出来，不会执行。
+     *
+     * 只重放一次，且必须换新 seq：两次请求不能共用一个序号。 */
+    if (wr < 0 && wr != -4) {
+        GG_CLOSE_SOCK(static_cast<sock_t>(fd_));
+        fd_ = -1;
+        GG_LOG(1, "[wire] write failed (wr=%d), reconnect and replay once\n", wr);
+        int cr = ensure_connected_locked();
+        if (cr == 0) {
+            seq = ++seq_;
+            wr = write_frame(fd_, cmd, seq, payload, deadline);
+        } else if (cr == -2) {
+            last_outcome = CallOutcome::RemoteError;
+            return GGERR_PERM;
+        }
+    }
     if (wr != 0) {
         GG_CLOSE_SOCK(static_cast<sock_t>(fd_));
         fd_ = -1;
