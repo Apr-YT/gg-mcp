@@ -86,12 +86,15 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
    ② `get_proc_phy_addr` 不判 pmd 大页，THP 的 pmd 被 `pte_offset_kernel` 当页表指针；
    ③ 本地打开 `CONFIG_ENABLE_FAST_PHYMEM` 的 `__va()` 后无 `virt_addr_valid` 兜底；
    ④ 页表遍历在 `mmap_lock` 外。四处在 `build/rwProcMem33` 已改。
-   **2026-10-22 晚已在真机验证到一半**：用 GKI 树（device config + clang-18，SUBLEVEL 改 69、
-   LOCALVERSION 补 `-android16-6-4k`）编出的 KO 的 `this_module=1600`、vermagic 逐字匹配设备，
-   `insmod` 成功、设备 6h16m 未重启、`dmesg` 零 Oops。`driver_self_test` 读到的 39GB 非法
-   物理地址被新守卫拦下（`[rwfast] phys range invalid`）——**这正是 §十二 的触发条件，已从
-   「崩机」变成「返回 0」**。但读写链路本身还没通（页表某级给出 RAM 外的 pfn），
-   全量搜索未验证。详见 `docs/audit/RWPROC33_2026-10-22.md`「真机验证」节，含完整编译命令。
+   **2026-10-22 晚真机验证通过**（myron / 6.12.69-android16-6）：GKI 树（设备 config +
+   clang-18，SUBLEVEL 改 69、LOCALVERSION 补 `-android16-6-4k`）编出的 KO `this_module=1600`、
+   vermagic 逐字匹配；`driver_self_test: channel OK`；`run_itest.ps1` **ITEST ALL PASS**；
+   **com.android.systemui（341MB / 5940 VMA）全量匿名搜索 4.8s 完成、`truncated=false`、设备零 Oops**
+   —— §十二 会让设备重启的那个操作现在正常收尾。
+   关键修正：**不能用 `si.totalram` 当物理地址上界**（真机实测合法 pfn 可达 0x926afc=39.3GB，
+   RAM 只有 11.6GB，PA_BITS=48），合法性只由 `virt_addr_valid()` 判。
+   遗留：客户端以**数字**形式传 `value` 会被拒（`bad value`），字符串形式正常，待修。
+   详见 `docs/audit/RWPROC33_2026-10-22.md`「真机验证结论」节。
 8. **本轮（2026-10-22）已修但设备端未验**：地址参数两端类型约定不一致（数字地址让 `gg_watch_inject`
    `strtoull(NULL)` 段错误、`gg_write {value:100}` 误报缺参）、`parse_value_str` 缺 endptr、HEX_DUMP 响应 cmd 错位、
    safe_mode 漏 `ghost_tap/swipe`、elfsym 字符串表越界；server 端 Windows connect 缺 `SO_ERROR`（把「设备没连上」报成
