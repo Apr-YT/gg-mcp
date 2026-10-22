@@ -3,7 +3,13 @@
 > ⚠️ **2026-10-21：本文的「GG 核心版本族」部分已作废。**
 > GG 核心注入链路（`lib5_stub` + `libKernelGg.so` + `loader.c`）已整条删除，
 > `gg_kernel_load_gg` / `gg_core_versions` 工具不再存在。
-> 下文 `6.12.xx`（KO 驱动 vermagic）部分仍然有效，见 `RWPROC33_ADAPTER.md` §十一。
+>
+> ⚠️ **2026-10-22 追加：KO 驱动版本族的 agentd 侧入口也已删除。**
+> `agentd` 不再接受 `--ko-pattern` / `--ko-strict`，也不做 insmod（模块 `hide_by_default`，
+> 重复 insmod 会 EEXIST），加载完全交给 `scripts/install_ko.sh`，规则是**按 `uname -r` 的
+> x.y.z 精确匹配**，与本文的「同族补丁号任意」相反。`version_match_family()` 现在只有
+> `tests/unit/test_version.c` 在调用。下文保留作历史记录，**不要照它改 `start_agentd.sh`**
+> （该脚本的 `KO_PATTERN` 已移除）。现行判据见 `PROTOCOL.md` §2.1。
 
 ## 核心需求
 

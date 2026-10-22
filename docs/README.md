@@ -2,27 +2,31 @@
 
 `docs/` 按性质分两类：`engineering/` 承载工程文档（架构/协议/验收/交接/优化记录），`research/` 承载逆向研究笔记。
 
+> 2026-10-22 校准：`PROJECT_MAP.md`、`ARCHITECTURE.md`、`PROTOCOL.md` 已按 HEAD `1736072` 的代码实测更新
+> （代码量、44 个工具、42 条 wire 命令枚举、rwproc33 单通道无降级、16 个单测程序 + 3 道护栏、真机 ITEST ALL PASS）。
+
 > ⚠️ `research/` 下的逆向研究笔记**仅限本仓内部使用，不外发**。
 
 ## 工程文档（`engineering/`）
 
 | 文件 | 用途 |
 |---|---|
-| [PROJECT_MAP.md](engineering/PROJECT_MAP.md) | **项目总览**：进程边界、通信链路、各模块行数、43 个工具面、构建/测试能力与债务清单。查现状先看这份。 |
+| [DESIGN.md](engineering/DESIGN.md) | **设计说明**：信任边界、调用通路、协议约定（ABI / 混淆协商 / AUTH 门 / 单帧上限）、并发与锁层级、引擎数据结构、会话不变量、安全分层、失败语义与限额表、改动 checklist。要动跨组件的东西先看这份。 |
+| [PROJECT_MAP.md](engineering/PROJECT_MAP.md) | **项目总览**：进程边界、通信链路、各模块行数、44 个工具面、构建/测试能力与债务清单。查现状先看这份。 |
 | [ACCEPTANCE.md](engineering/ACCEPTANCE.md) | KO 驱动方案验收清单，区分「本机可验证」与「需真机」两类项。 |
 | [ARCHITECTURE.md](engineering/ARCHITECTURE.md) | 组件划分、数据流与驱动通道的架构说明。 |
-| [PROTOCOL.md](engineering/PROTOCOL.md) | PC ↔ gg-agentd 的 wire 协议（20B 头 + JSON）与 KO 驱动 ioctl 协议笔记。 |
+| [PROTOCOL.md](engineering/PROTOCOL.md) | PC ↔ gg-agentd 的 wire 协议（20B 头 + JSON，含 AUTH 握手）与 rwproc33 驱动协议（33B 头 + read）笔记。 |
 | [HANDOVER.md](engineering/HANDOVER.md) | 项目交接文档；正文是 08-16 历史记录，文首有 2026-10-15 的路径/命名更新。 |
 | [CODE_REFACTOR.md](engineering/CODE_REFACTOR.md) | search.c 等模块的历史重构指南。 |
 | [OPTIMIZATION_SUMMARY.md](engineering/OPTIMIZATION_SUMMARY.md) | 2026-08-22 优化工作总结；文首有 08-28 更正声明，**部分声明不实，以更正声明为准**。 |
 | [CHECKPOINT_REVIEW_REPORT.md](engineering/CHECKPOINT_REVIEW_REPORT.md) | 2026-08-27 检查点审查报告；文首有历史快照声明，**勿当现状**。 |
-| [DRIVER_MATRIX.md](engineering/DRIVER_MATRIX.md) | **驱动通道能力矩阵**：四型驱动各自的通道与降级行为、状态值判定依据、`ST_KO_HOOK` 假阳性的成因、工具×驱动依赖。判断「驱动到底好不好」先看这份。 |
+| [DRIVER_MATRIX.md](engineering/DRIVER_MATRIX.md) | **驱动通道能力矩阵**：rwproc33 单型的通道与状态值判定依据、`ST_KO_HOOK` 假阳性的成因（三型已删，见 §6）、工具×驱动依赖。判断「驱动到底好不好」先看这份。 |
 | [CODE_REVIEW_2026-10-21.md](engineering/CODE_REVIEW_2026-10-21.md) | 2026-10-21 全量代码审查：通信层加固（wire 鉴权）、内存边界修复、静态分析与真机验证记录。 |
 | [RWPROC33_ADAPTER.md](engineering/RWPROC33_ADAPTER.md) | rwProcMem33 驱动接口适配：命令枚举、请求结构、硬件断点与构建要点；§十一 跨内核复用 prebuilt、§十二 rwproc 全扫崩内核的实测证据。 |
 | [HWBP_CRASH_HELP.md](engineering/HWBP_CRASH_HELP.md) | hwBreakpointProc_module 静默挂死排查记录（已解决：命令枚举错位），同类内核挂死可复用其排查法。 |
 | [TOOLCHAIN.md](engineering/TOOLCHAIN.md) | 本机工具链实况（NDK r30 / capstone 5.0.1 / MinGW），跨平台构建 agentd 的可复制步骤。 |
 | [DEVICE_STATUS_6.12.69.md](engineering/DEVICE_STATUS_6.12.69.md) | 内核 6.12.69 设备上的部署与运行状态报告（2026-08-22 快照）。 |
-| [VERSION_MATCHING.md](engineering/VERSION_MATCHING.md) | 版本族（major.minor 同级放行）匹配规则；GG 核心部分已随注入链路删除，KO 驱动部分仍有效。 |
+| [VERSION_MATCHING.md](engineering/VERSION_MATCHING.md) | 版本族（major.minor 同级放行）匹配规则的历史记录；**已整体作废**（GG 核心链路已删，KO 侧改为 `install_ko.sh` 精确版本匹配），文首有两次作废声明。 |
 | [GG-GHOST.md](engineering/GG-GHOST.md) | GG-Ghost 内核虚拟触摸注入套件（`gg-ghost` input 设备 + proc 注入协议）完整文档。 |
 | [AGENTD_HISTORY.md](engineering/AGENTD_HISTORY.md) | apk/ggtool 时代的旧版工作区指令归档，仅供追溯。 |
 | [MEMORY.md](engineering/MEMORY.md) | AI 会话持久记忆：环境事实、命令、踩坑结论的自动维护清单。 |

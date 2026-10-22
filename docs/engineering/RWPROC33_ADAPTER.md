@@ -710,7 +710,14 @@ python scripts/patch_ko_versions.py build/devmod/all build/ko/apr_dlkm.ko
 > **2026-10-22 更新：根因已定位，本节末尾的「下一步排查」不必再做。**
 > 四条原因（物理地址上限用 `__pa(字节数)` 算错、不判 pmd 大页、fast 路径缺 `virt_addr_valid`、
 > 页表遍历在 `mmap_lock` 外）与修复见 `docs/audit/RWPROC33_2026-10-22.md`。
-> 修复尚未编译、未上机，在验证前本节的风险结论仍然有效。
+>
+> **2026-10-22 晚间再更新（真机已验）**：修复版已在设备 `134d2f8` / 6.12.69 上跑起来
+> —— `insmod` RC=0、加载后 6h16m 未重启、dmesg 零 Oops，`[rwfast] phys range invalid`
+> 确实拦下了 39.3GB 的非法物理地址（旧代码会越界 vmemmap 崩机）。**崩机这条故障已止住。**
+> 但读写链路尚未打通：`driver_self_test` 回环读返回 0，算出的 39GB 来自页表项本身
+> （VA_BITS=39 / 3 级页表 / BTF 偏移已逐项核对一致），不是偏移错。
+> 所以本节「全量搜索会崩」的结论失效，但**通道仍不可用于实际读写**，
+> 在下一条结论出来前不要对游戏目标做全量搜索。
 
 **现象**：rwproc 通道下对某些目标进程执行 `gg_search`（`region=anonymous` 全扫），
 **设备直接重启**（不是 agentd 崩溃）。agentd 日志停在收到 `cmd=27` 那一刻，

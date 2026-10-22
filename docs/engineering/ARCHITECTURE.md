@@ -13,14 +13,18 @@
 AI agent ──MCP(JSON-RPC)──▶ gg-ghost-mcp ──wire 二进制帧──▶ adb forward ──▶ gg-agentd
                                                                               │ driver_read/write
                                                                               ▼
-                                                          KO 内核驱动（insmod 加载）
-                                                          ├─ hook 型: 内核 hook process_vm_readv
-                                                          └─ dev 型:  /dev 节点 + ioctl
+                                                          KO 内核驱动（insmod 加载，仅 rwproc33）
+                                                          rwProcMem_module      —— 内存读写 / 触摸注入
+                                                          hwBreakpointProc_module —— 硬件断点
+                                                          节点: /proc/<AUTH_KEY>/<AUTH_KEY>，read() 走 33B 头
 ```
 
-- **MCP 层**：JSON-RPC 2.0（initialize / tools/list / tools/call / ping）。stdio 用换行分隔 JSON；HTTP 用 `POST /mcp`。
+- **MCP 层**：JSON-RPC 2.0（initialize / tools/list / tools/call / ping，支持批量数组）。stdio 用换行分隔 JSON；HTTP 用 `POST /mcp`。
 - **wire 层**：20 字节头 `{magic,ver,cmd,seq,flags,payload_len}` + JSON 负载（请求 `{"p":{}}`，响应 `{"r":{}}`，错误 `{"e":{code,message}}`）。定义见 `shared/wire_protocol.h`（PC/设备共用唯一事实源）。
 - **驱动层**：见 docs/engineering/PROTOCOL.md。
+
+负载混淆是**自适应**的：PC 端收到首个带 `GGWF_ENC` 的响应后才开始给请求加 XOR 混淆，
+所以新 server 对旧 agentd（不混淆）仍然可用。`enc_on_` 属连接级状态，重连即归零。
 
 ## 3. KO 驱动加载与通道（核心）
 
@@ -42,8 +46,12 @@ agentd 启动
 1. 按 --rwproc-key / --rwproc-bp-key open /proc/<key>/<key> 两个节点
    （key 为空时扫描 /proc 找「目录名 == 内文件名」的节点）
 2. CMD_INIT_DEVICE_INFO（必须首个命令）
-3. driver_self_test：open 自身 + 回环读 → 通过则 state=ST_DRIVER
+3. driver_self_test：open 自身 + 回环读 → 通过则 state=ST_DRIVER ("kernel-driver (rwproc33)")
 ```
+
+**hide 模块的判据别看 `/proc/modules`**：模块开了隐藏后那里查不到名字，重复 `insmod` 返回
+`EEXIST`。`install_ko.sh` 已把 `EEXIST` 当「已加载」而不是失败，最终是否可用只认 agentd 的
+节点自检 —— 名字匹配既会漏判也会误判（驱动可改名成 `apr_dlkm` 之类）。
 
 ### 3.2 通道协议（33 字节头 + 数据区）
 
@@ -60,9 +68,9 @@ count 只给 33 会让内核写不进去，随后的 `memcpy(buf+33, 8)` 拿到�
 
 ### 3.3 失败即报错，不降级
 
-没有 `process_vm_readv` 回落。通道不可用时 `kernel_status` 返回
-`state=4 (unavailable)`，读写直接报错 —— 既避免语义不一致，也避免可被反作弊
-检测的越界读取。
+没有 `process_vm_readv` 回落，也没有 `/proc/<pid>/mem` 回落。通道不可用时 `kernel_status` 返回
+`state=4 (unavailable)`，读写直接报错 —— 既避免语义不一致，也避免可被反作弊检测的越界读取。
+`tests/unit/check_kernel_only.py` 守这条：`driver_read/write` 里出现用户态回退即护栏失败。
 
 ### 3.4 `is_force=0` 的代价
 
@@ -70,6 +78,11 @@ count 只给 33 会让内核写不进去，随后的 `memcpy(buf+33, 8)` 拿到�
 活跃页正常。这是为规避「翻转 PTE 与目标进程活跃页竞争导致内核崩溃」而选的行为，
 代价是偶发读空 —— `gg_read_bytes` 在 `bytes: 0` 时返回 `note` 说明原因。
 详见 `RWPROC33_ADAPTER.md` §十二。
+
+`force=1` 现已由 agentd **硬拒**：2026-10-22 在 `rwProcMem_6.12.69` 上对活跃进程实测，
+连续两次改 PTE 触发内核崩溃→设备重启（uptime 归零、adb 掉线）。`driver_read_ex()` 直接返回
+`force=1 disabled: rwproc33 is_force_read panics this kernel`，不再透传给驱动。
+驱动侧修好之前不要放开。
 
 ## 4. 引擎职责划分（关键决策）
 
@@ -98,7 +111,19 @@ wire 命令码 28/29 保留占位，避免与已部署的 agentd 错位，调用
 - **失败即报错，不降级**：只剩 rwproc33 一条通道（hook/dev/qx 三型已删除）。通道不可用时
   `kernel_status` 返回 `state=4 (unavailable)`，读写直接返回错误 —— 既避免语义不一致，
   也避免可被反作弊检测的越界读取。
-- safe-mode：只读会话（write/set_results/freeze/shell/pause/resume/watch 本地拒绝 + 设备端双保险）。
+- **wire 鉴权**：未认证连接的请求只放行 `PING` / `AUTH`，其余一律 `GGERR_PERM`。密钥在设备端
+  `/data/adb/GG-Ghost/wire.key`（`0600`，首启自动生成 32 字节 hex），由 `--wire-key-file` 传入；
+  PC 端 `configs/gg-ghost.json` 的 `wire_key` 必须一致，`deploy.ps1` 部署时自动拉取回写。
+  **key 为空时 `AUTH` 无条件成功** —— 不配 key 的部署等于没有这层防护。
+- safe-mode：只读会话。破坏性命令在分发前统一拦截（write / set_results / freeze / unfreeze /
+  pause / resume / shell / watch / ghost_tap / ghost_swipe），`watch_poll` 属只读查询放行；
+  PC 端另有本地拒绝。
 - shell 白名单：ps/ls/cat/dumpsys/getprop/id（默认关闭）。
-- adb 断连：工具调用返回 GGERR_NO_DEVICE，自动重连一次。
+- **HTTP 暴露面**：默认只绑 `127.0.0.1`。非回环地址（含 `::` / 具体网卡地址）必须有 `http_token`，
+  否则启动即 FATAL；另做 Origin 白名单（拒 DNS rebinding / CSRF）与 8MiB 负载上限。
+- **硬件断点默认禁用**：不带 `--hwbp` 时先做运行时探测，探测不过就报错。当前 KO 的 hwbp 模块
+  会崩内核（`main.c:1909` 帮助文本原话「勿开」）。
+- adb 断连：`ConnectFailed`（连接没建立、一个字节都没发出去）时关连接、重跑 `adb forward`、
+  重放一次；`SendFailed` / `ResponseTimeout` / `OutcomeUnknown` **不重放** —— 远端可能已执行，
+  重放会让 `gg_write` / `gg_set_results` / `gg_freeze` 跑两遍。
 - 架构限制：驱动协议 64 位布局，**仅支持 64 位目标进程**（32 位 attach 明确报错）。

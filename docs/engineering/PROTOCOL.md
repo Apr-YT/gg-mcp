@@ -20,103 +20,68 @@ struct gg_wire_header {           // sizeof = 20
 
 负载约定：请求 `{"p":{...}}`、响应 `{"r":{...}}`、错误 `{"e":{"code":N,"message":"..."}}`。
 
-命令全集（41，含 `GGCMD_MAX` 共 42 项枚举）：PING、SELF_TEST、LIST_PROCESSES、ATTACH、DETACH、TARGET_INFO、MODULE_LIST、
-SEARCH、SEARCH_UNKNOWN_INIT、SEARCH_REFINE、SEARCH_RANGE、RESULT_COUNT、GET_RESULTS、CLEAR_RESULTS、
-READ、READ_BYTES、HEX_DUMP、WRITE、SET_RESULTS、FREEZE、UNFREEZE、MODULE_BASE、CALC_OFFSET、
-POINTER_SCAN、PAUSE、RESUME、KERNEL_STATUS、SHELL、DEVICE_INFO、
+命令全集：`GGCMD_PING = 1` … `GGCMD_AUTH = 42`，含 `GGCMD_MAX` 共 43 项枚举；
+其中 28/29 已废弃，可用命令 40 条。PING、SELF_TEST、LIST_PROCESSES、ATTACH、DETACH、TARGET_INFO、
+MODULE_LIST、SEARCH、SEARCH_UNKNOWN_INIT、SEARCH_REFINE、SEARCH_RANGE、RESULT_COUNT、GET_RESULTS、
+CLEAR_RESULTS、READ、READ_BYTES、HEX_DUMP、WRITE、SET_RESULTS、FREEZE、UNFREEZE、MODULE_BASE、
+CALC_OFFSET、POINTER_SCAN、PAUSE、RESUME、KERNEL_STATUS、SHELL、DEVICE_INFO、
 WATCH、DISASSEMBLE、VIEW_MEMORY、RESOLVE_SYMBOL、POINTER_CHAIN、SUBSCRIBE_EVENTS、UNSUBSCRIBE_EVENTS、
-RELAY_EVENT、GHOST_TAP、GHOST_SWIPE。
+RELAY_EVENT、GHOST_TAP、GHOST_SWIPE、AUTH。
 
 > 命令码 28（`LOAD_GG`）/ 29（`CORE_VERSIONS`）已废弃但**保留占位**：
 > 删除会让后续命令码整体前移，与已部署的 agentd 错位。
 > 这两个命令的实现在 2026-10-21 随 GG 核心注入链路一并删除，调用返回 `BAD_REQUEST`。
+> 新命令一律追加在枚举末尾 —— C 枚举允许重复值且不报错，插进中间会与硬编码的 28/29 撞车
+> 而编译器不拦。
+
+### 1.1 握手鉴权（`GGCMD_AUTH = 42`）
+
+```
+请求 {"p":{"key":"<hex>"}}
+成功 {"r":{"authed":true}}
+失败 {"e":{"code":4,"message":"wire auth failed"}}
+```
+
+- 未认证连接的请求只放行 `PING` / `AUTH`，其余一律 `GGERR_PERM`。目的是堵住「设备上任意本地
+  App 连 127.0.0.1:34127 就能拿到 root 能力」这个口子。
+- 密钥在设备端 `/data/adb/GG-Ghost/wire.key`（`0600`，首启自动生成 32 字节随机 hex），
+  经 `--wire-key-file` 传给 agentd；PC 端 `configs/gg-ghost.json` 的 `wire_key` 必须一致，
+  `deploy.ps1` 部署时自动拉取回写。
+- **key 为空时 `AUTH` 无条件成功**（返回 `authed:true`）：为了不打断既有部署。等于这层防护
+  只在真正配了 key 的部署上生效；`print_usage` 给的示例本身不带 key，照抄示例等于没开。
+- 认证失败在 `dispatch` 里优先于 safe_mode / 驱动状态判定，失败响应不泄露引擎信息。
 
 错误码：OK=0, BAD_REQUEST=1, NO_DEVICE=2, NO_SESSION=3, PERM=4, VERSION_MISMATCH=5,
 DEGRADED=6, TIMEOUT=7, NOT_FOUND=8, ARCH_UNSUPPORTED=9, CAP=10, BUSY=11, INTERNAL=12,
 SAFE_MODE=13, SHELL_DISABLED=14。
 
-## 2. KO 驱动加载与通道（只加载 KO，不用 KPM）
+## 2. KO 驱动（只加载 KO，不用 KPM）
 
-### 2.1 加载流程（agentd 启动时自动执行）
+### 2.1 加载流程
 
-```
-1. 扫描 ko 目录（默认 /data/local/tmp/ggmcp/ko）下的 .ko
-2. 版本族匹配（--ko-pattern 6.12.*）:
-     ko_version_from_name("driverX_6.12.9.ko") → "6.12.9"
-     version_match_family("6.12.9", "6.12.*") → 1（同族, 补丁任意）
-     族外且 --ko-strict 1 → GGERR_VERSION_MISMATCH(5)
-3. setenforce 0（社区 KO 普遍需要 SELinux permissive）
-4. insmod <path>；/proc/modules 验证已加载
-5. dev 型: 未显式指定 /dev 路径时按 /proc/misc 找模块名 → mknod /dev/<name> c 10 <minor>
-   → open(O_RDWR)
-```
-
-### 2.2 hook 型 KO（默认，零协议）
-
-内核直接 hook `process_vm_readv/writev`（syscall 270/271）。用户态**无需任何驱动协议**：
-`process_vm_readv` 调用即由 KO 在核内接管（页表级读写）。自检状态 `ST_KO_HOOK`。
-
-### 2.3 dev 型 KO（/dev 节点 + ioctl）
+部署侧 `scripts/install_ko.sh` 加载，**agentd 不做 insmod**（`main.c:2030` 原话：模块 `hide_by_default`，
+重复 insmod 会 EEXIST），启动时只做节点发现 + 打开：
 
 ```
-通道: fd = open("/dev/xxx", O_RDWR)
-读:   ioctl(fd, 0x7e1a, &req)
-写:   ioctl(fd, 0x7e1b, &req)
+install_ko.sh（部署时执行，su -c 运行）
+1. uname -r 截出 x.y.z
+2. 只 insmod 文件名后缀版本号与之**完全相等**的那份
+   （build/ko/ 下四份并存：rwProcMem / hwBreakpointProc × 6.12.23 / 6.12.69）
+3. SELinux 仅加载期间临时 permissive，结束立即恢复 enforcing
+4. /proc/modules 里 grep 不到属正常（模块可 hide）；重复 insmod 的 EEXIST 视为已加载
 
-struct ko_ioctl_req {            // packed, 32 字节（agentd/driver.c 与 native/hook/hook.c 一致）
-  u32 pid;
-  u32 pad;
-  u64 addr;                      // 目标进程虚拟地址
-  u64 buf;                       // 本地缓冲区指针
-  u64 size;
-};
-返回值 = 实际传输字节数。
+agentd 启动
+1. open /proc/<mem_key>/<mem_key> 与 /proc/<bp_key>/<bp_key>
+   （key 为空时扫描 /proc 找「目录名 == 内文件名」的节点；节点被隐藏时扫不到，必须显式给 key）
+2. CMD_INIT_DEVICE_INFO
+3. driver_self_test 回环 → 决定 state
 ```
 
-ioctl 码可用 `--ioctl-read/--ioctl-write`（agentd）与 `GG_KO_IOCTL_READ/WRITE`（hook 库环境变量）覆盖。
+驱动改过名（`apr_dlkm` 之类）时按名字匹配必然误判，最终判据只看 agentd 的节点自检。
 
-### 2.4 QX 型（Aloha 开源 QX9-10，雪花/Paradise 家族）
+### 2.2 唯一后端：rwproc33（abcz316/rwProcMem33）
 
-用户提供 `qx-对接.h` 的协议实现（`--driver qx`）。QX 驱动以**隐藏进程**运行，
-设备节点被删除但 fd 3 仍打开：
-```
-1. 发现: /proc/<pid>/exe -> /data/<6位小写>（目标已删除 access 失败）
-2. 主次号: stat("/proc/<pid>/fd/3") → st_rdev（major/minor）
-3. 重建节点: mknod /dev/ggqx c <major> <minor>（主次号一致即可, 路径自选）
-4. open O_RDWR
-5. 认证（可选）: ioctl(fd, 0x800, char key[0x100])  ← --qx-key
-```
-
-ioctl 协议（自然对齐, 与 qx-对接.h 的 C++ 结构一致）：
-
-```
-0x800  init_key     ioctl(fd, 0x800, char key[0x100])           // 密钥认证
-0x801  读内存       ioctl(fd, 0x801, &COPY_MEMORY)              // 成功返回 0
-0x802  写内存       ioctl(fd, 0x802, &COPY_MEMORY)
-0x803  模块基址     ioctl(fd, 0x803, &MODULE_BASE) → base
-
-struct COPY_MEMORY {          // 自然对齐, sizeof 32（非 packed!）
-    pid_t     pid;            // offset 0
-    uintptr_t addr;           // offset 8（4 字节填充）
-    void     *buffer;         // offset 16
-    size_t    size;           // offset 24
-};
-struct MODULE_BASE {          // 自然对齐, sizeof 24
-    pid_t     pid;            // offset 0
-    char     *name;           // offset 8
-    uintptr_t base;           // offset 16
-};
-```
-
-注意与通用 dev 型的区别：**请求结构非 packed、成功返回值是 0（不是字节数）**。
-0x804-0x812（隐藏进程/陀螺仪/硬件断点）为驱动附加能力，本项目未接入，文档记录。
-
-agentd 自检：qx 回环读自身静态变量（0x801 成功）→ `state=kernel-driver`。
-
-### 2.5 rwproc33 型（abcz316/rwProcMem33，开源，`--driver rwproc`）
-
-两个独立 LKM（`rwProcMem_module` 内存读写 + `hwBreakpointProc_module` 硬件断点），
-各自创建 proc 节点 `/proc/<AUTH_KEY>/<AUTH_KEY>`，**用 read() 走 33 字节头协议**（非 ioctl）：
+两个独立 LKM，各自创建 `/proc/<AUTH_KEY>/<AUTH_KEY>` 节点，**用 read() 走 33 字节头协议**（非 ioctl）：
 
 ```
 struct rwproc_request {          // packed, sizeof 33
@@ -127,48 +92,84 @@ read(fd, buf, 33 + data_size)   // 头在 buf[0..32], 数据区在 buf[33..]
                                 // read() 返回值 = 结果长度；结果/句柄写回 buf+33
 ```
 
-内存读写命令（CMD_READ/WRITE_PROCESS_MEMORY=3/4）：param1=进程句柄（CMD_OPEN_PROCESS=2
-返回）、param2=地址、param3=is_force（1=临时改 PTE 强制读写）、buf_size=长度。
-页表遍历 + 物理内存直读，不经过 process_vm_readv、不附加目标。
+**`read()` 的 count 必须 ≥ `33 + 期望回写量`**，请求负载长度与回写长度并不总是相等 ——
+`OPEN_PROCESS` 发 0 字节负载却要收回 8 字节句柄。`driver.c` 用
+`rwproc_call_ex(..., resp_cap)` 把两个长度分开。
 
-硬件断点（CMD_INST_PROCESS_HWBP=5）：param1=句柄、param2=地址、param3=`len | (type<<8)`；
-返回 perf_event 指针作断点 ID。命中经 perf_event 回调收集，**完整寄存器
-x0-x30/sp/pc/pstate**（比 QX 的 r0-r4 丰富）。命中列表累计不清零（上限 1024），
-agentd 侧按已消费数去重。默认 AUTH_KEY 见两模块 `ver_control.h`
-（`e84523d7...` / `dce37716...`，建议编译时改掉），适配实现见
-`docs/engineering/RWPROC33_ADAPTER.md`。
+`rwProcMem_module` 命令码（`agentd/driver.h`）：
 
-### 2.6 自检标准（gg_kernel_status）
+| 码 | 命令 | 说明 |
+|---:|---|---|
+| 1 | INIT_DEVICE_INFO | 必须首个执行；回写 1053 字节设备信息 |
+| 2 | OPEN_PROCESS | → 进程句柄（后续命令的 param1） |
+| 3 / 4 | READ / WRITE_PROCESS_MEMORY | param1=句柄, param2=地址, param3=is_force, buf_size=长度 |
+| 5 | CLOSE_PROCESS | |
+| 6 / 7 | GET_PROCESS_MAPS_COUNT / LIST | 本项目未接入（maps 走 `/proc/<pid>/maps` 自行解析） |
+| 8 | CHECK_PROCESS_ADDR_PHY | 未接入 |
+| 9–12 | GET_PID_LIST / SET_PROCESS_ROOT / GET_PROCESS_RSS / GET_PROCESS_CMDLINE_ADDR | 未接入 |
+| 13 | HIDE_KERNEL_MODULE | |
+| 15 / 16 | GGTOUCH_TAP / GGTOUCH_SWIPE | display 坐标，驱动内换算 raw 后注入 input；结构 12 / 20 字节 |
 
-| 场景 | 期望 state |
-|---|---|
-| hook 型 KO 生效 | `ko-hook` |
-| dev 型 / qx 型 KO 生效 | `kernel-driver` |
-| KO 未加载/失效, 走 process_vm_readv | `process_vm_readv (degraded)` |
-| 仅 /proc/pid/mem 可用 | `/proc/pid/mem (degraded)` |
-| 全不可用 | `unavailable` |
+`hwBreakpointProc_module` 命令码 1–13：`OPEN/CLOSE_PROCESS`、`GET_NUM_BRPS(3)`、
+`GET_NUM_WRPS(4)`、`INST_PROCESS_HWBP(5)`、`UNINST(6)`、`SUSPEND(7)`、`RESUME(8)`、
+`GET_HWBP_HIT_COUNT(9)`、`GET_HWBP_HIT_DETAIL(10)`、`SET_HOOK_PC(11)`、
+`HIDE_KERNEL_MODULE(12)`、`INST_PROCESS_HWBP_ALL(13)`。
 
-自检方法：读/写自身进程内静态变量地址回环校验；dev 型先试 ioctl 回环，失败落降级链。
+- 断点参数 `param3 = len | (type << 8)`，type：R=1 / W=2 / RW=3 / X=4。
+- 命中条目 `sizeof == 312`：`task_id` / `hit_addr`（模块实现里是命中指令 pc）/ `hit_time` +
+  288 字节寄存器块（`regs[31]` + sp + pc + pstate + orig_x0 + syscallno）。
+- 命中列表在断点生命周期内**累计不清零**（上限 1024，模块无清除命令），agentd 侧按已消费数去重。
+- `INST_PROCESS_HWBP_ALL` 在 agentd 侧是**死常量**：只定义、无调用。当前默认关闭硬件断点
+  （探测不过就报错），见 `ARCHITECTURE.md` §6。
+- 断点模块**没有密钥门控**，与内存模块的 AUTH_KEY 不同。
+- `rwproc_buf` 是进程级共享缓冲（搜索线程池 + 冻结线程都用），请求/结果拷贝必须整段在
+  `rwproc_mtx` 内，`check_rwproc_locking.py` 守这条。
+- `is_force=1` 已由 agentd 硬拒（2026-10-22 实测改 PTE 触发内核崩溃→设备重启），
+  不要绕过。适配细节与结构契约见 `RWPROC33_ADAPTER.md`。
 
-## 3. GG 核心对接协议（hook syscall 270）
+### 2.3 已删除的三型后端（hook / dev / qx）
 
-GG 的 lib5.so 用 `process_vm_readv`（syscall 270）读目标进程内存。hook 库经 LD_PRELOAD 抢先加载：
+2026-10-21 整条删除，只剩 rwproc33。原因见 `DRIVER_MATRIX.md` §6，摘要：
 
-```
-long syscall(long n, ...)          // 覆盖 libc
-  n == 270/271 (process_vm_readv/writev):
-     解析 iovec 对（local/remote, 计数取小）
-     逐 iovec:
-       GG_KO_DEV 已设置（dev 型 KO）→ ioctl(/dev, 0x7e1a/0x7e1b, {pid,0,remote_base,local_base,len})
-       未设置（hook 型 KO）        → svc 直通真实 syscall（内核已接管）
-  其他 n: svc 内联汇编直通（aarch64），避免递归
-```
+- 三型都**没有对应可用的 KO**，代码从未在真机执行过。
+- hook 型的自检用 `process_vm_readv` 读自己，必然成功 → `state=ko-hook` 是假阳性，
+  看起来「驱动就绪」实际什么都没接管。
+- 维护成本：四套通道语义（ioctl / 设备节点重建 / fd 3 复用）各写一遍，实际只有一套在跑。
 
-环境变量：`GG_KO_DEV`（dev 节点路径）、`GG_KO_IOCTL_READ` / `GG_KO_IOCTL_WRITE`（十六进制 ioctl 码）。
+协议细节（dev 型 `0x7e1a/0x7e1b` ioctl、qx 型 `0x800–0x803` 与 `COPY_MEMORY`/`MODULE_BASE`
+自然对齐布局）只在 git 历史与 `DRIVER_MATRIX.md` 里可查，现行代码不再支持。
+`agentd/driver.c` 里还留着 `ko_ioctl_req_t` / `qx_copy_memory_t` / `qx_module_base_t` 三个
+结构体定义，无任何调用 —— 属待清死代码。
+
+### 2.4 自检标准（gg_kernel_status）
+
+| 场景 | state | 值 |
+|---|---|---|
+| 节点可打开 + 回环读通过 | `kernel-driver (rwproc33)` | 1 |
+| 其它一切（未 root / 模块未加载 / 节点名不对 / 读写失败） | `unavailable` | 4 |
+
+自检方法：`OPEN_PROCESS(getpid())` + 读自身静态变量 `0x12345678` 回环校验。
+`2 / 3 / 5`（`ST_PROC_VM` / `ST_PROC_MEM` / `ST_KO_HOOK`）是已删除的降级态，
+枚举里保留数字但不产生。
+
+## 3. GG 核心对接协议（已删除）
+
+`lib5_stub` ELF 桩 + `libKernelGg.so` LD_PRELOAD 拦截 syscall 270/271 这条链路已于 2026-10-21
+整条删除：
+
+- **实测从未成功** —— GG 守护链自检报 `android-daemon err`（见 `ACCEPTANCE.md`）。
+- **它是全仓唯一会改写用户文件的动作** —— 备份并覆盖 GG 的 `lib5.so`，中途失败可能无法还原。
+- **主链路不需要它** —— agentd 自带搜索/冻结引擎，直接经 rwproc33 读写目标进程内存。
+
+对应 MCP 工具 `gg_kernel_load_gg` / `gg_core_versions` 一并删除（对外工具 45 → 43），
+wire 命令码 28/29 保留占位。历史实现（`syscall()` 覆盖、iovec 解析、`GG_KO_DEV` /
+`GG_KO_IOCTL_*` 环境变量）见 `b4cf7ae` 之前的提交。
 
 ## 4. 兼容性注意
 
 - 仅 arm64（`__aarch64__`）；32 位设备/进程不支持（驱动结构 64 位布局）。
-- KO 必须与设备内核版本匹配（社区驱动按内核编译）；insmod 失败时 `ko_load` 返回 GGERR_PERM 并提示。
-- 降级链保证无 KO 时（如内核升级后驱动失效）搜索仍可用（process_vm_readv / /proc/pid/mem）。
+- KO 必须与设备内核**完全同版本**（`install_ko.sh` 按 `uname -r` 的 x.y.z 精确匹配）。
+  库内没有版本族豁免 —— agentd 早先的 `--ko-pattern` / `--ko-strict` 路径已随三型后端一起删除。
+- **无降级**：驱动不可用（内核升级、模块没加载、AUTH_KEY 不对）时读写直接报错，
+  不会回落到 `process_vm_readv` / `/proc/pid/mem`。内核一升级就得重编 KO。
 - 模糊搜索快照内存上限 256MB（`GG_FUZZY_MAX_BYTES`），超出部分不纳入扫描。
