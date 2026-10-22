@@ -44,28 +44,35 @@ MCP client ──JSON-RPC──▶ gg-ghost-mcp ──20B 帧头 + JSON 负载�
 
 | 文件 | 行数 | 职责 |
 |---|---:|---|
-| `session.cpp` | 670 | 45 个工具的 handler + 参数规范化 + save_to 落盘 |
-| `device/wire.cpp` | 474 | 帧收发、失败语义、整体截止时间、adb forward 管理 |
-| `mcp/schema.cpp` | 348 | 工具 schema（与 handler 的单一对齐点，护栏会校验） |
-| `main.cpp` | 219 | 入口、配置加载与校验、stdio/HTTP 两种传输 |
-| `annotations.cpp` | 142 | 标注库（纯本地，不经设备） |
-| `mcp/protocol.cpp` | 122 | JSON-RPC 分层与错误码 |
+| `session.cpp` | 823 | 43 个工具的 handler + 参数规范化 + save_to 落盘 |
+| `device/wire.cpp` | 574 | 帧收发、失败语义、整体截止时间、adb forward 管理 |
+| `mcp/schema.cpp` | 344 | 工具 schema（与 handler 的单一对齐点，护栏会校验） |
+| `main.cpp` | 232 | 入口、配置加载与校验、stdio/HTTP 两种传输 |
+| `net_guard.h` | 60 | HTTP 暴露面判定（监听地址是否回环、浏览器 Origin），纯 inline、可单测 |
+| `annotations.cpp` | 182 | 标注库（纯本地，不经设备） |
+| `mcp/protocol.cpp` | 149 | JSON-RPC 分层、错误码、批量请求 |
 | `proxy-server.cpp` | 60 | 独立代理进程（与主链路无关） |
 
 ### 设备侧 `agentd/`
 
 | 文件 | 行数 | 职责 |
 |---|---:|---|
-| `main.c` | 1846 | 命令分发（34 个 handler）+ 事件广播 + 会话状态 |
-| `driver.c` | 1109 | 四型驱动通道统一抽象（hook / dev / qx / rwproc）+ 降级 |
-| `search.c` | 809 | 精确/区间/模糊搜索，位图 + 快照 |
-| `watch.c` | 467 | 硬件断点监视（CE 式"谁访问了这个地址"） |
-| `process.c` | 364 | 进程枚举与 maps 解析 |
-| `cmd_view.c` | 312 | 结构化内存查看 / 符号解析 / 指针链 |
-| `elfsym.c` | 222 | ELF `.dynsym` 解析 |
-| `freeze.c` / `disasm.c` / `cmd_shell.c` / `version.c` | 431 | 冻结线程、Capstone 反汇编、shell 白名单、版本匹配 |
+| `main.c` | 2097 | 命令分发 + 参数闸门（地址 / safe_mode / 握手）+ 事件广播 + 会话状态 |
+| `driver.c` | 623 | 四型驱动通道统一抽象（hook / dev / qx / rwproc）+ 降级 |
+| `search.c` | 824 | 精确/区间/模糊搜索，位图 + 快照 |
+| `watch.c` | 414 | 硬件断点监视（CE 式"谁访问了这个地址"） |
+| `process.c` | 367 | 进程枚举与 maps 解析 |
+| `cmd_view.c` | 313 | 结构化内存查看 / 符号解析 / 指针链 |
+| `elfsym.c` | 249 | ELF `.dynsym` 解析（符号名有界读取 + 字符串表上限） |
+| `freeze.c` / `disasm.c` / `cmd_shell.c` / `version.c` | 453 | 冻结线程、Capstone 反汇编、shell 白名单、版本匹配 |
 
-## 5. 工具面（45 个）
+> 行数为 2026-10-22 `wc -l` 实测。此前版本的表已整体过时（`driver.c` 记的 1109 与实测差近一倍），
+> 改代码后请顺手重测，别让它继续漂。
+
+## 5. 工具面（43 个）
+
+（分组清单见下表，各处数字以 `tests/unit/check_dispatch_consistency.py` 的输出为准 —— 它比对
+`schema.cpp` 与 `session.cpp` 两份清单，任一新增/改名只改一边就会失败。）
 
 | 分组 | 数量 | 工具 |
 |---|---:|---|
@@ -82,7 +89,8 @@ MCP client ──JSON-RPC──▶ gg-ghost-mcp ──20B 帧头 + JSON 负载�
 | 标注（PC 本地） | 5 | annotate_add, list, get, remove, context |
 | 虚拟触摸 | 2 | ghost_tap, ghost_swipe |
 
-45 个工具对应 agentd 侧 34 个 handler：差额来自纯 PC 本地实现（标注库 5 个、status 1 个）与多工具共用同一命令（`read_bytes`/`hex_dump` 共用 `GGCMD_READ_BYTES`）。
+43 个工具中，6 个是纯 PC 本地实现（标注库 5 个 + `status`），其余下发到 agentd；差额还来自
+多工具共用同一命令（`read_bytes` / `hex_dump` 共用 `GGCMD_READ_BYTES`，`watch_*` 共用 `GGCMD_WATCH`）。
 
 ## 6. 构建与验证能力（本机实测）
 

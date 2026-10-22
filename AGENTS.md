@@ -63,13 +63,13 @@ python tests\unit\check_kernel_only.py
 adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；当前无设备连接）。
 服务/窗口排查：`dumpsys window windows | grep ggmcp`；崩溃：`logcat -s AndroidRuntime:E`。
 
-## 已知债（2026-10-15 复核，2026-10-21 校准）
+## 已知债（2026-10-15 复核，2026-10-21 校准，2026-10-22 增补）
 
 1. **main.c 巨型文件**：已拆 shell 域（`cmd_shell.c`）、view/符号/指针链域（`cmd_view.c`），
-   现 1846 行（2026-10-21 `wc -l` 实测）；待拆 `cmd_search` / `cmd_mem` / `cmd_proc` / dispatch。拆前后必跑 `check_dispatch_consistency.py`，
+   现 2097 行（2026-10-22 `wc -l` 实测，因地址参数加固增加约 250 行）；待拆 `cmd_search` / `cmd_mem` / `cmd_proc` / dispatch。拆前后必跑 `check_dispatch_consistency.py`，
    并跑 `scripts\build_ndk.bat` 确认可编译（NDK+capstone 已就位，不再是盲改）。
 2. wire 协议：1MiB 上限无分片（`GGWM_MAX_PAYLOAD`）；XOR seed 固定 `0xA5`（`shared/wire_protocol.h`）；serial 硬编码在 config。
-   - 实测余量：`gg_get_results` 上限 10000 条（`agentd/main.c:968` 硬钳），每条 `addr`/`value`/`value_hex` 三个字符串，
+   - 实测余量：`gg_get_results` 上限 10000 条（`agentd/main.c:1166` 硬钳），每条 `addr`/`value`/`value_hex` 三个字符串，
      单条序列化 61–74B → 整帧 JSON 约 **610–740KB**，距 1MiB 剩约 29%–42%（2026-10-21 按序列化格式实测）。
      → **补分片之前不要上调 limit**，否则单帧会被 `read_frame`（`server/device/wire.cpp:286`）直接判非法。
 3. ~~`docs/` 工程文档与逆向研究笔记混放，待分目录~~ —— 2026-10-21 已分为 `docs/engineering/` / `docs/research/`，
@@ -81,6 +81,17 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验；�
    当时不存在，`scripts/build_ndk.bat` 直接 `exit /b 1`）。**该阻塞项已解除。**
 6. **无真机连接时 `tests/integration/run_itest.ps1` 无法执行** → 设备端改动等于没有闭环，只能等设备接上后补验，
    期间不得把设备端改动当作「已验证」上报（2026-10-21）。
+7. **rwproc33 全量搜索崩内核已定位**（2026-10-22）：根因在驱动侧，不在 agentd。
+   ① `phy_mem_auto_offset.h:45` 用 `__pa(si.totalram)` 算物理地址上限（字节数当内核 VA）→ 范围检查失效；
+   ② `get_proc_phy_addr` 不判 pmd 大页，THP 的 pmd 被 `pte_offset_kernel` 当页表指针；
+   ③ 本地打开 `CONFIG_ENABLE_FAST_PHYMEM` 的 `__va()` 后无 `virt_addr_valid` 兜底；
+   ④ 页表遍历在 `mmap_lock` 外。四处在 `build/rwProcMem33` 已改，**未编译、未上机**，
+   证据与验证步骤见 `docs/audit/RWPROC33_2026-10-22.md`。在 VM 重编 + 真机二分通过前，不要用 rwproc 对游戏做全量搜索。
+8. **本轮（2026-10-22）已修但设备端未验**：地址参数两端类型约定不一致（数字地址让 `gg_watch_inject`
+   `strtoull(NULL)` 段错误、`gg_write {value:100}` 误报缺参）、`parse_value_str` 缺 endptr、HEX_DUMP 响应 cmd 错位、
+   safe_mode 漏 `ghost_tap/swipe`、elfsym 字符串表越界；server 端 Windows connect 缺 `SO_ERROR`（把「设备没连上」报成
+   「令牌鉴权失败」）、HTTP 暴露面判定、JSON-RPC batch。测试程序 13 → 15 个（新增 `test_protocol` / `test_net_guard`）。
+   `run_tests.bat` 全绿只代表 PC 侧逻辑正确，设备端行为仍需接真机。
 
 ### 已清（2026-10-15，本机实测）
 

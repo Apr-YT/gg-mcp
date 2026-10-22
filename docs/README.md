@@ -8,7 +8,7 @@
 
 | 文件 | 用途 |
 |---|---|
-| [PROJECT_MAP.md](engineering/PROJECT_MAP.md) | **项目总览**：进程边界、通信链路、各模块行数、45 个工具面、构建/测试能力与债务清单。查现状先看这份。 |
+| [PROJECT_MAP.md](engineering/PROJECT_MAP.md) | **项目总览**：进程边界、通信链路、各模块行数、43 个工具面、构建/测试能力与债务清单。查现状先看这份。 |
 | [ACCEPTANCE.md](engineering/ACCEPTANCE.md) | KO 驱动方案验收清单，区分「本机可验证」与「需真机」两类项。 |
 | [ARCHITECTURE.md](engineering/ARCHITECTURE.md) | 组件划分、数据流与驱动通道的架构说明。 |
 | [PROTOCOL.md](engineering/PROTOCOL.md) | PC ↔ gg-agentd 的 wire 协议（20B 头 + JSON）与 KO 驱动 ioctl 协议笔记。 |
@@ -27,6 +27,19 @@
 | [AGENTD_HISTORY.md](engineering/AGENTD_HISTORY.md) | apk/ggtool 时代的旧版工作区指令归档，仅供追溯。 |
 | [MEMORY.md](engineering/MEMORY.md) | AI 会话持久记忆：环境事实、命令、踩坑结论的自动维护清单。 |
 | [README.md](engineering/README.md) | 2026-09 前的旧版文档索引，已被本文件取代，仅作历史留档。 |
+
+## 审计记录（`audit/`）
+
+按时间倒序。每条结论都带「代码可证 / 推断 / 未验证」的标注，引用前先看该条的状态。
+
+| 文件 | 用途 |
+|---|---|
+| [UNIFIED_2026-10-22.md](audit/UNIFIED_2026-10-22.md) | 2026-10-22 gg-mcp 与 Ai-root 联合审计：20 项修复（地址参数类型、Windows `SO_ERROR`、HTTP 暴露面、确认哈希单射、管道 ACL 等）、未修高危清单与验证状态。**注意：Ai-root 不是本项目的第二个组件**，结论只对 Ai-root 自身成立。 |
+| [RWPROC33_2026-10-22.md](audit/RWPROC33_2026-10-22.md) | 2026-10-22 rwproc33 驱动全量搜索崩内核的根因定位（四条，含代码证据）、已改的 4 个文件、两版源码的功能互补关系、两端接口契约核对。 |
+| [FINAL_REPORT.md](audit/FINAL_REPORT.md) | 2026-10-21 全量审查总结。 |
+| [FINDINGS.md](audit/FINDINGS.md) | 2026-10-21 缺陷清单（逐条编号）。 |
+| [BASELINE.md](audit/BASELINE.md) | 2026-10-21 审查基线（环境、命令、初始状态）。 |
+| [EXTERNAL_AUDIT_TRIAGE.md](audit/EXTERNAL_AUDIT_TRIAGE.md) | 外部审查报告的逐条处置记录。 |
 
 ## 逆向研究笔记（`research/`）
 

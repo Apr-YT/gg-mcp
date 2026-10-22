@@ -707,6 +707,11 @@ python scripts/patch_ko_versions.py build/devmod/all build/ko/apr_dlkm.ko
 
 ## 十二、⚠️ 已知故障：rwproc 全量搜索会导致内核崩溃（2026-10-21 实测）
 
+> **2026-10-22 更新：根因已定位，本节末尾的「下一步排查」不必再做。**
+> 四条原因（物理地址上限用 `__pa(字节数)` 算错、不判 pmd 大页、fast 路径缺 `virt_addr_valid`、
+> 页表遍历在 `mmap_lock` 外）与修复见 `docs/audit/RWPROC33_2026-10-22.md`。
+> 修复尚未编译、未上机，在验证前本节的风险结论仍然有效。
+
 **现象**：rwproc 通道下对某些目标进程执行 `gg_search`（`region=anonymous` 全扫），
 **设备直接重启**（不是 agentd 崩溃）。agentd 日志停在收到 `cmd=27` 那一刻，
 无 tombstone、无 logcat、`pstore` 为空（该机未配置 ramoops，拿不到 panic 栈）。

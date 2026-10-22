@@ -29,6 +29,30 @@ g++ -std=c++17 -O2 -Wall -I"%ROOT%" -I"%ROOT%\third_party" -I"%ROOT%\shared" ^
   "%ROOT%\server\device\wire.cpp" -lws2_32
 if errorlevel 1 ( echo [FAIL] test_session build & exit /b 1 )
 
+rem HTTP exposure surface: host_is_loopback / origin_allowed. A string compare against
+rem "0.0.0.0" missed :: / [::] / LAN addresses (silent unauthenticated exposure), and a
+rem bare prefix check let http://127.0.0.1.evil.com through.
+g++ -std=c++17 -O2 -Wall -I"%ROOT%" -I"%ROOT%\shared" ^
+  -o "%ROOT%\build\pc\test_net_guard.exe" "%ROOT%\tests\unit\test_net_guard.cpp" -lws2_32
+if errorlevel 1 ( echo [FAIL] test_net_guard build & exit /b 1 )
+echo === test_net_guard ===
+"%ROOT%\build\pc\test_net_guard.exe"
+if errorlevel 1 ( echo [FAIL] test_net_guard & exit /b 1 )
+
+rem MCP/JSON-RPC layer: single message, batch (JSON-RPC 2.0 array), batch with
+rem notifications, empty batch, junk element inside a batch. A batch used to be
+rem rejected wholesale with id:null, which broke clients that merge concurrent
+rem tools/call into one frame.
+g++ -std=c++17 -O2 -Wall -I"%ROOT%" -I"%ROOT%\third_party" -I"%ROOT%\shared" ^
+  -o "%ROOT%\build\pc\test_protocol.exe" "%ROOT%\tests\unit\test_protocol.cpp" ^
+  "%ROOT%\server\mcp\protocol.cpp" "%ROOT%\server\mcp\schema.cpp" ^
+  "%ROOT%\server\session.cpp" "%ROOT%\server\annotations.cpp" ^
+  "%ROOT%\server\device\wire.cpp" -lws2_32
+if errorlevel 1 ( echo [FAIL] test_protocol build & exit /b 1 )
+echo === test_protocol ===
+"%ROOT%\build\pc\test_protocol.exe"
+if errorlevel 1 ( echo [FAIL] test_protocol & exit /b 1 )
+
 rem results_get_page paging guard: the bulk segment reader must respect the
 rem caller's limit. Search hits are mostly contiguous addresses, so without
 rem that bound a single small-page read overruns out_addrs/out_values.
