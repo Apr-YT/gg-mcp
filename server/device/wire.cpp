@@ -168,8 +168,14 @@ int AgentClient::auth_locked(Clock::time_point deadline) {
     }
     try {
         json r = json::parse(resp);
-        if (r.contains("r") && r["r"].value("auth_disabled", false))
+        /* agentd 关闭鉴权时会回 auth_disabled（旧版本行为，新版本不再出现）。
+         * 注意别写成 r.contains("r")：agentd 的响应是裸对象，没有外层 "r"，
+         * 之前那个写法让这条警告从未触发过。 */
+        if (r.value("auth_disabled", false))
             GG_LOG(1, "[wire] WARNING: agentd runs with wire auth DISABLED\n");
+        else if (r.value("key_ephemeral", false))
+            GG_LOG(1, "[wire] note: agentd is using a temporary wire key "
+                      "(no --wire-key configured on device)\n");
     } catch (...) {
         // 响应体形状不符不影响后续请求，agentd 已明确接受
     }

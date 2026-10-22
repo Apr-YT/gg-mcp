@@ -683,6 +683,86 @@ static const char *j_scalar_str(cJSON *node, char *buf, size_t bufsz) {
     return NULL;
 }
 
+/* ---------------- wire 鉴权密钥 ----------------
+ *
+ * 没有密钥时**不能放行**：agentd 监听 127.0.0.1:34127，本机任意 App 都能连，
+ * 等于把 root 级命令（shell / write / 加载 KO）交给任何拿到回环端口的进程。
+ * 原实现"未配置即无条件成功"，只在启动日志里打一行 WARN —— 从客户端看
+ * 握手是成功的，没人会去翻日志。
+ *
+ * 现在：未指定 --wire-key / --wire-key-file 时，生成一个随机临时密钥。
+ * 拒绝启动也是一种做法，但会让手工调试（不写部署脚本）直接起不来；
+ * 生成临时密钥既保留可用性，又不再有"谁都能连"的窗口。
+ *
+ * 临时密钥落盘到 GG_EPHEMERAL_KEY_PATH（0600，与正式 key 分开），
+ * 下次启动优先复用它 —— 否则每次重启 key 都变，客户端得跟着改。 */
+
+#define GG_EPHEMERAL_KEY_PATH "/data/adb/GG-Ghost/wire.key.ephemeral"
+#define GG_WIRE_KEY_BYTES     16   /* 128 位，hex 后 32 字符 */
+
+static int g_wire_key_ephemeral = 0;   /* 1 = 本次用的是自动生成的临时 key */
+
+/* 读 nbytes 字节 /dev/urandom 并写成 hex。成功返回 0。
+ * 用 O_RDONLY 直接 read 而不是 fopen：这条路径不该因为 stdio 缓冲引入额外状态。 */
+static int gen_random_hex(char *out, size_t outsz, size_t nbytes) {
+    if (outsz < nbytes * 2 + 1) return -1;
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) return -1;
+    unsigned char rnd[GG_WIRE_KEY_BYTES];
+    size_t need = nbytes, got = 0;
+    if (need > sizeof(rnd)) { close(fd); return -1; }
+    while (got < need) {
+        ssize_t n = read(fd, rnd + got, need - got);
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
+            close(fd);
+            return -1;
+        }
+        got += (size_t)n;
+    }
+    close(fd);
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < nbytes; i++) {
+        out[i * 2]     = hex[rnd[i] >> 4];
+        out[i * 2 + 1] = hex[rnd[i] & 0x0f];
+    }
+    out[nbytes * 2] = 0;
+    return 0;
+}
+
+/* 读一个 key 文件的第一行（去掉换行）。成功返回 1，失败/空返回 0。 */
+static int read_key_file(const char *path, char *out, size_t outsz) {
+    FILE *f = fopen(path, "re");
+    if (!f) return 0;
+    char line[128] = {0};
+    int ok = fgets(line, sizeof(line), f) != NULL;
+    fclose(f);
+    if (!ok) return 0;
+    size_t n = strlen(line);
+    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+    if (n == 0 || n >= outsz) return 0;
+    memcpy(out, line, n + 1);
+    return 1;
+}
+
+/* 取临时密钥：优先复用落盘的那份，没有就生成并写盘（0600）。
+ * 返回 0 成功；-1 表示连 /dev/urandom 都读不到（此时调用方必须拒绝启动）。 */
+static int load_or_create_ephemeral_key(char *out, size_t outsz) {
+    if (read_key_file(GG_EPHEMERAL_KEY_PATH, out, outsz)) return 0;
+    if (gen_random_hex(out, outsz, GG_WIRE_KEY_BYTES) != 0) return -1;
+
+    int fd = open(GG_EPHEMERAL_KEY_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        size_t n = strlen(out);
+        ssize_t w = write(fd, out, n);
+        if (w == (ssize_t)n) { (void)write(fd, "\n", 1); }
+        close(fd);
+        (void)chmod(GG_EPHEMERAL_KEY_PATH, 0600);
+    }
+    /* 写盘失败不影响本次可用性：调用方会把 key 打到 stderr，操作者可手工取用 */
+    return 0;
+}
+
 /* 从 cJSON 节点取地址，接受 "0x..." 字符串与 JSON 数字两种形态。
  * 嵌套在数组里的地址（set_results 的 values[].addr）走不到 dispatch 的
  * 顶层地址闸门，必须在这里单独兜住，否则同样是 strtoull(NULL)。 */
@@ -701,16 +781,15 @@ static int j_addr_u64(cJSON *node, uint64_t *out) {
 /* ---------------- 各命令处理 ---------------- */
 
 /* GGCMD_AUTH：握手。成功后本连接才放行其余命令（见 dispatch 的握手门）。
- * 未配置密钥时走「显式无鉴权」模式并回成功，让客户端握手流程保持统一；
- * 启动日志已打印警告，不在这里二次报错刷屏。 */
+ *
+ * 正常情况下 g_wire_key 一定有值：启动时载入 --wire-key / --wire-key-file，
+ * 都没有就生成临时 key（见 load_or_create_ephemeral_key），生成失败则直接
+ * 拒绝启动。所以下面这个空 key 分支只作为 fail-closed 兜底存在 —— 万一
+ * 日后有人改坏启动顺序，也不能退回"无条件放行"。 */
 static void h_auth(int fd, uint32_t seq, cJSON *p, int *authed) {
     if (g_wire_key[0] == '\0') {
-        *authed = 1;
-        cJSON *r = cJSON_CreateObject();
-        cJSON_AddBoolToObject(r, "authed", 1);
-        cJSON_AddBoolToObject(r, "auth_disabled", 1);   /* 客户端可据此提示风险 */
-        send_ok(fd, GGCMD_AUTH, seq, r);
-        cJSON_Delete(r);
+        log_msg("auth: rejected (server has no wire key configured)");
+        send_err(fd, GGCMD_AUTH, seq, GGERR_PERM, "wire auth not configured");
         return;
     }
     cJSON *kj = cJSON_GetObjectItem(p, "key");
@@ -725,6 +804,7 @@ static void h_auth(int fd, uint32_t seq, cJSON *p, int *authed) {
     log_msg("auth: accepted");
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "authed", 1);
+    if (g_wire_key_ephemeral) cJSON_AddBoolToObject(r, "key_ephemeral", 1);
     send_ok(fd, GGCMD_AUTH, seq, r);
     cJSON_Delete(r);
 }
@@ -2120,31 +2200,33 @@ int main(int argc, char **argv) {
     if (wire_key_buf[0]) {
         snprintf(g_wire_key, sizeof(g_wire_key), "%s", wire_key_buf);
     } else if (wire_key_file_buf[0]) {
-        FILE *kf = fopen(wire_key_file_buf, "re");
-        if (!kf) {
-            fprintf(stderr, "[FATAL] --wire-key-file 无法打开: %s\n", wire_key_file_buf);
+        if (!read_key_file(wire_key_file_buf, g_wire_key, sizeof(g_wire_key))) {
+            /* 明确指定了文件却读不出内容，属配置错误：直接失败，不要悄悄
+             * 退化成"临时 key"（那样客户端用的是另一份 key，报的是鉴权失败，
+             * 真正的原因在启动参数里）。 */
+            fprintf(stderr, "[FATAL] --wire-key-file 无法读取或内容为空: %s\n",
+                    wire_key_file_buf);
             return 1;
         }
-        char kline[128] = {0};
-        if (!fgets(kline, sizeof(kline), kf)) kline[0] = 0;
-        fclose(kf);
-        size_t kn = strlen(kline);
-        while (kn && (kline[kn - 1] == '\n' || kline[kn - 1] == '\r')) kline[--kn] = 0;
-        if (kn == 0) {
-            fprintf(stderr, "[FATAL] --wire-key-file 内容为空: %s\n", wire_key_file_buf);
-            return 1;
-        }
-        snprintf(g_wire_key, sizeof(g_wire_key), "%s", kline);
-    }
-    if (g_wire_key[0]) {
-        fprintf(stderr, "[gg-agentd] wire auth: ENABLED (key %zu chars)\n", strlen(g_wire_key));
     } else {
-        /* 不直接退出，保留旧部署的可用性；但必须让操作者看见风险 */
+        /* 没指定密钥：生成/复用临时 key，而不是放行所有本地连接。 */
+        if (load_or_create_ephemeral_key(g_wire_key, sizeof(g_wire_key)) != 0) {
+            fprintf(stderr,
+                    "[FATAL] 未指定 --wire-key/--wire-key-file，且无法生成临时密钥"
+                    "（/dev/urandom 不可读），拒绝启动。\n");
+            return 1;
+        }
+        g_wire_key_ephemeral = 1;
         fprintf(stderr,
-                "[gg-agentd][WARN] wire auth DISABLED — 本地任意进程均可连 127.0.0.1:%d "
-                "调用 root 级命令 (shell/write/load_gg)。正式部署请用 "
-                "--wire-key 或 --wire-key-file。\n", port);
+                "[gg-agentd][WARN] 未指定 --wire-key/--wire-key-file，"
+                "已使用临时密钥（非本次新生成的会复用 %s）：\n"
+                "    %s\n"
+                "  客户端 AUTH 需携带该值。正式部署请显式配置（deploy.ps1 会自动生成）。\n",
+                GG_EPHEMERAL_KEY_PATH, g_wire_key);
+        log_msg("wire auth: EPHEMERAL key in use (no --wire-key given)");
     }
+    fprintf(stderr, "[gg-agentd] wire auth: ENABLED (key %zu chars%s)\n",
+            strlen(g_wire_key), g_wire_key_ephemeral ? ", ephemeral" : "");
 
     hide_process(argc, argv);   /* 清 cmdline 参数与环境（防 ACE 扫 /proc/PID/cmdline） */
 
