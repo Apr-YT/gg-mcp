@@ -433,6 +433,37 @@ static void do_freeze_all() {
     logf("[批量冻结] %d/%d 成功（值=%s）", okn, n, g_app.write_input);
 }
 
+// 导出结果：搜到地址之后通常要拿去别处用（脚本、CE、自己的分析工具）。
+// 两种格式：
+//   csv —— 地址,值,hex（带表头，Excel 直接开）
+//   纯地址 —— 每行一个 0x...（喂给批量读/批量写脚本最方便）
+static void do_export(bool csv) {
+    if (g_app.hits.empty()) { logf("[导出] 没有结果"); return; }
+    const char* path = csv ? "gg-results.csv" : "gg-results.txt";
+    FILE* f = fopen(path, "w");
+    if (!f) { logf("[导出] 打不开 %s", path); return; }
+    if (csv) fprintf(f, "addr,value,value_hex\n");
+    for (const auto& h : g_app.hits)
+        fprintf(f, csv ? "0x%llx,%s,%s\n" : "0x%llx\n",
+                (unsigned long long)h.addr, h.value.c_str(), h.value_hex.c_str());
+    fclose(f);
+    logf("[导出] %zu 条 -> %s", g_app.hits.size(), path);
+}
+
+// 复制全部地址到剪贴板（imgui 的 backend 已接管剪贴板，跨进程可用）
+static void do_copy_addrs() {
+    if (g_app.hits.empty()) { logf("[复制] 没有结果"); return; }
+    std::string out;
+    out.reserve(g_app.hits.size() * 14);
+    char buf[32];
+    for (const auto& h : g_app.hits) {
+        snprintf(buf, sizeof(buf), "0x%llx\n", (unsigned long long)h.addr);
+        out += buf;
+    }
+    ImGui::SetClipboardText(out.c_str());
+    logf("[复制] %zu 个地址已进剪贴板", g_app.hits.size());
+}
+
 // ===========================================================================
 // 界面
 // ===========================================================================
@@ -544,8 +575,14 @@ static void draw_results() {
     ImGui::Text("结果 %lld 条", (long long)g_app.hit_total);
     ImGui::SameLine();
     ImGui::TextDisabled("（单击选中，双击=按当前类型读值）");
-    ImGui::SameLine(ImGui::GetWindowWidth() - 170);
+    ImGui::SameLine(ImGui::GetWindowWidth() - 400);
     if (ImGui::Button("重新拉取")) refresh_results(g_app.page_limit);
+    ImGui::SameLine();
+    if (ImGui::Button("复制地址")) do_copy_addrs();
+    ImGui::SameLine();
+    if (ImGui::Button("导出 CSV")) do_export(true);
+    ImGui::SameLine();
+    if (ImGui::Button("导出地址")) do_export(false);
 
     if (ImGui::BeginTable("hits", 3,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders |
