@@ -45,6 +45,7 @@ typedef struct {
     size_t pat_len;        /* aob 用 */
     uint64_t ilo, ihi;     /* range 整数边界 */
     double dlo, dhi;       /* range 浮点边界 */
+    int aligned;           /* range: 1=只扫自然对齐位置（默认），0=逐字节 */
     uint64_t *hits;
     size_t hits_n, hit_cap;
 } search_worker_t;
@@ -226,9 +227,28 @@ static void *search_worker_main(void *arg) {
                 carry = keep;
             } else if (w->mode == 1) {
                 size_t total = carry + rd;
+                /* 步进策略：
+                 *   aligned=1（默认）只扫自然对齐位置。逐字节扫会让一个 8 字节
+                 *     值在区间内被命中 8 次（i..i+7 的未对齐窗口都落在区间里），
+                 *     结果数虚高 8 倍、cap 秒满，命中的还是"未对齐窗口起点"。
+                 *     ARM64 的 int/指针/float 天然按 sz 对齐，社区实现（CE/ptrscan）
+                 *     默认也是对齐扫描。
+                 *   aligned=0 保留逐字节。packed 结构、以及跨块边界的非对齐元素
+                 *     需要它 —— 单测 9z 就是构造了一个 2 字节跨块的 dword。
+                 *
+                 * 对齐模式下起点要对齐到真实地址（addr-carry 是 chunk[0] 的真实
+                 * 地址）：块尾 carry 进来时 chunk[0] 不再是 sz 的倍数，直接 i+=sz
+                 * 会整体错位，漏掉下一个对齐元素。 */
+                size_t step = w->aligned ? (size_t)sz : 1;
+                size_t i = 0;
+                if (w->aligned) {
+                    uint64_t base = addr - carry;
+                    size_t rem = (size_t)(base & (uint64_t)(sz - 1));
+                    i = rem ? (size_t)sz - rem : 0;
+                }
                 if (w->vtype == VT_BYTE || w->vtype == VT_WORD ||
                     w->vtype == VT_DWORD || w->vtype == VT_QWORD) {
-                    for (size_t i = 0; i + (size_t)sz <= total; i++) {
+                    for (; i + (size_t)sz <= total; i += step) {
                         uint64_t v = read_bits(chunk + i, w->vtype);
                         if (v >= w->ilo && v <= w->ihi) {
                             if (w_push(w, addr - carry + i) < 0) { free(chunk); if (pmfd >= 0) close(pmfd); return NULL; }
@@ -236,7 +256,7 @@ static void *search_worker_main(void *arg) {
                         }
                     }
                 } else {
-                    for (size_t i = 0; i + (size_t)sz <= total; i++) {
+                    for (; i + (size_t)sz <= total; i += step) {
                         double v = read_as_double(chunk + i, w->vtype);
                         if (v >= w->dlo && v <= w->dhi) {
                             if (w_push(w, addr - carry + i) < 0) { free(chunk); if (pmfd >= 0) close(pmfd); return NULL; }
@@ -574,7 +594,7 @@ int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
  * 精度：整数类型（BYTE/WORD/DWORD/QWORD）走 u64 整数比较——read_as_double
  * 对 >2^53 的 u64 会丢精度（大数值区间搜索出错误结果）。float/double 走 double。 */
 int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
-                     int vtype, double vmin, double vmax, int region_type) {
+                     int vtype, double vmin, double vmax, int region_type, int aligned) {
     int sz = vt_size(vtype);
     if (sz <= 0) return -1;
 
@@ -598,6 +618,7 @@ int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
             memset(&ws[i], 0, sizeof(ws[i]));
             ws[i].d = d; ws[i].pid = pid; ws[i].regs = regs;
             ws[i].vtype = vtype; ws[i].mode = 1;
+            ws[i].aligned = aligned;
             ws[i].ilo = ilo; ws[i].ihi = ihi;
             ws[i].dlo = vmin; ws[i].dhi = vmax;
             ws[i].hit_cap = keep_cap;
@@ -1083,8 +1104,26 @@ static int cmp_u64(const void *a, const void *b) {
     return (x > y) - (x < y);
 }
 
+/* 在已排序的目标数组里找"与 v 相差不超过 lookback"的目标。
+ * 命中时返回 1 并把最接近的目标写到 *out_t（用于回报 target 字段）。
+ * 二分找第一个 >= v 的位置，只需检查它和它的前一个。 */
+static int find_near_target(const uint64_t *sorted, size_t uniq, uint64_t v,
+                            uint64_t lookback, uint64_t *out_t) {
+    size_t lo = 0, hi = uniq;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (sorted[mid] < v) lo = mid + 1; else hi = mid;
+    }
+    /* sorted[lo] >= v（若存在），差值不会下溢 */
+    if (lo < uniq && sorted[lo] - v <= lookback) { *out_t = sorted[lo]; return 1; }
+    /* sorted[lo-1] < v（若存在），差值同样不下溢 */
+    if (lo > 0 && v - sorted[lo - 1] <= lookback) { *out_t = sorted[lo - 1]; return 1; }
+    return 0;
+}
+
 size_t pointer_scan(gg_driver_t *d, pid_t pid, const uint64_t *targets, size_t ntargets,
-                    int vtype, gg_pointer_hit_t *out, size_t cap) {
+                    int vtype, uint64_t lookback, int aligned,
+                    gg_pointer_hit_t *out, size_t cap) {
     int psz = vt_size(vtype);
     if ((vtype != VT_DWORD && vtype != VT_QWORD) || psz <= 0) return 0;
     if (ntargets == 0 || cap == 0) return 0;
@@ -1130,13 +1169,25 @@ size_t pointer_scan(gg_driver_t *d, pid_t pid, const uint64_t *targets, size_t n
             fail_streak = 0;
             rd = (size_t)got;
             size_t max_i = rd >= (size_t)psz ? rd - (size_t)psz : 0;
-            for (size_t i = 0; i <= max_i; i += (size_t)psz) {   /* 对齐扫描 */
+            for (size_t i = 0; i <= max_i; i += (size_t)psz) {
+                /* 对齐过滤：ARM64 的指针/整数天然按 psz 对齐，非对齐窗口命中
+                 * 基本都是二进制数据里的巧合（真机实测过：900/39 相邻的两条
+                 * 命中里，非对齐那条周边全是资源数据）。psz 是 2 的幂，用位与。 */
+                if (aligned && ((addr + i) & (uint64_t)(psz - 1))) continue;
                 uint64_t v = 0;
                 memcpy(&v, chunk + i, (size_t)psz);
                 if (v == 0) continue;
-                if (bsearch(&v, sorted, uniq, sizeof(uint64_t), cmp_u64)) {
+                uint64_t t = 0;
+                int hit;
+                if (lookback == 0) {
+                    hit = bsearch(&v, sorted, uniq, sizeof(uint64_t), cmp_u64) != NULL;
+                    t = v;
+                } else {
+                    hit = find_near_target(sorted, uniq, v, lookback, &t);
+                }
+                if (hit) {
                     out[hits].container = addr + i;
-                    out[hits].target = v;
+                    out[hits].target = t;
                     out[hits].ptype = vtype;
                     hits++;
                     if (hits >= cap) break;

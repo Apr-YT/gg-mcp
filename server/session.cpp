@@ -194,18 +194,10 @@ Session::Session(ServerConfig cfg)
           ac.adb = cfg_.adb;
           ac.serial = cfg_.serial;
           ac.agent_port = cfg_.agent_port;
-          ac.print_events = cfg_.print_events;
           ac.wire_key = cfg_.wire_key;
           return ac;
       }()),
       store_(cfg_.annotations_file.empty() ? "annotations.json" : cfg_.annotations_file) {}
-
-void Session::relay_annotate(const std::string& op, const json& ann) {
-    json out;
-    json params{{"type", "annotate"},
-                {"data", {{"op", op}, {"ann", ann}}}};
-    device_call(GGCMD_RELAY_EVENT, params, &out);   // best-effort，失败忽略
-}
 
 json Session::ok(const json& data) {
     json result;
@@ -626,6 +618,22 @@ json tool_calc_offset(Session::CallCtx& c, const json& a) {
 json tool_pointer_scan(Session::CallCtx& c, const json& a) {
     if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     c.params["cap"] = a.value("cap", 5000);
+    /* lookback / aligned 只在显式给出时才下发，保持与旧版 agentd 的兼容
+     * （旧 agentd 不认识这两个键也无害，它会忽略）。 */
+    if (a.contains("lookback")) {
+        const json& jl = a["lookback"];
+        if (!jl.is_number() || jl.get<double>() < 0)
+            return c.fail(GGERR_BAD_REQUEST, "lookback must be a non-negative number");
+        c.params["lookback"] = jl;
+    }
+    if (a.contains("aligned")) {
+        const json& ja = a["aligned"];
+        int flag;
+        if (ja.is_boolean()) flag = ja.get<bool>() ? 1 : 0;
+        else if (ja.is_number()) flag = ja.get<double>() != 0 ? 1 : 0;
+        else return c.fail(GGERR_BAD_REQUEST, "aligned must be boolean");
+        c.params["aligned"] = flag;
+    }
     return c.send(GGCMD_POINTER_SCAN);
 }
 json tool_pointer_chain(Session::CallCtx& c, const json& a) {
@@ -829,7 +837,7 @@ json tool_disassemble(Session::CallCtx& c, const json& a) {
     return c.send(GGCMD_DISASSEMBLE);
 }
 
-// ---- AI 标注库（本地 JSON 持久化, 不经过 agentd；变更经中继同步到手机悬浮窗） ----
+// ---- AI 标注库（本地 JSON 持久化, 不经过 agentd） ----
 json tool_annotate_add(Session::CallCtx& c, const json& a) {
     if (!a.contains("tag")) return c.fail(GGERR_BAD_REQUEST, "tag required");
     json saved = c.store().add(a);

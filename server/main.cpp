@@ -73,7 +73,6 @@ static LoadResult load_config(const std::string& path, ServerConfig* cfg) {
         cfg->serial = j.value("serial", cfg->serial);
         cfg->safe_mode = j.value("safe_mode", cfg->safe_mode);
         cfg->shell_enabled = j.value("shell_enabled", cfg->shell_enabled);
-        cfg->print_events = j.value("print_events", cfg->print_events);
         cfg->result_cap = j.value("result_cap", (int64_t)cfg->result_cap);
         cfg->annotations_file = j.value("annotations_file", cfg->annotations_file);
         cfg->export_dir = j.value("export_dir", cfg->export_dir);
@@ -218,7 +217,6 @@ int main(int argc, char** argv) {
         else if (a == "--adb" && i + 1 < argc) cfg.adb = argv[++i];
         else if (a == "--serial" && i + 1 < argc) cfg.serial = argv[++i];
         else if (a == "--safe") cfg.safe_mode = true;
-        else if (a == "--print-events") cfg.print_events = true;
         else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
         else { usage(argv[0]); return 1; }
     }

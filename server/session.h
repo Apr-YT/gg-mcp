@@ -27,7 +27,6 @@ struct ServerConfig {
     std::string annotations_file = "annotations.json";   // AI 标注库持久化路径
     std::string export_dir = "exports";                  // save_to 落盘根目录：工具只能写到这里面
     size_t max_save_bytes = 256u * 1024u * 1024u;        // 单次 save_to 读取总量上限
-    bool print_events = false;      // 订阅 agentd 事件流并在 stderr 打印（悬浮窗监控调试）
 };
 
 class Session {
@@ -81,7 +80,7 @@ public:
             return s->device_call(cmd, req, out);
         }
         void relay_annotate(const std::string& op, const json& ann) {
-            s->relay_annotate(op, ann);
+            (void)op; (void)ann;   /* 事件广播已删除，AI 主力下 agentd 端不再接收 */
         }
         AnnotationStore& store() { return s->store_; }
         const ServerConfig& cfg() { return s->cfg_; }
@@ -97,9 +96,6 @@ private:
     static int norm_type(const json& t);       // "dword"→3 等；缺省 dword
     static int norm_region(const json& r);     // "anonymous"→1 等；缺省 anonymous
     static int norm_op(const json& o);         // "increased"→1 等；缺省 changed
-
-    // 向 agentd 中继事件（标注变更 → 手机悬浮窗实时显示）。best-effort，失败忽略。
-    void relay_annotate(const std::string& op, const json& ann);
 
     ServerConfig cfg_;
     AgentClient client_;

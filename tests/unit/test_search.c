@@ -186,7 +186,8 @@ int main(void) {
         uint64_t container = TEST_MEM_BASE + 0x5000;
         mem_write_u32(container, (uint32_t)(target & 0xFFFFFFFFu));  /* 容器持有指向 target 的指针 */
         gg_pointer_hit_t hits[16];
-        size_t nh = pointer_scan(NULL, 0, &target, 1, VT_DWORD, hits, 16);
+        /* lookback=0（精确）、aligned=1：与旧行为一致 */
+        size_t nh = pointer_scan(NULL, 0, &target, 1, VT_DWORD, 0, 1, hits, 16);
         check(nh >= 1, "6) pointer_scan: found container holding target");
         results_clear(&r);
 
@@ -253,7 +254,11 @@ int main(void) {
         memcpy(g_mem + (hit - TEST_MEM_BASE), &v32, 4);
         results_init(&r, 0);
         int64_t n = search_range(NULL, 0, &r, VT_DWORD,
-                                 (double)0xCAFEBABEu, (double)0xCAFEBABEu, 0);
+                                 (double)0xCAFEBABEu, (double)0xCAFEBABEu, 0, 0);
+                                 /* 最后一个 0 = aligned：本用例故意把 dword 放在
+                                  * 非对齐位置（CHUNK-2，2 字节跨块），所以必须
+                                  * 用逐字节模式才能命中。对齐模式下这种值本来就
+                                  * 扫不到（真实内存里 dword 不会这么摆）。 */
         check(n >= 1 && results_has(&r, hit), "9z) 跨块 range: 边界上的值仍命中");
         results_clear(&r);
     }

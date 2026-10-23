@@ -88,8 +88,9 @@ int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
                      int vtype, uint64_t value, int region_type);
 
 /* 区间搜索：min <= value <= max（float/double 按 double 解释）。 */
+/* aligned: 1=只扫自然对齐位置（默认，避免 8 倍冗余命中），0=逐字节。 */
 int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
-                     int vtype, double vmin, double vmax, int region_type);
+                     int vtype, double vmin, double vmax, int region_type, int aligned);
 
 /* AoB 特征码搜索：pat[plen] 字节序列滑动匹配，命中起始地址。 */
 int parse_hex_pattern(const char *s, uint8_t *out, size_t max);
@@ -128,14 +129,24 @@ int results_get_page(gg_driver_t *d, pid_t pid, gg_results_t *r,
 size_t results_set_values(gg_driver_t *d, pid_t pid, gg_results_t *r,
                           const uint64_t *addrs, size_t n, int vtype, uint64_t value);
 
-/* 指针扫描：对每个目标地址 A，在可写区找值为 A 的指针。 */
+/* 指针扫描：对每个目标地址 A，在可写区找值为 A 的指针。
+ *
+ * lookback: 0 = 精确匹配（v == A）；>0 = 区间匹配，命中条件为
+ *   A - lookback <= v <= A + lookback。用于"指针指向对象首址、目标字段在
+ *   对象内部"的情况（C++ 对象普遍如此）。参数语义参考 CE 的 structsize /
+ *   ptrscan 的 -p lookback，但这里是双向的，同时覆盖"指向成员"和"指向父结构"。
+ *
+ * aligned: 1 = 只扫 8 字节对齐位置。ARM64 指针天然对齐，非对齐命中基本是
+ *   二进制数据里的巧合（真机实测：900/39 相邻的两条命中里，非对齐那条周边
+ *   全是资源数据）。默认 1。 */
 typedef struct gg_pointer_hit {
     uint64_t container;   /* 指针所在地址 */
-    uint64_t target;      /* 指针值（= 目标 A） */
+    uint64_t target;      /* 指针值命中时对应的目标地址（区间模式下是最接近的 A） */
     int      ptype;       /* VT_DWORD / VT_QWORD */
 } gg_pointer_hit_t;
 size_t pointer_scan(gg_driver_t *d, pid_t pid, const uint64_t *targets, size_t ntargets,
-                    int vtype, gg_pointer_hit_t *out, size_t cap);
+                    int vtype, uint64_t lookback, int aligned,
+                    gg_pointer_hit_t *out, size_t cap);
 
 /* 工具 */
 int vt_size(int vtype);

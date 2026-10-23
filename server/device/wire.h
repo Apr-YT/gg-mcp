@@ -36,7 +36,6 @@ public:
         int agent_port = 34127;         // 设备端 agentd 端口（hide 改造 2026-08-18）
         int connect_timeout_ms = 5000;
         int io_timeout_ms = 300000;     // 搜索可能较久
-        bool print_events = false;      // 订阅并打印 agentd 事件帧（调试/监控用）
         // wire 握手密钥：必须与 agentd 的 --wire-key / --wire-key-file 一致。
         // 为空时仍会发起握手，由 agentd 决定放行（无密钥的 agentd 会回 auth_disabled）。
         std::string wire_key;

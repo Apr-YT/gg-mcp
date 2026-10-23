@@ -268,10 +268,30 @@ void h_pointer_scan(int fd, uint32_t seq, cJSON *p) {
     if (cap > 100000) cap = 100000;
     if (g_eng.results.fuzzy_active) results_materialize(&g_eng.results);
 
+    /* lookback：指针指向"对象首址"而目标在对象内部时，精确匹配必然搜不到
+     * （C++ 对象普遍如此）。给一个回看范围，命中条件放宽成
+     * [目标-lookback, 目标+lookback]，一次抓出所有指向该对象的指针。
+     * 上限 1MB：再大就把整片堆都算进来了，那还不如不做。
+     * 默认 0 = 精确匹配，与旧行为一致。 */
+    uint64_t lookback = 0;
+    cJSON *jl = cJSON_GetObjectItem(p, "lookback");
+    if (cJSON_IsNumber(jl) && jl->valuedouble > 0) {
+        lookback = (uint64_t)jl->valuedouble;
+        if (lookback > 0x100000) lookback = 0x100000;
+    }
+    /* aligned：默认 1（只扫自然对齐位置）。非对齐命中基本是二进制数据巧合。 */
+    int aligned = 1;
+    cJSON *ja = cJSON_GetObjectItem(p, "aligned");
+    if (ja) {
+        if (cJSON_IsBool(ja)) aligned = cJSON_IsTrue(ja) ? 1 : 0;
+        else if (cJSON_IsNumber(ja)) aligned = ja->valueint ? 1 : 0;
+    }
+
     gg_pointer_hit_t *hits = malloc(cap * sizeof(gg_pointer_hit_t));
     if (!hits) { send_err(fd, GGCMD_POINTER_SCAN, seq, GGERR_INTERNAL, "oom"); return; }
     size_t n = pointer_scan(&g_eng.drv, g_eng.session_pid,
-                            g_eng.results.addrs, g_eng.results.count, type, hits, cap);
+                            g_eng.results.addrs, g_eng.results.count, type,
+                            lookback, aligned, hits, cap);
     cJSON *r = cJSON_CreateObject();
     cJSON *arr = cJSON_AddArrayToObject(r, "hits");
     for (size_t i = 0; i < n; i++) {

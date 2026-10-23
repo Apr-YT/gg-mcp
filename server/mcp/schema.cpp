@@ -195,10 +195,20 @@ static const std::vector<ToolDef>& build() {
              },
              json{"addr"}),
         tool("gg_pointer_scan",
-             "指针扫描：在可写区找指向当前搜索结果地址的指针（dword/qword）",
+             "指针扫描：在可写区找指向当前搜索结果地址的指针（dword/qword）。"
+             "lookback 用于\"指针指向对象首址、目标字段在对象内部\"的情况"
+             "（C++ 对象普遍如此）——精确匹配在这种情况下必然搜不到，"
+             "因为持有者存的是对象首址而不是成员地址。",
              json{
                  {"type", prop("string", "指针宽度", "\"enum\":[\"dword\",\"qword\"]")},
                  {"cap", prop("integer", "输出上限（默认 5000）")},
+                 {"lookback", prop("integer",
+                     "回看范围（默认 0=精确匹配，上限 0x100000）。命中条件放宽为 "
+                     "[目标-lookback, 目标+lookback]，一次抓出所有指向该对象的指针。"
+                     "对象大小 0x200 以内给 0x200 就够")},
+                 {"aligned", prop("boolean",
+                     "只扫自然对齐位置（默认 true）。ARM64 指针天然按 8 字节对齐，"
+                     "非对齐命中基本都是二进制数据里的巧合")},
              },
              json::array()),
         tool("gg_pointer_chain",

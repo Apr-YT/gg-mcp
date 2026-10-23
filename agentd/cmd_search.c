@@ -83,7 +83,15 @@ void h_search_range(int fd, uint32_t seq, cJSON *p) {
     if (region < 0) { send_err(fd, GGCMD_SEARCH_RANGE, seq, GGERR_BAD_REQUEST, "invalid " REGION_HINT); return; }
     double vmin = cJSON_GetObjectItem(p, "min") ? cJSON_GetObjectItem(p, "min")->valuedouble : 0;
     double vmax = cJSON_GetObjectItem(p, "max") ? cJSON_GetObjectItem(p, "max")->valuedouble : 0;
-    int64_t found = search_range(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, vmin, vmax, region);
+    /* aligned：默认 1。逐字节扫会让一个 8 字节值被命中 8 次（未对齐窗口都落在
+     * 区间里），结果数虚高 8 倍。只有查 packed 结构时才需要关掉。 */
+    int aligned = 1;
+    cJSON *ja = cJSON_GetObjectItem(p, "aligned");
+    if (ja) {
+        if (cJSON_IsBool(ja)) aligned = cJSON_IsTrue(ja) ? 1 : 0;
+        else if (cJSON_IsNumber(ja)) aligned = ja->valueint ? 1 : 0;
+    }
+    int64_t found = search_range(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, vmin, vmax, region, aligned);
     if (found < 0) { send_err(fd, GGCMD_SEARCH_RANGE, seq, GGERR_INTERNAL, "range search failed"); return; }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "count", (double)found);
