@@ -95,16 +95,42 @@ AI 在后台搜完人的表格自动跟上。
 
 以后再遇到同类命令，加进白名单即可自动挡住。
 
+### 5. `search_range` 不设 `exact_vt`，`get_results` 值只显示低 32 位
+
+**现象**（2026-10-23 登山赛车实测）：`gg_search_range(type=qword)` 搜
+`0x6D6630BDD4..0x6D6630BFD4`，命中地址正确，但 `gg_get_results` 返回的
+`value` 是 32 位（如 `1714470764` = `0x6630BE6C`）。用
+`gg_read type=qword` 读同一地址，得到的是正确的 64 位值 `0x6D6630BF6C`。
+
+**根因**：`h_get_results` 用 `results.exact_vt` 决定读值宽度
+（`int type = VT_DWORD; if (exact_vt > 0) type = exact_vt;`），
+而 `search_range` **从不设置 `exact_vt`** —— 于是沿用了上一次 dword 搜索的
+残留类型，按 4 字节读 8 字节指针。
+
+**修法有个坑**：只补 `r->exact_vt = vtype` 会引出更糟的问题 ——
+`search_refine_exact` 在 `exact_vals == NULL` 时会用 `exact_value` 填满所有
+候选（前提是"所有候选都等于搜索目标"，精确搜索成立、区间搜索不成立），
+于是首次 refine 把基线当成 0，候选全被判成 changed。
+
+**方案**：加 `int exact_vals_valid` 字段。`search_exact` 填完 exact_vals 设 1；
+`search_range` 设 `exact_vt = vtype` 且 `exact_vals_valid = 0`（不填 exact_vals）。
+`search_refine_exact` 遇到 `!exact_vals_valid` 时先跑一轮"只读基线、不筛选"
+（返回进来的 count），下一轮才真正比较。
+
+成本：约 40 行（结构体 1 字段 + 3 处设置 + refine 一个分支）。
+**收益**：区间搜索是找指针的主力工具，结果不可信等于不能用。
+本轮绕过方式：拿到地址后用 `gg_read type="qword"` 逐条核对。
+
 ## P1 — 收益明确、成本中等
 
-### 5. 搜索真正异步
+### 6. 搜索真正异步
 
 现状：UI 里搜索是同步调用（全量 0.19s、模糊首帧 0.32s），期间界面卡住。
 做法：操作丢进 `std::thread`，结果进队列，UI 线程只做展示；按钮置灰 + 转圈。
 成本：约 80 行（要处理"搜索中再点搜索"、"attach 打断搜索"）。
 注意：`Session` 内部有锁，但**并发调 call_tool 的语义没验证过**，需要串行化。
 
-### 6. UI 接模块基址 / 指针链
+### 7. UI 接模块基址 / 指针链
 
 现状：`gg_module_list` / `gg_module_base` / `gg_pointer_scan` / `gg_pointer_chain`
 都有工具，UI 没接。找基址+偏移是仅次于搜索的高频操作。
@@ -121,7 +147,7 @@ AI 在后台搜完人的表格自动跟上。
 - `gg_pointer_scan` 的字段名以实现为准（`hits:[{container,target,ptype}]`），
   UI 里最初猜的 `pointers/results` 是错的
 
-### 7. 驱动读路径合并连续物理页
+### 8. 驱动读路径合并连续物理页
 
 现状：`fast_read_linear` 每页一次 `kmap_local_page` + `memcpy`，实测 559ns/页
 （物理读部分）。而 `/proc/<pid>/pagemap` 在本机**能读到真实 pfn**（未被屏蔽）。
@@ -130,13 +156,13 @@ AI 在后台搜完人的表格自动跟上。
 **风险高**：这块是"设备重启"和"静默漏读"两次事故的现场，改完必须跑
 `check_stealth` + `run_itest` + 64KB 区间集合比对。
 
-### 8. 搜索快照内存上限
+### 9. 搜索快照内存上限
 
 现状：`GG_FUZZY_MAX_BYTES` 默认 256MB，超过的 region 不纳入扫描（模糊搜索会漏）。
 做法：超限时明确提示"只扫了前 256MB"，并列出被跳过的 region。
 成本：约 20 行。**收益**：避免"搜不到"被误当成"值不存在"。
 
-### 9. `pointer_scan` 支持区间匹配（指向对象任意成员）
+### 10. `pointer_scan` 支持区间匹配（指向对象任意成员）
 
 现状：只做精确相等（`v == target`）。真实 C++ 对象里，持有者存的是**对象首址**，
 而目标字段常在 `+0x14` 这类偏移上 —— 精确匹配必然搜不到。
@@ -149,7 +175,7 @@ AI 在后台搜完人的表格自动跟上。
 成本：约 30 行（bsearch 换成区间判断，或对每个 target 做二分下界）。
 **收益**：一次抓出所有指向该对象的指针，不用每换一个成员偏移就重扫全内存。
 
-### 10. `search_range` 按元素宽度对齐步进
+### 11. `search_range` 按元素宽度对齐步进
 
 现状：`agentd/search.c` mode 1 分支是 `for (...; i++)` —— **每字节**都试。
 后果：一个 8 字节指针落在区间内会被命中 **8 次**（i..i+7 的未对齐窗口都满足），
@@ -163,7 +189,7 @@ ARM64 指针/浮点天然按 4/8 字节对齐，按 `sz` 步进既正确又快 8
 
 ## P2 — 需要架构级权衡
 
-### 11. 驱动主动塞 fd（彻底消除 proc 节点）
+### 12. 驱动主动塞 fd（彻底消除 proc 节点）
 
 现状：proc 节点必须保留（`fd_install` 只能由用户态触发，节点是唯一入口 + 重连入口），
 key 也因此不能随机化。详见 AGENTS 32。
@@ -171,13 +197,13 @@ key 也因此不能随机化。详见 AGENTS 32。
 代价：agentd 重启后 pid 变了就失效，必须重新 insmod（且隐藏模块 rmmod 不了，
 只能装不同模块名的副本）。**这是换一种运维约束，不是纯收益。**
 
-### 12. 匿名通道的 fd 名
+### 13. 匿名通道的 fd 名
 
 现状：`anon_inode:dmabuf`（已从中性的角度选过）。
 可再进一步：用 `eventpoll` / `sync_file` 之类更常见的内核对象名。
 但区别已经不大（都混在 graphics/io 类 fd 里）。
 
-### 13. AGENTS.md 拆分
+### 14. AGENTS.md 拆分
 
 现状：35 条、614 行。已经出现"同一条里塞了三件事"的情况。
 做法：按主题拆成 `AGENTS.driver.md` / `AGENTS.agentd.md` / `AGENTS.build.md`，
