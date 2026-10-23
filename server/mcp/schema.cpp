@@ -98,6 +98,43 @@ static const std::vector<ToolDef>& build() {
                  {"nonzero", prop("boolean", "排除值为 0 的条目")},
              },
              json::array()),
+        tool("gg_screen_diff",
+             "屏幕区域差分：判断指定矩形区域**画面有没有变化**（不读数字，不做 OCR）。"
+             "第一次调用建立基线返回 baseline=true；之后每次与上一次比较。"
+             "用法：数值变化前后各调一次，changed=true 说明该区域确实变了，再去 refine 搜索。"
+             "为什么不用它读数：OCR 认错一个数字会让整轮搜索报废，精确值一律走 gg_read。"
+             "延迟约 200ms（设备端 raw 截图 + 只回传 ROI 灰度）",
+             json{
+                 {"x", prop("integer", "左上角 X（px）")},
+                 {"y", prop("integer", "左上角 Y（px）")},
+                 {"w", prop("integer", "区域宽（px）")},
+                 {"h", prop("integer", "区域高（px）")},
+                 {"scale", prop("integer", "降采样倍数（默认 4，越大越快越粗；ROI 过大时设备会自动上调）")},
+                 {"threshold", prop("integer", "单像素差值阈值（默认 16，抗抗锯齿/闪烁噪声）")},
+                 {"min_ratio", prop("number", "变化像素占比阈值（默认 0.02 即 2%）")},
+                 {"reset", prop("boolean", "true=丢弃旧基线重建（换了页面/分辨率后用）")},
+             },
+             json{"x", "y", "w", "h"}),
+        tool("gg_screen_watch_refine",
+             "等画面变化并自动 refine：轮询指定区域，一旦检测到变化就对当前结果集做一次 refine。"
+             "替代「截图→比对→再截图→refine」的两三轮往返，一次调用完成。"
+             "阻塞到触发或超时（timeout_ms 上限 60s）。"
+             "典型用法：搜出一批候选 → 调它 → 在游戏里点一下买东西 → 它返回 triggered=true 和 remaining",
+             json{
+                 {"x", prop("integer", "左上角 X（px）")},
+                 {"y", prop("integer", "左上角 Y（px）")},
+                 {"w", prop("integer", "区域宽（px）")},
+                 {"h", prop("integer", "区域高（px）")},
+                 {"op", prop("string", "触发后的 refine 操作", "\"enum\":[\"increased\",\"decreased\",\"unchanged\",\"changed\"]")},
+                 {"timeout_ms", prop("integer", "最长等待（默认 5000，上限 60000）")},
+                 {"poll_ms", prop("integer", "轮询间隔（默认 250；截图本身约 150ms，再小没有意义）")},
+                 {"settle_ms", prop("number", "检测到变化后等多久再 refine（默认 100，防数字滚动动画取到中间值）")},
+                 {"scale", prop("integer", "降采样倍数（默认 4，ROI 大时设备会自动上调）")},
+                 {"threshold", prop("integer", "单像素差值阈值（默认 16）")},
+                 {"min_ratio", prop("number", "判定为变化的最小像素占比（默认 0.02）")},
+                 {"reset", prop("boolean", "true=丢弃旧基线重新开始（换了页面后用）")},
+             },
+             json{"x", "y", "w", "h"}),
         tool("gg_search_range",
              "区间搜索：min <= 值 <= max（按类型解释）",
              json{
@@ -108,8 +145,13 @@ static const std::vector<ToolDef>& build() {
              },
              json{"min", "max"}),
         tool("gg_result_count",
-             "当前搜索结果数量（含模糊候选数）",
-             json::object(), json::array()),
+             "当前搜索结果数量（含模糊候选数）。summary=true 时附值分布 top-8："
+             "候选上万条时先看这个 —— 如果绝大多数条目的值相同，说明搜索条件太宽，"
+             "真正的目标在剩下那几百条里，接着用 gg_filter_results 收窄",
+             json{
+                 {"summary", prop("boolean", "附带值分布 top-8（要读一遍全量候选，约 20ms/3 万条）")},
+             },
+             json::array()),
         tool("gg_get_results",
              "分页获取搜索结果（地址+当前值），结果在设备端维护；值的类型自动取搜索结果集自身类型，无需传 type",
              json{

@@ -199,6 +199,54 @@ void h_result_count(int fd, uint32_t seq, cJSON *p) {
         cJSON_AddNumberToObject(r, "fuzzy_candidates",
             (double)results_fuzzy_count(&g_eng.results));
     }
+    /* summary=true：附带值分布 top-8，要读一遍全量候选（约 20ms / 3 万条），所以不默认开。
+     * 模糊态不做：候选是"未知初值"，分布没有意义；物化代价也不可控。 */
+    cJSON *js = cJSON_GetObjectItem(p, "summary");
+    int want = js && (cJSON_IsBool(js) ? cJSON_IsTrue(js) : js->valuedouble != 0);
+    if (want) {
+        if (g_eng.results.fuzzy_active) {
+            cJSON_AddStringToObject(r, "summary_unavailable", "fuzzy_active");
+        } else if (g_eng.session_pid <= 0) {
+            cJSON_AddStringToObject(r, "summary_unavailable", "no_session");
+        } else if (!g_eng.results.addrs || g_eng.results.count == 0) {
+            cJSON_AddStringToObject(r, "summary_unavailable", "no_results");
+        } else {
+            gg_hist_bin_t bins[8];
+            int exact = 0;
+            size_t nb = results_value_histogram(&g_eng.drv, g_eng.session_pid,
+                                                &g_eng.results, bins, 8, &exact);
+            if (nb == (size_t)-1) {
+                cJSON_AddStringToObject(r, "summary_unavailable", "read_failed");
+            } else {
+                int vt = g_eng.results.exact_vt > 0 ? g_eng.results.exact_vt
+                                                    : g_eng.results.fuzzy_vt;
+                cJSON *top = cJSON_AddArrayToObject(r, "top_values");
+                for (size_t i = 0; i < nb; i++) {
+                    char buf[48];
+                    if (vt == VT_FLOAT) {
+                        uint32_t b32 = (uint32_t)bins[i].raw;
+                        float f;
+                        memcpy(&f, &b32, 4);
+                        snprintf(buf, sizeof(buf), "%.6g", (double)f);
+                    } else if (vt == VT_DOUBLE) {
+                        double dv;
+                        uint64_t raw = bins[i].raw;
+                        memcpy(&dv, &raw, 8);
+                        snprintf(buf, sizeof(buf), "%.6g", dv);
+                    } else {
+                        snprintf(buf, sizeof(buf), "%llu", (unsigned long long)bins[i].raw);
+                    }
+                    cJSON *o = cJSON_CreateObject();
+                    cJSON_AddStringToObject(o, "value", buf);
+                    cJSON_AddNumberToObject(o, "count", (double)bins[i].hits);
+                    cJSON_AddItemToArray(top, o);
+                }
+                /* unique_exact=0 时"唯一值数"只是下限（桶溢出替换过），别当精确值用 */
+                cJSON_AddBoolToObject(r, "unique_exact", exact);
+                cJSON_AddNumberToObject(r, "bins", (double)nb);
+            }
+        }
+    }
     send_ok(fd, GGCMD_RESULT_COUNT, seq, r);
     cJSON_Delete(r);
 }
@@ -355,6 +403,70 @@ void h_set_results(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddNumberToObject(r, "written", (double)written);
     cJSON_AddNumberToObject(r, "skipped", (double)skipped);
     send_ok(fd, GGCMD_SET_RESULTS, seq, r);
+    cJSON_Delete(r);
+}
+
+/* 结果集内过滤（GGCMD_FILTER_RESULTS）。
+ *
+ * 只读操作（只读目标当前值、不改内存），因此不受 safe_mode 限制。
+ * 至少要给一个条件：一个都不给就退化成"原样重读全量候选"，既慢又会把 exact_vals
+ * 快照改写成当前值 —— 后续 refine 的"变化方向"就全错了。
+ */
+void h_filter_results(int fd, uint32_t seq, cJSON *p) {
+    if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_FILTER_RESULTS, seq, GGERR_NO_SESSION, "no session"); return; }
+    if (g_eng.results.fuzzy_active) results_materialize(&g_eng.results);
+    if (!g_eng.results.addrs || g_eng.results.count == 0) {
+        send_err(fd, GGCMD_FILTER_RESULTS, seq, GGERR_BAD_REQUEST, "no results (search first)");
+        return;
+    }
+    int has_min = 0, has_max = 0, exclude_nan = 0, nonzero = 0;
+    double vmin = 0, vmax = 0;
+    cJSON *jm = cJSON_GetObjectItem(p, "min");
+    if (jm) {
+        char b[64];
+        const char *s = j_scalar_str(jm, b, sizeof(b));
+        char *end = NULL;
+        vmin = (s && *s) ? strtod(s, &end) : 0;
+        if (!s || *s == '\0' || end == s) {
+            send_err(fd, GGCMD_FILTER_RESULTS, seq, GGERR_BAD_REQUEST, "bad min");
+            return;
+        }
+        has_min = 1;
+    }
+    cJSON *jx2 = cJSON_GetObjectItem(p, "max");
+    if (jx2) {
+        char b[64];
+        const char *s = j_scalar_str(jx2, b, sizeof(b));
+        char *end = NULL;
+        vmax = (s && *s) ? strtod(s, &end) : 0;
+        if (!s || *s == '\0' || end == s) {
+            send_err(fd, GGCMD_FILTER_RESULTS, seq, GGERR_BAD_REQUEST, "bad max");
+            return;
+        }
+        has_max = 1;
+    }
+    cJSON *jex = cJSON_GetObjectItem(p, "exclude_nan");
+    if (jex) exclude_nan = cJSON_IsBool(jex) ? cJSON_IsTrue(jex) : (jex->valuedouble != 0);
+    cJSON *jnz = cJSON_GetObjectItem(p, "nonzero");
+    if (jnz) nonzero = cJSON_IsBool(jnz) ? cJSON_IsTrue(jnz) : (jnz->valuedouble != 0);
+    if (!has_min && !has_max && !exclude_nan && !nonzero) {
+        send_err(fd, GGCMD_FILTER_RESULTS, seq, GGERR_BAD_REQUEST,
+                 "at least one of min/max/exclude_nan/nonzero required");
+        return;
+    }
+    if (has_min && has_max && vmin > vmax) {
+        send_err(fd, GGCMD_FILTER_RESULTS, seq, GGERR_BAD_REQUEST, "min > max");
+        return;
+    }
+    size_t before = g_eng.results.count;
+    int64_t rem = search_filter_exact(&g_eng.drv, g_eng.session_pid, &g_eng.results,
+                                      has_min, vmin, has_max, vmax, exclude_nan, nonzero);
+    if (rem < 0) { send_err(fd, GGCMD_FILTER_RESULTS, seq, GGERR_INTERNAL, "filter failed"); return; }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "remaining", (double)rem);
+    cJSON_AddNumberToObject(r, "removed", (double)(before - (size_t)rem));
+    cJSON_AddBoolToObject(r, "undo_available", 1);
+    send_ok(fd, GGCMD_FILTER_RESULTS, seq, r);
     cJSON_Delete(r);
 }
 

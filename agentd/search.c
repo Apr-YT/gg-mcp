@@ -1056,6 +1056,165 @@ int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) 
     return (int64_t)n;
 }
 
+/* 结果集内过滤：只保留**当前值**满足条件的条目（原地压缩，只减不增，可 undo）。
+ *
+ * 与 search_refine_exact 的分工：那个比「变化方向」，这个比「绝对值区间」。
+ * 用途是搜出两万条之后把候选砍到几十条 —— 不做这一步，AI 只能分页看两百轮。
+ *
+ * 边界与取舍：
+ *   - 整型走 u64 精确比较（入参是 double，>2^53 会失真，与 search_range 同）；
+ *     float/double 走浮点 + isfinite。
+ *   - exclude_nan 只对 float/double 有意义，整型忽略。NaN 参与任何比较都是 false，
+ *     所以区间过滤本身已经排除它；这个开关是给「不限区间、只要非 NaN」用的。
+ *   - 读不到的条目**直接剔除**：无法判定是否满足条件，留着会污染后续 set/freeze。
+ *   - 压缩必须同步 exact_vals，否则 undo 恢复后 refine 会拿错快照。
+ */
+int64_t search_filter_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
+                            int has_min, double vmin, int has_max, double vmax,
+                            int exclude_nan, int nonzero) {
+    if (!r->addrs || r->count == 0) return 0;
+    /* 模糊结果集物化后 exact_vt 仍为 0，类型落在 fuzzy_vt 上 */
+    int vt = r->exact_vt > 0 ? r->exact_vt : r->fuzzy_vt;
+    if (vt <= 0 || vt > VT_DOUBLE) return -1;
+    int sz = vt_size(vt);
+    if (sz <= 0) return -1;
+    int is_float = (vt == VT_FLOAT || vt == VT_DOUBLE);
+    /* 整型无符号：负下界钳到 0，否则 (uint64_t)(-1) 会变成巨大的上界 */
+    uint64_t ilo = (has_min && vmin > 0) ? (uint64_t)vmin : 0;
+    uint64_t ihi = (has_max && vmax > 0) ? (uint64_t)vmax : 0;
+
+    if (!r->exact_vals) {
+        r->exact_vals = malloc(r->count * sizeof(uint64_t));
+        if (!r->exact_vals) return -1;
+        for (size_t i = 0; i < r->count; i++) r->exact_vals[i] = r->exact_value;
+    }
+    exact_undo_push(r);
+
+    uint64_t *dst = r->addrs;
+    uint64_t *dstv = r->exact_vals;
+    size_t n = 0;
+    uint8_t *bigbuf = malloc(GG_SEARCH_CHUNK);
+    if (!bigbuf) return -1;
+    for (size_t i = 0; i < r->count; ) {
+        size_t seg_n = 0;
+        uint64_t cur = r->addrs[i];
+        while (i + seg_n < r->count && r->addrs[i + seg_n] == cur &&
+               (seg_n + 1) * (size_t)sz <= GG_SEARCH_CHUNK) {
+            seg_n++;
+            cur += (uint64_t)sz;
+        }
+        ssize_t got = driver_read(d, pid, r->addrs[i], bigbuf, seg_n * (size_t)sz);
+        size_t have_n = got > 0 ? (size_t)got / (size_t)sz : 0;
+        for (size_t j = 0; j < seg_n; j++) {
+            const uint8_t *pb = bigbuf + j * (size_t)sz;
+            uint8_t one[8];
+            if (j >= have_n) {
+                /* 段读覆盖不到（短读/空洞）：单地址重试一次，仍失败就剔除 */
+                if (driver_read(d, pid, r->addrs[i + j], one, (size_t)sz) != (ssize_t)sz)
+                    continue;
+                pb = one;
+            }
+            if (is_float) {
+                double v = read_as_double(pb, vt);
+                if (exclude_nan && !isfinite(v)) continue;
+                if (has_min && !(v >= vmin)) continue;
+                if (has_max && !(v <= vmax)) continue;
+                if (nonzero && v == 0.0) continue;
+            } else {
+                uint64_t v = read_bits(pb, vt);
+                if (has_min && v < ilo) continue;
+                if (has_max && v > ihi) continue;
+                if (nonzero && v == 0) continue;
+            }
+            dst[n] = r->addrs[i + j];
+            dstv[n] = read_bits(pb, vt);
+            n++;
+        }
+        i += seg_n;
+    }
+    free(bigbuf);
+    r->count = n;
+    log_msg("filter: kept %zu candidates", n);
+    return (int64_t)n;
+}
+
+/* 值分布摘要（top-N）。按命中数降序，聚合键是值的**位模式**（float 不会因 double 精度被合并）。
+ *
+ * 为什么不返回完整直方图：两万条候选的完整分布可能有上万个 bin，返回给 AI 又大又没用；
+ * top-N 刚好回答"是不是绝大多数都是同一个值"这个问题。
+ *
+ * 溢出语义：桶容量是 4×max_bins，满了就替换当前命中数最小的桶。此时**唯一值总数不再准确**
+ * （*unique_exact=0），但 top-N 通常仍正确 —— 只有真实高频值在替换时被踢掉才会失真。
+ * 调用方必须把 unique_exact=0 当成"至少这么多"，不能当精确值用。
+ */
+static int hist_cmp_desc(const void *a, const void *b) {
+    const gg_hist_bin_t *x = a, *y = b;
+    if (x->hits == y->hits) return 0;
+    return x->hits < y->hits ? 1 : -1;
+}
+
+size_t results_value_histogram(gg_driver_t *d, pid_t pid, gg_results_t *r,
+                               gg_hist_bin_t *out, size_t max_bins, int *unique_exact) {
+    if (unique_exact) *unique_exact = 1;
+    if (!r->addrs || r->count == 0 || !out || max_bins == 0) return 0;
+    int vt = r->exact_vt > 0 ? r->exact_vt : r->fuzzy_vt;
+    if (vt <= 0 || vt > VT_DOUBLE) return (size_t)-1;
+    int sz = vt_size(vt);
+    if (sz <= 0 || sz > 8) return (size_t)-1;
+
+    size_t bucket_cap = max_bins * 4;
+    gg_hist_bin_t *bins = calloc(bucket_cap, sizeof(*bins));
+    if (!bins) return (size_t)-1;
+    size_t used = 0;
+    uint8_t *bigbuf = malloc(GG_SEARCH_CHUNK);
+    if (!bigbuf) { free(bins); return (size_t)-1; }
+
+    for (size_t i = 0; i < r->count; ) {
+        size_t seg_n = 0;
+        uint64_t cur = r->addrs[i];
+        while (i + seg_n < r->count && r->addrs[i + seg_n] == cur &&
+               (seg_n + 1) * (size_t)sz <= GG_SEARCH_CHUNK) {
+            seg_n++;
+            cur += (uint64_t)sz;
+        }
+        ssize_t got = driver_read(d, pid, r->addrs[i], bigbuf, seg_n * (size_t)sz);
+        size_t have_n = got > 0 ? (size_t)got / (size_t)sz : 0;
+        for (size_t j = 0; j < seg_n; j++) {
+            const uint8_t *pb = bigbuf + j * (size_t)sz;
+            uint8_t one[8];
+            if (j >= have_n) {
+                /* 读不到的值不计入分布：用 0 顶替会让"0 出现了两万次"这种假结论进 AI 上下文 */
+                if (driver_read(d, pid, r->addrs[i + j], one, (size_t)sz) != (ssize_t)sz)
+                    continue;
+                pb = one;
+            }
+            uint64_t raw = read_bits(pb, vt);
+            size_t k = 0;
+            while (k < used && bins[k].raw != raw) k++;
+            if (k < used) { bins[k].hits++; continue; }
+            if (used < bucket_cap) {
+                bins[used].raw = raw;
+                bins[used].hits = 1;
+                used++;
+                continue;
+            }
+            size_t victim = 0;
+            for (size_t m = 1; m < used; m++) if (bins[m].hits < bins[victim].hits) victim = m;
+            bins[victim].raw = raw;
+            bins[victim].hits = 1;
+            if (unique_exact) *unique_exact = 0;
+        }
+        i += seg_n;
+    }
+    free(bigbuf);
+
+    qsort(bins, used, sizeof(*bins), hist_cmp_desc);
+    size_t nb = used < max_bins ? used : max_bins;
+    memcpy(out, bins, nb * sizeof(*out));
+    free(bins);
+    return nb;
+}
+
 size_t results_materialize(gg_results_t *r) {
     if (!r->fuzzy_active) return r->count;
     if (!r->fuzzy_bitmap) return 0;

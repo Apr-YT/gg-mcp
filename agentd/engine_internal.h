@@ -119,6 +119,8 @@ void h_get_results(int fd, uint32_t seq, cJSON *p);
 void h_clear_results(int fd, uint32_t seq, cJSON *p);
 void h_set_results(int fd, uint32_t seq, cJSON *p);
 void h_filter_results(int fd, uint32_t seq, cJSON *p);
+/* screen.c — 屏幕区域抓取（raw 流 + ROI 降采样灰度，不做 OCR） */
+void h_screenshot_roi(int fd, uint32_t seq, cJSON *p);
 
 /* cmd_mem.c — 内存读写 / 冻结 / 暂停恢复 */
 void h_read(int fd, uint32_t seq, cJSON *p);

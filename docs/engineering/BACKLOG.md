@@ -141,6 +141,29 @@ AI 拿到 21481 条候选时，`get_results` 分页看要 214 轮。这一步先
 **风险**：`screencap` 走 SurfaceFlinger 的 `captureDisplay`，部分反作弊会 hook 这个调用 ——
 比读内存更容易被抓。MediaProjection 同样会在 `dumpsys media_projection` 留痕。
 
+### `gg_screen_watch_refine`（2026-10-23 19:05，等变化 → 自动 refine）
+
+把「人盯着屏幕等数字变」替 AI 做完：轮询 ROI，检测到变化就立刻对当前结果集 refine 一次。
+省的不是截图时间，是 AI 自己「截图 → 比对 → 再截图」的两三轮推理。同步阻塞到触发或超时
+（`timeout_ms` 上限 60s，避免把 MCP 调用挂死）。
+
+真机（竖屏 1200×2608，前台 UE4 游戏）：
+
+| 用例 | 结果 | 耗时 |
+|---|---|---|
+| 静态角落 200×80，timeout 1200ms | `triggered=false, timeout=true, max_ratio=0.0, polls=3` | 1361 ms |
+| 全屏（已 attach 且搜过 25842 条） | `triggered=true, ratio=8.1%, refine.remaining=1` | 1796 ms |
+| 全屏 + 重新搜 11368 条后触发 | `triggered=true, ratio=5.5%, **refine.remaining=0**` | 1100 ms |
+
+**第三行是关键教训**：画面全屏变化 5.5%，但 11368 个「100」一个都没变 → refine 归零。
+**画面在动 ≠ 数值在动**。所以：
+- ROI 必须框住真正显示数值的那块（全屏 ROI 只会被动画/粒子误触发）；
+- 视觉永远只是触发器，判断依据必须在内存侧；归零说明这次触发是噪声，不是 bug。
+- `settle_ms`（默认 100）防数字滚动动画：金币 100→150 逐帧插值时，太快 refine 会按中间值判定。
+
+另外实测到一个测试脚本的坑：**agentd 的会话状态跨脚本残留**（上个脚本 attach + search 后没 detach），
+导致下一个用例的 refine 作用在旧结果集上。跨用例验证要么先 detach，要么用新 agentd 会话。
+
 
 ## P0 — 收益明确、改动小
 

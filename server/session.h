@@ -1,8 +1,10 @@
 // session.h — MCP 工具会话：持有 AgentClient，实现全部工具
 #pragma once
 
+#include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "annotations.h"
 #include "device/wire.h"
@@ -83,6 +85,12 @@ public:
             (void)op; (void)ann;   /* 事件广播已删除，AI 主力下 agentd 端不再接收 */
         }
         AnnotationStore& store() { return s->store_; }
+        /* 屏幕差分基线：自由函数 handler 访问不到 Session 的 private，
+         * 只能经 CallCtx（嵌套类是外层隐式 friend）转一手。 */
+        std::mutex& screen_mtx() { return s->screen_mtx_; }
+        std::map<std::string, std::vector<unsigned char>>& screen_frames() {
+            return s->screen_frames_;
+        }
         const ServerConfig& cfg() { return s->cfg_; }
         const std::string& last_error() { return s->client_.last_error; }
     };
@@ -101,6 +109,10 @@ private:
     AgentClient client_;
     AnnotationStore store_;
     std::mutex mtx_;
+    /* 屏幕差分基线（gg_screen_diff）：key = "x:y:w:h"，值是上一次的降采样灰度帧。
+     * 用独立锁：device_call 不持 mtx_，混用会让差分和工具调用互相等。 */
+    std::mutex screen_mtx_;
+    std::map<std::string, std::vector<unsigned char>> screen_frames_;
 };
 
 }  // namespace gg

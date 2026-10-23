@@ -2,7 +2,8 @@
  *
  * 域内命令（wire 层）：
  *   GGCMD_READ / GGCMD_READ_BYTES / GGCMD_HEX_DUMP / GGCMD_WRITE /
- *   GGCMD_FREEZE / GGCMD_UNFREEZE / GGCMD_PAUSE / GGCMD_RESUME
+ *   GGCMD_FREEZE / GGCMD_UNFREEZE / GGCMD_FREEZE_RESULTS /
+ *   GGCMD_PAUSE / GGCMD_RESUME
  *
  * 三个容易改错的地方（都在下面的注释里标了）：
  *   - h_read_bytes 的 cmd 由调用方传入：READ_BYTES 与 HEX_DUMP 共用它，
@@ -159,6 +160,79 @@ void h_unfreeze(int fd, uint32_t seq, cJSON *p) {
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "frozen", (double)freeze_count(&g_eng.freeze));
     send_ok(fd, GGCMD_UNFREEZE, seq, r);
+    cJSON_Delete(r);
+}
+
+/* 批量冻结当前结果集（GGCMD_FREEZE_RESULTS）。
+ *
+ * 语义由是否带 value 分岔：
+ *   - 带 value：结果集全部冻结成该值；
+ *   - 不带 value：逐条读**当前值**再冻结（"锁住现状"），AI 把候选收敛到几十个后最常用。
+ *
+ * 三条不能随手改的约束：
+ *   1. 冻结表只有 GG_FREEZE_MAX(256) 槽。超出的条目**不冻结**并在响应里回报 truncated ——
+ *      静默丢弃会让调用方以为全冻上了，后续看到值还在变也查不出原因。
+ *   2. 不要为了"能冻更多"去调大 GG_FREEZE_MAX：freeze_loop 是 100ms 全量重写，
+ *      256 条已经是 2560 次驱动写/秒；表再大，单轮耗时就会超过周期，反过来拖慢目标进程。
+ *   3. 短读的条目 skip 掉。冻结一个读不到的值等于凭空造值 —— 下一轮循环会把这个假值
+ *      写进目标内存（比不冻结危险得多）。
+ */
+void h_freeze_results(int fd, uint32_t seq, cJSON *p) {
+    if (g_eng.safe_mode) { send_err(fd, GGCMD_FREEZE_RESULTS, seq, GGERR_SAFE_MODE, "safe mode: freeze denied"); return; }
+    if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_FREEZE_RESULTS, seq, GGERR_NO_SESSION, "no session"); return; }
+    /* 模糊搜索结果在 addrs 里是物化后的候选地址；不物化就冻结一批过期的候选 */
+    if (g_eng.results.fuzzy_active) results_materialize(&g_eng.results);
+    if (!g_eng.results.addrs || g_eng.results.count == 0) {
+        send_err(fd, GGCMD_FREEZE_RESULTS, seq, GGERR_BAD_REQUEST, "no results (search first)");
+        return;
+    }
+    /* def=0 用来区分"调用方没给 type"（→ 取结果集自身类型）与"给了非法值"（→ -1 报错）。
+     * 不能默认成 VT_DWORD：qword 结果集会被写成半个值。 */
+    int type = parse_vt(p, 0);
+    if (type == 0) {
+        type = g_eng.results.exact_vt > 0 ? g_eng.results.exact_vt : g_eng.results.fuzzy_vt;
+    }
+    if (type < 0) { send_err(fd, GGCMD_FREEZE_RESULTS, seq, GGERR_BAD_REQUEST, "invalid " VT_HINT); return; }
+    int sz = vt_size(type);
+    if (sz <= 0) { send_err(fd, GGCMD_FREEZE_RESULTS, seq, GGERR_BAD_REQUEST,
+                            "type bytes not supported for freeze"); return; }
+
+    uint8_t buf[8];
+    int fixed = 0;
+    const cJSON *jv = cJSON_GetObjectItem(p, "value");
+    if (jv) {
+        char vbuf[64];
+        int ok = 0;
+        uint64_t value = parse_value_str(type, j_scalar_str((cJSON *)jv, vbuf, sizeof(vbuf)), &ok);
+        if (!ok) { send_err(fd, GGCMD_FREEZE_RESULTS, seq, GGERR_BAD_REQUEST, "bad value"); return; }
+        encode_value_local(type, value, buf);
+        fixed = 1;
+    }
+
+    size_t want = g_eng.results.count;
+    const cJSON *jl = cJSON_GetObjectItem(p, "limit");
+    if (jl && jl->valuedouble >= 1 && (size_t)jl->valuedouble < want) want = (size_t)jl->valuedouble;
+
+    size_t room = freeze_count(&g_eng.freeze) < GG_FREEZE_MAX
+                      ? GG_FREEZE_MAX - freeze_count(&g_eng.freeze) : 0;
+    size_t done = 0, skipped = 0, truncated = 0;
+    for (size_t i = 0; i < want; i++) {
+        if (done >= room) { truncated = want - i; break; }
+        uint64_t addr = g_eng.results.addrs[i];
+        if (!fixed) {
+            ssize_t got = driver_read(&g_eng.drv, g_eng.session_pid, addr, buf, (size_t)sz);
+            if (got != (ssize_t)sz) { skipped++; continue; }
+        }
+        if (freeze_add(&g_eng.freeze, addr, buf, (size_t)sz) < 0) { skipped++; continue; }
+        done++;
+    }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "frozen_new", (double)done);
+    cJSON_AddNumberToObject(r, "frozen_total", (double)freeze_count(&g_eng.freeze));
+    cJSON_AddNumberToObject(r, "skipped", (double)skipped);
+    cJSON_AddNumberToObject(r, "truncated", (double)truncated);
+    cJSON_AddNumberToObject(r, "capacity", (double)GG_FREEZE_MAX);
+    send_ok(fd, GGCMD_FREEZE_RESULTS, seq, r);
     cJSON_Delete(r);
 }
 

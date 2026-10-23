@@ -367,6 +367,220 @@ json tool_filter_results(Session::CallCtx& c, const json& a) {
     if (a.contains("nonzero")) c.params["nonzero"] = a["nonzero"];
     return c.send(GGCMD_FILTER_RESULTS);
 }
+
+/* 屏幕差分（gg_screen_diff）。
+ *
+ * 分工：视觉只回答「这块画面变了没」，不读数字 —— OCR 认错一个数字（1234→1235）
+ * 会让整轮搜索报废。精确值一律走内存（gg_read / search_refine）。
+ *
+ * 基线存在 PC 侧（screen_frames_），设备端每次只回传降采样灰度，不带历史状态：
+ * 这样 agentd 重启后差分仍然可用，也不会因为多客户端而互相踩基线。
+ */
+json tool_screen_diff(Session::CallCtx& c, const json& a) {
+    for (const char* k : {"x", "y", "w", "h"}) {
+        if (!a.contains(k) || !a[k].is_number())
+            return c.fail(GGERR_BAD_REQUEST, std::string(k) + " must be a number");
+    }
+    json req = {{"x", a["x"]}, {"y", a["y"]}, {"w", a["w"]}, {"h", a["h"]}};
+    if (a.contains("scale")) req["scale"] = a["scale"];
+    json shot;
+    int rc = c.device_call(GGCMD_SCREENSHOT_ROI, req, &shot);
+    if (rc != 0) return c.fail(rc, c.last_error());
+    if (!shot.is_object() || !shot.contains("data") || !shot["data"].is_string())
+        return c.fail(GGERR_INTERNAL, "malformed screenshot response");
+
+    const std::string hexs = shot["data"].get<std::string>();
+    std::vector<unsigned char> cur;
+    cur.reserve(hexs.size() / 2);
+    for (size_t i = 0; i + 1 < hexs.size(); i += 2) {
+        auto nib = [](char ch) -> int {
+            if (ch >= '0' && ch <= '9') return ch - '0';
+            if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+            if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+            return -1;
+        };
+        int hi = nib(hexs[i]);
+        int lo = nib(hexs[i + 1]);
+        if (hi < 0 || lo < 0) return c.fail(GGERR_INTERNAL, "bad hex from device");
+        cur.push_back((unsigned char)((hi << 4) | lo));
+    }
+
+    int threshold = (a.contains("threshold") && a["threshold"].is_number())
+                        ? a["threshold"].get<int>() : 16;
+    double min_ratio = (a.contains("min_ratio") && a["min_ratio"].is_number())
+                           ? a["min_ratio"].get<double>() : 0.02;
+    bool reset = a.contains("reset") && a["reset"].is_boolean() && a["reset"].get<bool>();
+    std::string key = std::to_string(shot.value("x", 0)) + ":" + std::to_string(shot.value("y", 0)) +
+                      ":" + std::to_string(shot.value("w", 0)) + ":" + std::to_string(shot.value("h", 0));
+
+    std::lock_guard<std::mutex> lk(c.screen_mtx());
+    auto it = c.screen_frames().find(key);
+    /* 尺寸变化（设备自动抬了 scale）就重建基线：拿不同尺寸的两帧逐像素比毫无意义 */
+    bool baseline = reset || it == c.screen_frames().end() || it->second.size() != cur.size();
+    json r;
+    if (baseline) {
+        r["baseline"] = true;
+        r["note"] = "首帧已建立基线。等画面上的数值真的变化后再调一次";
+        c.screen_frames()[key] = std::move(cur);
+    } else {
+        const std::vector<unsigned char>& prev = it->second;
+        size_t diff_px = 0;
+        int maxd = 0;
+        for (size_t i = 0; i < cur.size(); i++) {
+            int d = std::abs((int)cur[i] - (int)prev[i]);
+            if (d >= threshold) diff_px++;
+            if (d > maxd) maxd = d;
+        }
+        double ratio = cur.empty() ? 0.0 : (double)diff_px / (double)cur.size();
+        r["changed"] = ratio >= min_ratio;
+        r["ratio"] = ratio;
+        r["max_delta"] = maxd;
+        r["changed_pixels"] = diff_px;
+        it->second = std::move(cur);   /* 滚动基线：下一次仍与最近一帧比 */
+    }
+    r["sw"] = shot.value("sw", 0);
+    r["sh"] = shot.value("sh", 0);
+    r["scale"] = shot.value("scale", 1);
+    return c.ok(r);
+}
+
+/* 等画面变化 → 自动 refine（gg_screen_watch_refine）。
+ *
+ * 把「人盯着屏幕等数字变」这件事替 AI 做完：轮询 ROI，检测到变化就立刻对当前
+ * 结果集做一次 refine。省掉的不是截图时间，是 AI 自己"截图→比对→再截图"的两三轮推理。
+ *
+ * 为什么同步阻塞在 handler 里：这本来就是"等一件事发生"，异步化只会让 AI 多一次
+ * 轮询问"好了吗"。所以 timeout_ms 有硬上限（60s），避免把 MCP 调用挂死。
+ *
+ * settle_ms 存在的理由：数值滚动动画（金币从 100 涨到 150 会逐帧跳）期间 refine，
+ * 会按中间值判定。默认等 100ms 再 refine；目标用逐帧插值时调大。
+ */
+json tool_screen_watch_refine(Session::CallCtx& c, const json& a) {
+    for (const char* k : {"x", "y", "w", "h"}) {
+        if (!a.contains(k) || !a[k].is_number())
+            return c.fail(GGERR_BAD_REQUEST, std::string(k) + " must be a number");
+    }
+    if (!c.put_op(a.value("op", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid op");
+
+    auto clamp_i = [](int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); };
+    int timeout_ms = clamp_i((a.contains("timeout_ms") && a["timeout_ms"].is_number())
+                                 ? a["timeout_ms"].get<int>() : 5000, 200, 60000);
+    int poll_ms = clamp_i((a.contains("poll_ms") && a["poll_ms"].is_number())
+                              ? a["poll_ms"].get<int>() : 250, 100, 5000);
+    int settle_ms = clamp_i((a.contains("settle_ms") && a["settle_ms"].is_number())
+                                ? a["settle_ms"].get<int>() : 100, 0, 5000);
+    int threshold = (a.contains("threshold") && a["threshold"].is_number())
+                        ? a["threshold"].get<int>() : 16;
+    double min_ratio = (a.contains("min_ratio") && a["min_ratio"].is_number())
+                           ? a["min_ratio"].get<double>() : 0.02;
+    bool reset = a.contains("reset") && a["reset"].is_boolean() && a["reset"].get<bool>();
+
+    json req = {{"x", a["x"]}, {"y", a["y"]}, {"w", a["w"]}, {"h", a["h"]}};
+    if (a.contains("scale")) req["scale"] = a["scale"];
+    const std::string key = std::to_string(req["x"].get<double>()) + ":" +
+                            std::to_string(req["y"].get<double>()) + ":" +
+                            std::to_string(req["w"].get<double>()) + ":" +
+                            std::to_string(req["h"].get<double>());
+
+    auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    const long long t_start = now_ms();
+    const long long t_deadline = t_start + timeout_ms;
+    int polls = 0;
+    double max_ratio = 0.0;
+
+    while (true) {
+        json shot;
+        int rc = c.device_call(GGCMD_SCREENSHOT_ROI, req, &shot);
+        if (rc != 0) return c.fail(rc, c.last_error());
+        if (!shot.is_object() || !shot.contains("data") || !shot["data"].is_string())
+            return c.fail(GGERR_INTERNAL, "malformed screenshot response");
+        const std::string hexs = shot["data"].get<std::string>();
+        std::vector<unsigned char> cur;
+        cur.reserve(hexs.size() / 2);
+        for (size_t i = 0; i + 1 < hexs.size(); i += 2) {
+            auto nib = [](char ch) -> int {
+                if (ch >= '0' && ch <= '9') return ch - '0';
+                if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+                if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+                return -1;
+            };
+            int hi = nib(hexs[i]);
+            int lo = nib(hexs[i + 1]);
+            if (hi < 0 || lo < 0) return c.fail(GGERR_INTERNAL, "bad hex from device");
+            cur.push_back((unsigned char)((hi << 4) | lo));
+        }
+        polls++;
+
+        bool baseline = false;
+        size_t diff_px = 0;
+        int maxd = 0;
+        double ratio = 0.0;
+        {
+            std::lock_guard<std::mutex> lk(c.screen_mtx());
+            auto& frames = c.screen_frames();
+            auto it = frames.find(key);
+            if (reset || it == frames.end() || it->second.size() != cur.size()) {
+                /* reset 只作用于第一帧，避免每轮都重建基线导致永远检测不到变化 */
+                reset = false;
+                frames[key] = cur;
+                baseline = true;
+            } else {
+                const std::vector<unsigned char>& prev = it->second;
+                for (size_t i = 0; i < cur.size(); i++) {
+                    int d = std::abs((int)cur[i] - (int)prev[i]);
+                    if (d >= threshold) diff_px++;
+                    if (d > maxd) maxd = d;
+                }
+                ratio = cur.empty() ? 0.0 : (double)diff_px / (double)cur.size();
+                frames[key] = cur;   /* 滚动基线 */
+            }
+        }
+        if (baseline) {
+            /* 首帧只建基线，不计入轮询次数 */
+            polls--;
+        } else if (ratio >= min_ratio) {
+            if (ratio > max_ratio) max_ratio = ratio;
+            if (settle_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
+            json ref;
+            int rrc = c.device_call(GGCMD_SEARCH_REFINE, c.params, &ref);
+            json r;
+            r["triggered"] = true;
+            r["waited_ms"] = (double)(now_ms() - t_start);
+            r["polls"] = polls;
+            r["ratio"] = ratio;
+            r["max_delta"] = maxd;
+            if (rrc == 0) {
+                r["refine"] = ref;
+            } else {
+                /* 视觉触发成功但 refine 失败（常见：还没搜过）——
+                 * 分开报，不要让调用方以为是"画面没变" */
+                r["refine_error"] = c.last_error();
+            }
+            return c.ok(r);
+        } else if (ratio > max_ratio) {
+            max_ratio = ratio;
+        }
+
+        if (now_ms() >= t_deadline) {
+            json r;
+            r["triggered"] = false;
+            r["timeout"] = true;
+            r["waited_ms"] = (double)(now_ms() - t_start);
+            r["polls"] = polls;
+            r["max_ratio"] = max_ratio;
+            r["note"] = "画面在超时内没有超过阈值的变化；确认 ROI 框住了会变的那块，"
+                        "或调低 min_ratio / 调大 timeout_ms";
+            return c.ok(r);
+        }
+        /* 用剩余时间做 sleep，避免最后一轮跨过 deadline */
+        long long left = t_deadline - now_ms();
+        long long sleep_for = poll_ms < left ? poll_ms : left;
+        if (sleep_for > 0) std::this_thread::sleep_for(std::chrono::milliseconds(sleep_for));
+    }
+}
 json tool_search_range(Session::CallCtx& c, const json& a) {
     if (!a.contains("min") || !a.contains("max"))
         return c.fail(GGERR_BAD_REQUEST, "min and max required");
@@ -376,7 +590,11 @@ json tool_search_range(Session::CallCtx& c, const json& a) {
     if (!c.put_region(a.value("region", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid region");
     return c.send(GGCMD_SEARCH_RANGE);
 }
-json tool_result_count(Session::CallCtx& c, const json&) { return c.send(GGCMD_RESULT_COUNT); }
+json tool_result_count(Session::CallCtx& c, const json& a) {
+    /* summary 只在明确要时才下发：设备端要为此读一遍全量候选（3 万条约 20ms）。 */
+    if (a.contains("summary")) c.params["summary"] = a["summary"];
+    return c.send(GGCMD_RESULT_COUNT);
+}
 json tool_get_results(Session::CallCtx& c, const json& a) {
     c.params["offset"] = a.value("offset", 0);
     c.params["limit"] = a.value("limit", 100);
@@ -933,6 +1151,8 @@ const ToolEntry kTools[] = {
     {"gg_search_refine",    tool_search_refine,    false},
     {"gg_search_undo",      tool_search_undo,      false},
     {"gg_filter_results",   tool_filter_results,   false},
+    {"gg_screen_diff",      tool_screen_diff,      false},
+    {"gg_screen_watch_refine", tool_screen_watch_refine, false},
     {"gg_search_range",     tool_search_range,     false},
     {"gg_result_count",     tool_result_count,     false},
     {"gg_get_results",      tool_get_results,      false},

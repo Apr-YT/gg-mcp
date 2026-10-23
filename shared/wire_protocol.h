@@ -149,6 +149,12 @@ enum gg_cmd {
      * 存在理由：手工"扫描→反汇编→算地址"要来回 5 轮，AI 每次都得重新推理；
      * 固化成一条命令后一次拿到结果。（2026-10-23 UE4 定位实测的痛点） */
     GGCMD_AOB_RESOLVE,
+    /* 截取屏幕指定区域并降采样成灰度：{"p":{"x":..,"y":..,"w":..,"h":..,"scale":..}}
+     * 响应 {"r":{"x","y","w","h","sw","sh","scale","data":"<hex 灰度>"}}。
+     * 为什么不是整屏 PNG：PNG 编码在设备上要 1.08s（单核压缩 1200x2608），raw 只要 0.18s
+     * —— 慢的从来不是截图，是编码。所以走 raw 流 + 只回传 ROI 的灰度。
+     * scale 会自动上调，保证 sw*sh <= GG_SCREEN_MAX_PIXELS，避免回传撑爆单帧（1MiB）。 */
+    GGCMD_SCREENSHOT_ROI,
     GGCMD_MAX
 };
 

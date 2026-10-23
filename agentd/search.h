@@ -131,8 +131,29 @@ int64_t search_refine_undo_exact(gg_results_t *r);
  * 返回剩余数量；-1 无可 refine 的精确结果。 */
 int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op);
 
+/* 结果集内过滤：只保留当前值落在 [vmin, vmax] 的条目（原地压缩，可用 undo 回退）。
+ * has_min/has_max 为 0 表示该端不限；exclude_nan 只对 float/double 生效；
+ * nonzero 排掉值为 0 的条目。读不到的条目会被剔除。
+ * 返回剩余数量；-1 类型未知或内存不足。 */
+int64_t search_filter_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
+                            int has_min, double vmin, int has_max, double vmax,
+                            int exclude_nan, int nonzero);
+
 /* 物化模糊候选 → addrs（<= cap 时）。返回物化数量。 */
 size_t results_materialize(gg_results_t *r);
+
+/* 值分布摘要：把结果集的**当前值**聚合成 top-N（按出现次数降序）。
+ * 用途：AI 拿到上万条候选时先看"是不是绝大多数都是同一个值"，一眼定位异常值。
+ * out 由调用方提供（元素数 >= max_bins），实现内部用 4×max_bins 的桶，满后替换最小项。
+ * *unique_exact 置 1 表示唯一值总数准确（没发生溢出替换），0 表示实际唯一值更多。
+ * 返回写入 out 的 bin 数（<= max_bins）；-1 = 类型未知/内存不足。 */
+typedef struct {
+    uint64_t raw;    /* 值位模式：聚合与比较都用它，float 不会因 double 精度被误合并 */
+    size_t   hits;
+} gg_hist_bin_t;
+
+size_t results_value_histogram(gg_driver_t *d, pid_t pid, gg_results_t *r,
+                               gg_hist_bin_t *out, size_t max_bins, int *unique_exact);
 
 /* 分页取结果（addr + 当前值位模式）。out_count 为实际返回数。 */
 int results_get_page(gg_driver_t *d, pid_t pid, gg_results_t *r,

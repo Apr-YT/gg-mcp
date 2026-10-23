@@ -32,6 +32,7 @@ call "%CC%" -O3 -flto -Wall -I"%ROOT%" -I"%CAPSTONE%\include" -o "%ROOT%\build\a
   "%ROOT%\agentd\cmd_proc.c" ^
   "%ROOT%\agentd\cmd_analyze.c" ^
   "%ROOT%\agentd\cmd_touch.c" ^
+  "%ROOT%\agentd\screen.c" ^
   "%ROOT%\agentd\cmd_status.c" ^
   "%ROOT%\agentd\cmd_shell.c" ^
   "%ROOT%\agentd\cmd_view.c" ^
