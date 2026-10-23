@@ -1105,12 +1105,21 @@ size_t pointer_scan(gg_driver_t *d, pid_t pid, const uint64_t *targets, size_t n
     size_t hits = 0;
     static uint8_t chunk[GG_SEARCH_CHUNK];
 
+    /* pagemap 跳过 absent 页。可写区里绝大多数是 malloc 保留但从未触碰的页，
+     * 逐块 driver_read 会一路读失败、再靠 gg_fault_advance 一页页推进 ——
+     * 2026-10-23 靶场实测：微信（585MB）扫 2852 个目标耗 11.7s，其中 90% 是
+     * 在读不存在的页。搜索路径（X2）早就接了这套跳过，指针扫描当时漏了。
+     * pmfd<0（pagemap 打不开）时 pm_try_skip 恒返回 0，退回原逐页探测。 */
+    int pmfd = pm_open(pid);
+
     for (size_t k = 0; k < nreg && hits < cap; k++) {
         uint64_t addr = regs[k].start;
         uint64_t len = regs[k].end - regs[k].start;
         int fail_streak = 0;
         while (len > 0 && hits < cap) {
             size_t rd = len > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)len;
+            size_t skip = pm_try_skip(pmfd, addr, rd, (size_t)len);
+            if (skip) { addr += skip; len -= skip; continue; }
             ssize_t got = driver_read(d, pid, addr, chunk, rd);
             if (got <= 0) {
                 /* 指针扫描同样做容错推进(见 search_exact 注释: C2 逐页 + X4 大步) */
@@ -1137,6 +1146,7 @@ size_t pointer_scan(gg_driver_t *d, pid_t pid, const uint64_t *targets, size_t n
             addr += rd;
         }
     }
+    if (pmfd >= 0) close(pmfd);
     free(sorted);
     free(regs);
     return hits;
