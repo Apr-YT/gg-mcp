@@ -104,9 +104,9 @@
 
 | 文件 | 内容 |
 |---|---|
-| `docs/audit/BASELINE.md` | 环境、分支、构建与测试基线（阶段 A） |
-| `docs/audit/FINDINGS.md` | 15 条缺陷的完整清单（阶段 B） |
-| `docs/audit/FINAL_REPORT.md` | 本文件（阶段 E） |
+| `docs/archive/audit/BASELINE.md` | 环境、分支、构建与测试基线（阶段 A） |
+| `docs/archive/audit/FINDINGS.md` | 15 条缺陷的完整清单（阶段 B） |
+| `docs/archive/audit/FINAL_REPORT.md` | 本文件（阶段 E） |
 | `tests/unit/check_rwproc_locking.py` | 新增结构护栏（F-01） |
 | `tests/unit/test_session.cpp` | 新增 f1/f2 两组回归（F-05/F-06） |
 | `tests/regression/test_stdio_smoke.py` | 用例隔离改造（F-16） |

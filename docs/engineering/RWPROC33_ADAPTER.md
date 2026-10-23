@@ -709,7 +709,7 @@ python scripts/patch_ko_versions.py build/devmod/all build/ko/apr_dlkm.ko
 
 > **2026-10-22 更新：根因已定位，本节末尾的「下一步排查」不必再做。**
 > 四条原因（物理地址上限用 `__pa(字节数)` 算错、不判 pmd 大页、fast 路径缺 `virt_addr_valid`、
-> 页表遍历在 `mmap_lock` 外）与修复见 `docs/audit/RWPROC33_2026-10-22.md`。
+> 页表遍历在 `mmap_lock` 外）与修复见 `docs/archive/audit/RWPROC33_2026-10-22.md`。
 >
 > **2026-10-22 晚间再更新（真机已验）**：修复版已在设备 `134d2f8` / 6.12.69 上跑起来
 > —— `insmod` RC=0、加载后 6h16m 未重启、dmesg 零 Oops，`[rwfast] phys range invalid`

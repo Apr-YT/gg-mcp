@@ -78,7 +78,7 @@ FATAL: rwproc_attach failed: open /proc/e84523d7b60d5d341a7c4d1861773ecd/e84523d
 
 ## 6. 已有审查文档与本次的关系
 
-`docs/engineering/CODE_REVIEW_2026-10-21.md`(392 行) 已完成一轮审查，已修 §1.1–§1.10。
+`docs/archive/CODE_REVIEW_2026-10-21.md`(392 行) 已完成一轮审查，已修 §1.1–§1.10。
 其中 **§3.3「agentd 侧 strtoull 不检查 endptr」已由 `ee00d6e` 的 dispatch 集中校验门覆盖**（`main.c:1545-1567`），
 本次不重复修复，仅在 F-05 记录该门的残留漏洞（负数字符串）。
 

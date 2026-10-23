@@ -24,4 +24,4 @@
 CI 三 job 重写（v4 + Windows 单测 + NDK 构建）；lint.bat 重写落地；双套模块收敛（simple 版留用，全量版入 archive）；
 `run_tests.bat` 修复（ASCII/链接顺序/编码）并全绿；`build_ndk` 补 driver.c + 删 shell_util.c 幽灵引用；`deploy.bat` 产物对齐。
 
-详细评审见 `docs/engineering/OPTIMIZATION_SUMMARY.md`（08-22 记录，文首有 08-28 更正声明，**该文档部分声明不实，以更正声明为准**）。
+详细评审见 `docs/archive/OPTIMIZATION_SUMMARY.md`（08-22 记录，文首有 08-28 更正声明，**该文档部分声明不实，以更正声明为准**）。

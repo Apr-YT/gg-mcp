@@ -6,7 +6,7 @@
 > 3. 「所有备份文件完整」已失效 —— 相关 `.backup` 文件已删除；`design-system/...` 与 UI 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 > 4. 文中「9 项优化任务全部完成」的判定口径过宽 —— 成立的只有 -O3/-flto 编译优化与 search.c/watch.c 的针对性健壮性修复。
 >
-> 同期同源的更正声明见 `docs/engineering/OPTIMIZATION_SUMMARY.md` 文首。**本文仅作历史留档，不代表当前代码状态，引用前请以代码与 AGENTS.md 为准。**
+> 同期同源的更正声明见 `docs/archive/OPTIMIZATION_SUMMARY.md` 文首。**本文仅作历史留档，不代表当前代码状态，引用前请以代码与 AGENTS.md 为准。**
 
 **审查时间**: 2026-08-27T09:29:12.033Z
 **审查类型**: 维护通道审查
@@ -106,7 +106,7 @@
 
 ## 📝 文档完整性
 
-- ✅ `docs/engineering/OPTIMIZATION_SUMMARY.md` - 优化总结
+- ✅ `docs/archive/OPTIMIZATION_SUMMARY.md` - 优化总结
 - ✅ `design-system/gg-mcp/MASTER.md` - 设计系统
 - ✅ 所有备份文件完整
 - ✅ 代码注释良好
@@ -133,7 +133,7 @@
 | `agentd/atomic.h` | 6.2KB | 头文件 |
 | `agentd/perf.h` | 5.8KB | 头文件 |
 | `agentd/perf.c` | 3.7KB | 实现文件 |
-| `docs/engineering/OPTIMIZATION_SUMMARY.md` | 5.6KB | 文档 |
+| `docs/archive/OPTIMIZATION_SUMMARY.md` | 5.6KB | 文档 |
 | 备份文件 | 4个 | 备份 |
 
 **总计**: ~33KB 新增代码

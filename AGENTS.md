@@ -18,7 +18,8 @@ tests/     unit（posix_stub 可 PC 跑）/ integration / regression 三层
 scripts/   构建（build_pc.bat / build_ndk.bat / build_all.bat）、部署、测试、基准、KO 源码同步
 configs/   gg-ghost.example.json（模板，入库）；gg-ghost.json 由 deploy 生成、**不入库**
 tools/     辅助脚本（cfm_coord_read.py 等）
-docs/      engineering/（工程文档）+ audit/（审计记录）+ reference/ + research/（逆向笔记，仅限本仓），索引见 docs/README.md
+docs/      engineering/（活跃工程文档）+ reference/ + research/（逆向笔记，仅限本仓）
+           + archive/（历史归档，不维护），索引见 docs/README.md
 build/     构建产物与上游克隆（不入库）；build/rwProcMem33 是 KO 工作副本，含未推送提交
 ```
 
@@ -659,7 +660,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    工具数 44 → 46（dispatch 护栏自动校验通过）。
 
 37. **main.c 拆分完成**（2026-10-23）。2049 → **658 行**，方案见
-   `docs/engineering/MAIN_C_SPLIT.md`（含执行记录与三处偏差）。
+   `docs/archive/MAIN_C_SPLIT.md`（含执行记录与三处偏差）。
 
    | 文件 | 内容 |
    |---|---|
@@ -765,7 +766,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 42. **真实目标实践：判据是"同址前后值交集"，不是"搜到新值就行"**（2026-10-23）
 
    第一个真实商业游戏（登山赛车）跑通"定位 → 改值 → 游戏接受 → 落盘 → 重启仍在"，
-   全过程见 `docs/engineering/PRACTICE_HILLCLIMB.md`。
+   全过程见 `docs/archive/PRACTICE_HILLCLIMB.md`。
 
    **分工**：AI 主力（attach / 搜索 / 收敛 / 读写 / 截图 OCR / 验落盘），
    人辅助（在游戏里操作、确认界面）。**AI 不要去模拟游戏内点击**。
@@ -809,7 +810,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 ## 历史
 
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
-旧版工作区指令（apk/ggtool 时代）归档在 `docs/engineering/AGENTD_HISTORY.md`。
+旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
 本文件最后校准：2026-10-23 19:55（HEAD `8bddaf5`）：项目结构补 `ko/` 与 `build/` 说明、
 结构护栏补到 6 道、main.c 拆分收尾（683 行）、清掉已删除的 GG 核心注入链路表述、

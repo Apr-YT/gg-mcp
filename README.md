@@ -72,4 +72,4 @@ scripts\lint.bat
 ```
 
 重构指南:
-详见 `docs/engineering/CODE_REFACTOR.md`
+详见 `docs/archive/CODE_REFACTOR.md`
