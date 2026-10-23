@@ -138,6 +138,9 @@ struct App {
 
     char        write_input[128] = "";
     int         freeze_limit = 200;
+    // 批量写入的二次确认：红色按钮只亮 3 秒，过期自动取消（防止挂着被误点）
+    bool        confirm_write_all = false;
+    double      confirm_t = 0.0;
 
     std::vector<std::string> log;
 
@@ -518,6 +521,41 @@ static void do_copy_addrs() {
     }
     ImGui::SetClipboardText(out.c_str());
     logf("[复制] %zu 个地址已进剪贴板", g_app.hits.size());
+}
+
+// 批量写入：把**当前页**前 N 条改成同一个值。
+//
+// 比批量冻结更危险：冻结还能解冻，值写错了不可逆（尤其对运行中的进程）。
+// 所以做了三层限制：
+//   1. 只作用于当前页已加载的 hits，不是全部结果
+//   2. 上限 min(页内条数, freeze_limit, 500) —— 500 是硬顶，防手滑拖到 5000
+//   3. UI 侧强制二次确认（红色按钮，3 秒不点自动取消）
+// 写完后自动 refresh_results，能直接看到值变没变。
+static void do_write_all() {
+    if (!g_app.sess || g_app.hits.empty()) { logf("[批量写] 没有结果"); return; }
+    uint64_t v = 0;
+    if (!parse_num(g_app.write_input, &v)) {
+        logf("[批量写] 值非法或为空: \"%s\"", g_app.write_input);
+        return;
+    }
+    int n = (int)g_app.hits.size();
+    if (n > g_app.freeze_limit) n = g_app.freeze_limit;
+    if (n > 500) n = 500;
+
+    int okn = 0, short_n = 0;
+    for (int i = 0; i < n; i++) {
+        char a[32];
+        snprintf(a, sizeof(a), "0x%llx", (unsigned long long)g_app.hits[i].addr);
+        ToolResult r = call_tool(g_app.sess, "gg_write",
+                                 json{{"addr", a}, {"type", kTypeNames[g_app.type_idx]},
+                                      {"value", g_app.write_input}});
+        if (r.ok) okn++;
+        else if (r.err.find("short write") != std::string::npos) short_n++;
+    }
+    logf("[批量写] %d/%d 成功（值=%s）%s", okn, n, g_app.write_input,
+         short_n ? "（有只读页 short write，属正常）" : "");
+    refresh_results(g_app.page_limit);
+    ui_publish("write_all");
 }
 
 // ===========================================================================
@@ -1007,6 +1045,29 @@ static void draw_actions() {
     ImGui::BeginDisabled(g_app.hits.empty());
     if (ImGui::Button("批量冻结前 N 条")) do_freeze_all();
     ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(g_app.hits.empty() || !g_app.write_input[0]);
+    if (g_app.confirm_write_all) {
+        int n = (int)g_app.hits.size();
+        if (n > g_app.freeze_limit) n = g_app.freeze_limit;
+        if (n > 500) n = 500;
+        char lbl[64];
+        snprintf(lbl, sizeof(lbl), "确认写 %d 条？", n);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.72f, 0.24f, 0.20f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.32f, 0.26f, 1.0f));
+        if (ImGui::Button(lbl)) { do_write_all(); g_app.confirm_write_all = false; }
+        ImGui::PopStyleColor(2);
+        ImGui::SameLine();
+        if (ImGui::Button("取消##wa")) g_app.confirm_write_all = false;
+        if (ImGui::GetTime() - g_app.confirm_t > 3.0) g_app.confirm_write_all = false;
+    } else {
+        if (ImGui::Button("批量写入前 N 条")) {
+            g_app.confirm_write_all = true;
+            g_app.confirm_t = ImGui::GetTime();
+        }
+    }
+    ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::SetNextItemWidth(90);
     ImGui::DragInt("##fl", &g_app.freeze_limit, 10.0f, 1, 5000, "N=%d");
@@ -1120,9 +1181,13 @@ int main(int argc, char** argv) {
     int  auto_pid = 0;
     int  auto_page = 0;
     bool auto_search = false;
+    bool auto_write_all = false;      // 配合 --write-value；危险操作，见下方注释
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pid") && i + 1 < argc) auto_pid = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--page") && i + 1 < argc) auto_page = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--write-value") && i + 1 < argc)
+            snprintf(g_app.write_input, sizeof(g_app.write_input), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--write-all")) auto_write_all = true;
         else if (!strcmp(argv[i], "--search")) auto_search = true;
         else if (!strcmp(argv[i], "--value") && i + 1 < argc)
             snprintf(g_app.value_input, sizeof(g_app.value_input), "%s", argv[++i]);
@@ -1181,6 +1246,10 @@ int main(int argc, char** argv) {
         g_app.page_offset = (int64_t)auto_page * g_app.page_limit;
         refresh_results(g_app.page_limit);
     }
+    // --write-all：把当前页前 N 条批量改成 --write-value 给的值。
+    // **危险**：绕过界面的二次确认，直接写。只给靶场和脚本用 ——
+    // 对真实进程批量改内存前，先用界面上那个红色确认按钮走一遍更稳。
+    if (auto_write_all && g_app.write_input[0]) do_write_all();
 
     bool done = false;
     while (!done) {

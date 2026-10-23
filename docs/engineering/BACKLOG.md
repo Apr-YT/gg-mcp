@@ -45,6 +45,15 @@ AI 在后台搜完人的表格自动跟上。
 做法：复用 `do_freeze_all` 的循环，换 `gg_write`。
 成本：约 15 行。**风险**：写错值不可逆 —— 必须保留数量上限和二次确认。
 
+**状态：已完成（2026-10-23）。**
+- 只作用于当前页已加载的 hits；上限 `min(页内条数, N 滑条, 500 硬顶)`
+- 界面二次确认：第一次点变红"确认写 N 条？"，3 秒不点自动取消
+- 写完自动 refresh_results，能直接看到值变化
+- CLI `--write-value V --write-all` 绕过确认，只给靶场/脚本用
+- 验证：新增靶子 `build/ko/_dev/wt_target.c`（64 个相同 volatile 全局变量，
+  不自增，只在 SIGUSR1 时改值），实测 66 条命中 → 批量写 999 → 65 成功
+  （1 个只读页 short write）→ 靶子 slot0 变 999、表格 hex 显示 0x3e7
+
 ### 3. `hwbp_proc.c` 是死文件
 
 现状：`hwBreakpointProc_module/Makefile` 只编 `hwBreakpointProc_module.o`，
