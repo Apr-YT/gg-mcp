@@ -132,6 +132,9 @@ struct App {
     std::vector<HitRow> hits;
     int64_t     hit_total = 0;
     int         hit_sel = -1;
+    // 结果分页：几万条时不可能都看，翻页比"调大显示上限再卡一下"实用。
+    // 所有"重新搜索"的入口都要把 page_offset 归零，否则会停在第 N 页看不到新结果。
+    int64_t     page_offset = 0;
 
     char        write_input[128] = "";
     int         freeze_limit = 200;
@@ -297,6 +300,7 @@ static void attach_pid(int pid) {
     g_app.hit_sel = -1;
     g_app.search_mode = "none";     // 换进程后旧搜索条件不再成立
     g_app.total_seen = 0;
+    g_app.page_offset = 0;
     logf("[attach] pid=%d %s", pid, g_app.target_name.c_str());
     ui_publish("attach");
 }
@@ -306,7 +310,16 @@ static void refresh_results(int limit) {
     ToolResult c = call_tool(g_app.sess, "gg_result_count", json::object());
     if (c.ok) g_app.hit_total = c.data.value("count", (int64_t)0);
 
-    ToolResult q = call_tool(g_app.sess, "gg_get_results", json{{"offset", 0}, {"limit", limit}});
+    // 结果数可能变小（refine / undo / 换搜索），offset 要夹回合法范围；
+    // 否则会拉到空页，看起来像"结果没了"。
+    if (limit <= 0) limit = 1000;
+    if (g_app.page_offset >= g_app.hit_total)
+        g_app.page_offset = (g_app.hit_total > 0)
+                          ? ((g_app.hit_total - 1) / limit) * limit : 0;
+    if (g_app.page_offset < 0) g_app.page_offset = 0;
+
+    ToolResult q = call_tool(g_app.sess, "gg_get_results",
+                             json{{"offset", g_app.page_offset}, {"limit", limit}});
     if (!q.ok) { logf("[结果] 拉取失败: %s", q.err.c_str()); return; }
     g_app.hits.clear();
     if (q.data.contains("results") && q.data["results"].is_array()) {
@@ -321,13 +334,15 @@ static void refresh_results(int limit) {
     }
     g_app.hit_sel = -1;
     g_app.total_seen = g_app.hit_total;   // 本地刚刷过，这个数字就是基准
-    logf("[结果] 总数 %lld，本页 %zu 条", (long long)g_app.hit_total, g_app.hits.size());
+    logf("[结果] 总数 %lld，本页 %zu 条（offset=%lld）", (long long)g_app.hit_total,
+         g_app.hits.size(), (long long)g_app.page_offset);
 }
 
 static void do_exact_search() {
     if (!g_app.sess || g_app.target_pid == 0) { logf("[搜索] 先 attach 进程"); return; }
     uint64_t v = 0;
     if (!parse_num(g_app.value_input, &v)) { logf("[搜索] 值非法: %s", g_app.value_input); return; }
+    g_app.page_offset = 0;      // 新结果从第一页看
     ToolResult r = call_tool(g_app.sess, "gg_search",
                              json{{"value", g_app.value_input},
                                   {"type", kTypeNames[g_app.type_idx]},
@@ -343,6 +358,7 @@ static void do_exact_search() {
 
 static void do_range_search() {
     if (!g_app.sess || g_app.target_pid == 0) { logf("[区间] 先 attach 进程"); return; }
+    g_app.page_offset = 0;
     uint64_t lo = 0, hi = 0;
     // 值输入支持 "90-110" 形式
     std::string s = g_app.value_input;
@@ -367,6 +383,7 @@ static void do_range_search() {
 
 static void do_unknown_init() {
     if (!g_app.sess || g_app.target_pid == 0) { logf("[模糊] 先 attach 进程"); return; }
+    g_app.page_offset = 0;
     ToolResult r = call_tool(g_app.sess, "gg_search_unknown_init",
                              json{{"type", kTypeNames[g_app.type_idx]},
                                   {"region", kRegionNames[g_app.region_idx]}});
@@ -403,6 +420,7 @@ static void do_clear() {
     g_app.hits.clear();
     g_app.hit_total = 0;
     g_app.total_seen = 0;
+    g_app.page_offset = 0;
     g_app.search_mode = "none";
     logf("[清空]");
     ui_publish("clear");
@@ -898,6 +916,25 @@ static void draw_search_panel() {
 
 static void draw_results() {
     ImGui::Text("结果 %lld 条", (long long)g_app.hit_total);
+    if (g_app.hit_total > 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("| 第 %lld - %lld", (long long)g_app.page_offset + 1,
+                            (long long)(g_app.page_offset + (int64_t)g_app.hits.size()));
+        ImGui::SameLine();
+        ImGui::BeginDisabled(g_app.page_offset <= 0);
+        if (ImGui::Button("< 上页")) {
+            g_app.page_offset -= g_app.page_limit;
+            refresh_results(g_app.page_limit);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(g_app.page_offset + g_app.page_limit >= g_app.hit_total);
+        if (ImGui::Button("下页 >")) {
+            g_app.page_offset += g_app.page_limit;
+            refresh_results(g_app.page_limit);
+        }
+        ImGui::EndDisabled();
+    }
     ImGui::SameLine();
     ImGui::TextDisabled("（单击选中，双击=按当前类型读值）");
     ImGui::SameLine(ImGui::GetWindowWidth() - 400);
@@ -1081,9 +1118,11 @@ int main(int argc, char** argv) {
     // 命令行：--pid <n>  启动即 attach（省得每次在列表里找）；
     //         带上 --search 时再自动按当前值/类型搜一次，方便脚本化验证。
     int  auto_pid = 0;
+    int  auto_page = 0;
     bool auto_search = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pid") && i + 1 < argc) auto_pid = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--page") && i + 1 < argc) auto_page = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--search")) auto_search = true;
         else if (!strcmp(argv[i], "--value") && i + 1 < argc)
             snprintf(g_app.value_input, sizeof(g_app.value_input), "%s", argv[++i]);
@@ -1135,6 +1174,12 @@ int main(int argc, char** argv) {
     if (auto_pid > 0) {
         attach_pid(auto_pid);
         if (auto_search) do_exact_search();
+    }
+    // --page N：搜索后直接跳到第 N 页（0 = 第一页）。给脚本和截图验证用，
+    // 手点翻页和这条路走的是同一个 refresh_results。
+    if (auto_page > 0 && g_app.hit_total > 0) {
+        g_app.page_offset = (int64_t)auto_page * g_app.page_limit;
+        refresh_results(g_app.page_limit);
     }
 
     bool done = false;
