@@ -13,6 +13,11 @@
  *   - main.c 保留定义与所有权；外迁的 cmd_*.c 只消费。
  *   - check_kernel_only.py / check_dispatch_consistency.py 护栏不受影响
  *     （dispatch 仍在 main.c，本头文件不引入用户态回退路径）。
+ *
+ * 2026-10-23 事件广播系统整体删除（AI 主力模型走 pull 而非 push）：
+ *   - events.c / last_resp.h 已删除
+ *   - 遗留调用统一用下方 4 个空宏覆写
+ *   - 分片注册表（client_supports_frag 等）从 events.c 搬到 wire_io.c
  */
 #ifndef GG_ENGINE_INTERNAL_H
 #define GG_ENGINE_INTERNAL_H
@@ -28,7 +33,12 @@
 #include "search.h"
 #include "watch.h"
 #include "../shared/wire_protocol.h"
-#include "last_resp.h"
+
+/* ---------------- 事件广播遗留覆写（已删除，AI 主力走 pull） ---------------- */
+#define event_results_update()          ((void)0)
+#define event_session_change(s, p, n)   ((void)0)
+#define event_watch_hit(h)              ((void)0)
+#define event_search_update(p, c)       ((void)0)
 
 /* ---------------- 引擎单例（定义在 main.c） ---------------- */
 
@@ -97,11 +107,6 @@ int j_addr_u64(cJSON *node, uint64_t *out);
 #define VT_HINT "type: 1-7 或 byte/word/dword/qword/float/double/bytes"
 #define REGION_HINT "region: 1-3 或 anonymous/writable/all"
 
-/* ---------------- 事件广播（实现在 main.c，cmd_*.c 域内要用） ---------------- */
-
-void event_search_update(long prev_count, long cur_count);
-void event_results_update(void);
-
 /* ---------------- 外迁命令 handler（实现见各自的 cmd_*.c） ---------------- */
 
 /* cmd_search.c — 搜索与结果集 */
@@ -123,7 +128,7 @@ void h_unfreeze(int fd, uint32_t seq, cJSON *p);
 void h_pause_resume(int fd, uint32_t seq, cJSON *p, int pause);
 
 /* cmd_view.c — 内存视图 / 符号解析 / 指针链
- * （这三条本来以“前置声明”形式写在 main.c 的 h_kernel_status 之后，
+ * （这三条本来以"前置声明"形式写在 main.c 的 h_kernel_status 之后，
  *   Phase 2 拆分时随区间一起被删过一次，现在收到这里统一管理。） */
 void h_view_memory(int fd, uint32_t seq, cJSON *p);
 void h_resolve_symbol(int fd, uint32_t seq, cJSON *p);
@@ -137,53 +142,20 @@ void h_shell(int fd, uint32_t seq, cJSON *p);
 
 /* ---------------- 出站帧（实现在 wire_io.c） ---------------- */
 
-/* 出站帧全局串行锁：事件广播与各连接线程共用。定义在 wire_io.c，
- * events.c（Phase 1·② 之后）直接用它往订阅者发事件。 */
+/* 出站帧全局串行锁：多连接线程 + 分片组共用。定义在 wire_io.c。 */
 extern pthread_mutex_t g_send_mtx;
 
 /* 分片发送：客户端没声明 frag 能力时不要调（旧客户端看不懂 GGWF_MORE）。 */
 int  send_frame_fragmented(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
                            const char *payload, size_t plen);
 
-/* ---------------- 响应存档（定义在 main.c） ---------------- */
-
-/* 线程局部：每连接线程独立，快速通道（无锁 handler）与锁内引擎操作不共享
- * 同一 buffer。send_ok/send_err 写，event_cmd_end 读。 */
-extern _Thread_local gg_last_resp_t g_last_resp;
-
-/* 客户端是否声明过能重组分片（AUTH 带 "frag":1）。
- * 定义在 main.c 的事件区（Phase 1·② 之后搬到 events.c）。 */
-int client_supports_frag(int fd);
-
-
-/* ---------------- 事件系统（实现在 events.c） ---------------- */
-
-/* 客户端注册表。register/unregister 由 conn_thread（main.c）调；
- * 其余由 dispatch 和 cmd_status.c 调。 */
+/* ---------------- 分片注册表（定义在 wire_io.c，从 events.c 搬来） ----------------
+ * 客户端是否声明过能重组分片响应（AUTH 带 "frag":1）。
+ * 被 wire_io.c 的 send_ok 超长分支查询。 */
+int  client_supports_frag(int fd);
 void clients_register(int fd);
 void clients_unregister(int fd);
 void clients_set_frag(int fd, int on);
-void clients_set_subscribed(int fd, int on);
-void clients_drop(int fd);
-void client_set_send_timeout(int fd);
-
-/* 事件广播。broadcast_event 内部是"锁内 dup 列表 → 锁外发送"，
- * 改之前先读 events.c 顶部注释。 */
-void broadcast_event(cJSON *ev);
-void event_simple(const char *type, cJSON *data);
-void event_cmd_start(uint16_t cmd, cJSON *p);
-void event_cmd_end(uint16_t cmd, uint64_t t0);
-void event_session_change(const char *state, pid_t pid, const char *name);
-void event_watch_hit(const gg_watch_hit_t *h);
-
-/* cmd 码 -> 命令名（dispatch 日志用） */
-const char *cmd_name(uint16_t cmd);
-
-/* 把一次断点命中转成事件 JSON（h_watch 也会直接用它构造响应） */
-cJSON *watch_hit_json(const gg_watch_hit_t *h);
-
-/* 单调毫秒时钟（事件时间戳 / dispatch 计时） */
-uint64_t now_ms(void);
 
 
 /* ---------------- wire 鉴权（实现在 wire_auth.c） ---------------- */
@@ -237,6 +209,9 @@ void h_module_base(int fd, uint32_t seq, cJSON *p);
 void h_calc_offset(int fd, uint32_t seq, cJSON *p);
 void h_pointer_scan(int fd, uint32_t seq, cJSON *p);
 
+/* watch_hit_json: 把一次断点命中转成 JSON（watch poll 直接用） */
+cJSON *watch_hit_json(const gg_watch_hit_t *h);
+
 
 /* ---------------- 虚拟触摸（实现在 cmd_touch.c） ---------------- */
 
@@ -246,10 +221,10 @@ void h_ghost_swipe(int fd, uint32_t seq, cJSON *p);
 
 /* ---------------- 状态域（实现在 cmd_status.c） ---------------- */
 
-/* h_kernel_status / h_device_info 走无锁快速通道（见 cmd_status.c 顶部说明）。 */
+/* h_kernel_status / h_device_info 走无锁快速通道（见 cmd_status.c 顶部说明）。
+ * SUBSCRIBE/RELAY_EVENT 两个 handler 随事件广播系统一起删除，dispatch 里
+ * 这三个 cmd 现在走统一报错（"command removed: events subsystem..."）。 */
 void h_kernel_status(int fd, uint32_t seq, cJSON *p);
 void h_device_info(int fd, uint32_t seq, cJSON *p);
-void h_subscribe(int fd, uint32_t seq, cJSON *p, int on);
-void h_relay_event(int fd, uint32_t seq, cJSON *p);
 
 #endif /* GG_ENGINE_INTERNAL_H */

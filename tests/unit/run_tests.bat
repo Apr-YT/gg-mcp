@@ -39,16 +39,7 @@ echo === test_net_guard ===
 "%ROOT%\build\pc\test_net_guard.exe"
 if errorlevel 1 ( echo [FAIL] test_net_guard & exit /b 1 )
 
-rem Response archive for cmd_end events: truncation must back off to a UTF-8
-rem character boundary, and the truncated case must be flagged (previously the
-rem 8KB-clipped string was still parsed as whole JSON -> parse failed -> the
-rem "result" field silently vanished from cmd_end).
-gcc -O2 -Wall -Wextra -I"%ROOT%" ^
-  -o "%ROOT%\build\pc\test_last_resp.exe" "%ROOT%\tests\unit\test_last_resp.c"
-if errorlevel 1 ( echo [FAIL] test_last_resp build & exit /b 1 )
-echo === test_last_resp ===
-"%ROOT%\build\pc\test_last_resp.exe"
-if errorlevel 1 ( echo [FAIL] test_last_resp & exit /b 1 )
+
 
 rem MCP/JSON-RPC layer: single message, batch (JSON-RPC 2.0 array), batch with
 rem notifications, empty batch, junk element inside a batch. A batch used to be

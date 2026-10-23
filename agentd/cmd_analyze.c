@@ -167,7 +167,6 @@ void h_watch(int fd, uint32_t seq, cJSON *p) {
         cJSON *arr = cJSON_AddArrayToObject(r, "list");
         for (int i = 0; i < n; i++) {
             cJSON_AddItemToArray(arr, watch_hit_json(&hits[i]));
-            event_watch_hit(&hits[i]);   /* 实时推送给订阅端（手机悬浮窗） */
         }
     } else if (strcmp(op, "inject") == 0) {
         /* 调试: 手动构造命中并走完整 enrich 管道（断点不可用环境验证日志） */
@@ -188,7 +187,6 @@ void h_watch(int fd, uint32_t seq, cJSON *p) {
         watch_inject(&g_watch, &g_eng.drv, g_eng.session_pid, pc, fp, sp, lr, 0, &hit);
         cJSON_AddNumberToObject(r, "hits", 1);
         cJSON_AddItemToObject(r, "hit", watch_hit_json(&hit));
-        event_watch_hit(&hit);
     } else {
         cJSON_Delete(r);
         send_err(fd, GGCMD_WATCH, seq, GGERR_BAD_REQUEST, "op must be set|clear|poll");
@@ -291,5 +289,57 @@ void h_pointer_scan(int fd, uint32_t seq, cJSON *p) {
     cJSON_Delete(r);
 }
 
-/* GG-TOUCH 内核虚拟触摸注入（rwproc33 驱动 CMD_GGTOUCH_TAP/SWIPE）。
- * 不依赖 attach（触摸是系统级输入, 与目标进程无关）。 */
+/* watch_hit_json: 把一次硬件断点命中转成 JSON
+ * 之前同时被 event_watch_hit（事件广播）和 h_watch poll 调用；
+ * 事件系统删除后只剩 poll 一条消费路径，移到 watch 域更合理。 */
+cJSON *watch_hit_json(const gg_watch_hit_t *h) {
+    cJSON *o = cJSON_CreateObject();
+    char tmp[32];
+    cJSON_AddNumberToObject(o, "tid", h->tid);
+    snprintf(tmp, sizeof(tmp), "0x%llx", (unsigned long long)h->pc);
+    cJSON_AddStringToObject(o, "pc", tmp);
+    snprintf(tmp, sizeof(tmp), "0x%llx", (unsigned long long)h->addr);
+    cJSON_AddStringToObject(o, "addr", tmp);
+    char rx[5][32];
+    for (int k = 0; k < 5; k++) snprintf(rx[k], sizeof(rx[k]), "0x%llx",
+        (unsigned long long)(k == 0 ? h->r0 : k == 1 ? h->r1 :
+         k == 2 ? h->r2 : k == 3 ? h->r3 : h->r4));
+    cJSON_AddStringToObject(o, "r0", rx[0]);
+    cJSON_AddStringToObject(o, "r1", rx[1]);
+    cJSON_AddStringToObject(o, "r2", rx[2]);
+    cJSON_AddStringToObject(o, "r3", rx[3]);
+    cJSON_AddStringToObject(o, "r4", rx[4]);
+    snprintf(tmp, sizeof(tmp), "0x%llx", (unsigned long long)h->fp);
+    cJSON_AddStringToObject(o, "fp", tmp);
+    snprintf(tmp, sizeof(tmp), "0x%llx", (unsigned long long)h->sp);
+    cJSON_AddStringToObject(o, "sp", tmp);
+    snprintf(tmp, sizeof(tmp), "0x%llx", (unsigned long long)h->lr);
+    cJSON_AddStringToObject(o, "lr", tmp);
+    if (h->module[0]) {
+        cJSON_AddStringToObject(o, "module", h->module);
+        cJSON_AddStringToObject(o, "module_path", h->module_path);
+        snprintf(tmp, sizeof(tmp), "0x%llx", (unsigned long long)h->module_base);
+        cJSON_AddStringToObject(o, "module_base", tmp);
+        snprintf(tmp, sizeof(tmp), "0x%llx", (unsigned long long)h->module_offset);
+        cJSON_AddStringToObject(o, "module_offset", tmp);
+    }
+    cJSON_AddNumberToObject(o, "stack_depth", h->stack_depth);
+    cJSON *stk = cJSON_AddArrayToObject(o, "stack");
+    for (int s = 0; s < h->stack_depth; s++) {
+        snprintf(tmp, sizeof(tmp), "0x%llx", (unsigned long long)h->stack_pc[s]);
+        cJSON_AddItemToArray(stk, cJSON_CreateString(tmp));
+    }
+    cJSON_AddNumberToObject(o, "disasm_count", h->disasm_count);
+    cJSON *dis = cJSON_AddArrayToObject(o, "disasm");
+    for (int k = 0; k < h->disasm_count; k++) {
+        cJSON *di = cJSON_CreateObject();
+        snprintf(tmp, sizeof(tmp), "0x%llx", (unsigned long long)h->disasm[k].addr);
+        cJSON_AddStringToObject(di, "addr", tmp);
+        cJSON_AddStringToObject(di, "bytes", h->disasm[k].bytes);
+        cJSON_AddStringToObject(di, "mnemonic", h->disasm[k].mnemonic);
+        cJSON_AddStringToObject(di, "op_str", h->disasm[k].op_str);
+        cJSON_AddStringToObject(di, "comment", h->disasm[k].comment);
+        cJSON_AddItemToArray(dis, di);
+    }
+    return o;
+}

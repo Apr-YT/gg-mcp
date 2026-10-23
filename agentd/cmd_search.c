@@ -51,7 +51,6 @@ void h_search(int fd, uint32_t seq, cJSON *p) {
     if (region < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "invalid " REGION_HINT); return; }
     char vbuf[64];
     const char *vs = j_scalar_str(cJSON_GetObjectItem(p, "value"), vbuf, sizeof(vbuf));
-    int64_t prev = (int64_t)g_eng.results.count;
     int64_t found = 0;
 
     if (type == VT_BYTES) {
@@ -74,8 +73,6 @@ void h_search(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddBoolToObject(r, "truncated", found >= (int64_t)g_eng.results.cap);
     send_ok(fd, GGCMD_SEARCH, seq, r);
     cJSON_Delete(r);
-    event_search_update(prev, (long)found);
-    event_results_update();
 }
 
 void h_search_range(int fd, uint32_t seq, cJSON *p) {
@@ -86,7 +83,6 @@ void h_search_range(int fd, uint32_t seq, cJSON *p) {
     if (region < 0) { send_err(fd, GGCMD_SEARCH_RANGE, seq, GGERR_BAD_REQUEST, "invalid " REGION_HINT); return; }
     double vmin = cJSON_GetObjectItem(p, "min") ? cJSON_GetObjectItem(p, "min")->valuedouble : 0;
     double vmax = cJSON_GetObjectItem(p, "max") ? cJSON_GetObjectItem(p, "max")->valuedouble : 0;
-    int64_t prev = (int64_t)g_eng.results.count;
     int64_t found = search_range(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, vmin, vmax, region);
     if (found < 0) { send_err(fd, GGCMD_SEARCH_RANGE, seq, GGERR_INTERNAL, "range search failed"); return; }
     cJSON *r = cJSON_CreateObject();
@@ -94,8 +90,6 @@ void h_search_range(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddBoolToObject(r, "truncated", found >= (int64_t)g_eng.results.cap);
     send_ok(fd, GGCMD_SEARCH_RANGE, seq, r);
     cJSON_Delete(r);
-    event_search_update(prev, (long)found);
-    event_results_update();
 }
 
 void h_unknown_init(int fd, uint32_t seq, cJSON *p) {
@@ -104,14 +98,12 @@ void h_unknown_init(int fd, uint32_t seq, cJSON *p) {
     int region = parse_region(p, REGION_ANONYMOUS);
     if (type < 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_BAD_REQUEST, "invalid " VT_HINT); return; }
     if (region < 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_BAD_REQUEST, "invalid " REGION_HINT); return; }
-    int64_t prev = (int64_t)g_eng.results.count;
     int64_t elems = search_unknown_init(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, region);
     if (elems < 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_INTERNAL, "unknown-init failed"); return; }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "elements", (double)elems);
     send_ok(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, r);
     cJSON_Delete(r);
-    event_search_update(prev, 0);   /* 模糊初始化后具体命中数未知, 广播清 0 */
 }
 
 /* refine 的 op：同时接受字符串与数字。
@@ -153,7 +145,6 @@ void h_refine(int fd, uint32_t seq, cJSON *p) {
                  "invalid op (increased|decreased|unchanged|changed|undo)");
         return;
     }
-    int64_t prev = (int64_t)g_eng.results.count;
     if (op == 0) {
         /* 撤销上一步 refine：模糊搜索回退位图，精确/区间搜索回退地址数组。 */
         int64_t back = search_refine_undo(&g_eng.results);
@@ -168,8 +159,6 @@ void h_refine(int fd, uint32_t seq, cJSON *p) {
         cJSON_AddBoolToObject(r, "undone", 1);
         send_ok(fd, GGCMD_SEARCH_REFINE, seq, r);
         cJSON_Delete(r);
-        event_search_update(prev, (long)back);
-        event_results_update();
         return;
     }
     int64_t rem;
@@ -184,8 +173,6 @@ void h_refine(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddNumberToObject(r, "remaining", (double)rem);
     send_ok(fd, GGCMD_SEARCH_REFINE, seq, r);
     cJSON_Delete(r);
-    event_search_update(prev, (long)rem);
-    event_results_update();
 }
 
 /* 反汇编目标进程内存（Capstone ARM64）: {addr, length} → {insns:[{addr,bytes,mnemonic,op_str,comment}]} */
@@ -253,15 +240,12 @@ void h_get_results(int fd, uint32_t seq, cJSON *p) {
 }
 
 void h_clear_results(int fd, uint32_t seq, cJSON *p) {
-    int64_t prev = (int64_t)g_eng.results.count;
     results_clear(&g_eng.results);
     results_init(&g_eng.results, g_eng.result_cap);
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", 1);
     send_ok(fd, GGCMD_CLEAR_RESULTS, seq, r);
     cJSON_Delete(r);
-    event_search_update(prev, 0);
-    event_results_update();
 }
 
 
@@ -317,6 +301,5 @@ void h_set_results(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddNumberToObject(r, "skipped", (double)skipped);
     send_ok(fd, GGCMD_SET_RESULTS, seq, r);
     cJSON_Delete(r);
-    event_results_update();
 }
 

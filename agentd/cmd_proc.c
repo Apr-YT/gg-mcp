@@ -107,9 +107,7 @@ pid_t resolve_pid(cJSON *p) {
  * reason 只用于 session_change 事件与日志。
  * 调用方持 g_eng.mtx。 */
 void session_drop(const char *reason) {
-    pid_t old_pid = g_eng.session_pid;
-    char old_name[sizeof(g_eng.session_name)];
-    snprintf(old_name, sizeof(old_name), "%s", g_eng.session_name);
+    (void)reason;
     watch_stop(&g_watch);
     freeze_stop(&g_eng.freeze);
     /* 结果集必须一起清：里面存的都是**旧进程**的地址，留着会被当成新会话的
@@ -119,7 +117,6 @@ void session_drop(const char *reason) {
     g_eng.session_pid = -1;
     g_eng.session_starttime = 0;
     g_eng.session_name[0] = 0;
-    if (old_pid > 0) event_session_change(reason, old_pid, old_name);
 }
 
 int session_guard(void) {
@@ -187,7 +184,6 @@ void h_attach(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddNumberToObject(r, "driver_state", g_eng.drv.state);
     send_ok(fd, GGCMD_ATTACH, seq, r);
     cJSON_Delete(r);
-    event_session_change("attached", pid, g_eng.session_name);
 }
 
 void h_detach(int fd, uint32_t seq, cJSON *p) {
@@ -195,9 +191,6 @@ void h_detach(int fd, uint32_t seq, cJSON *p) {
     freeze_stop(&g_eng.freeze);
     results_clear(&g_eng.results);
     maps_cache_invalidate();   /* maps 会话缓存随会话切换失效 */
-    pid_t old_pid = g_eng.session_pid;
-    char old_name[256];
-    snprintf(old_name, sizeof(old_name), "%s", g_eng.session_name);
     g_eng.session_pid = -1;
     g_eng.session_starttime = 0;
     g_eng.session_name[0] = 0;
@@ -205,7 +198,6 @@ void h_detach(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddBoolToObject(r, "ok", 1);
     send_ok(fd, GGCMD_DETACH, seq, r);
     cJSON_Delete(r);
-    event_session_change("detached", old_pid, old_name);
 }
 
 /* 模块名 = path basename（供客户端按 name 索引, 免解析 path） */

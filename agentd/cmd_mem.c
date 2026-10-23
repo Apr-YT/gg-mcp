@@ -150,7 +150,6 @@ void h_freeze(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddNumberToObject(r, "frozen", (double)freeze_count(&g_eng.freeze));
     send_ok(fd, GGCMD_FREEZE, seq, r);
     cJSON_Delete(r);
-    event_results_update();
 }
 
 void h_unfreeze(int fd, uint32_t seq, cJSON *p) {
@@ -161,7 +160,6 @@ void h_unfreeze(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddNumberToObject(r, "frozen", (double)freeze_count(&g_eng.freeze));
     send_ok(fd, GGCMD_UNFREEZE, seq, r);
     cJSON_Delete(r);
-    event_results_update();
 }
 
 void h_pause_resume(int fd, uint32_t seq, cJSON *p, int pause) {

@@ -1,6 +1,6 @@
 /* cmd_status.c — 状态域（自 main.c 拆出，2026-10-23，Phase 2·⑦）
  *
- * 域内命令：GGCMD_KERNEL_STATUS / DEVICE_INFO / SUBSCRIBE / RELAY_EVENT
+ * 域内命令：GGCMD_KERNEL_STATUS / DEVICE_INFO（SUBSCRIBE/RELAY_EVENT 随事件广播删除）
  *
  * **前两个走"快速通道"（无锁执行）**，这是刻意的：大进程搜索期间
  * g_eng.mtx 被长期持有，如果 PING/KERNEL_STATUS 也要排队，探活就会超时，
@@ -100,26 +100,4 @@ void h_device_info(int fd, uint32_t seq, cJSON *p) {
 /* cmd_shell.c（拆分外迁） */
 void h_shell(int fd, uint32_t seq, cJSON *p);
 
-/* ---------------- 分发 ---------------- */
 
-/* 订阅事件流（手机悬浮窗）；未订阅客户端不收 GGWF_EVENT 帧 */
-void h_subscribe(int fd, uint32_t seq, cJSON *p, int on) {
-    clients_set_subscribed(fd, on);
-    cJSON *r = cJSON_CreateObject();
-    cJSON_AddBoolToObject(r, "subscribed", on ? 1 : 0);
-    send_ok(fd, on ? GGCMD_SUBSCRIBE_EVENTS : GGCMD_UNSUBSCRIBE_EVENTS, seq, r);
-    cJSON_Delete(r);
-}
-
-/* PC 端转发事件（标注等 PC 本地动作）：{"p":{"type":"annotate","data":{...}}}
- * → 事件 {"ev":{"type":"annotate","ts":...,"data":{...}}}（仅订阅端可见） */
-void h_relay_event(int fd, uint32_t seq, cJSON *p) {
-    const char *type = cJSON_GetObjectItem(p, "type") ?
-        cJSON_GetObjectItem(p, "type")->valuestring : "relay";
-    cJSON *data = cJSON_GetObjectItem(p, "data");
-    event_simple(type, data ? cJSON_Duplicate(data, 1) : NULL);
-    cJSON *r = cJSON_CreateObject();
-    cJSON_AddBoolToObject(r, "ok", 1);
-    send_ok(fd, GGCMD_RELAY_EVENT, seq, r);
-    cJSON_Delete(r);
-}

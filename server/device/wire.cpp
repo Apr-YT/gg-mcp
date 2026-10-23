@@ -204,13 +204,6 @@ int AgentClient::ensure_connected_locked() {
                 fd_ = -1;
                 return -2;   // -2 = 鉴权失败（区别于连接失败），last_error 已由 auth_locked 设置
             }
-            if (cfg_.print_events) {
-                // 订阅事件流（手机悬浮窗同款）；事件帧由 call() 读取时跳过并打印
-                json req{{GG_J_REQ, json::object()}};
-                std::string pl = req.dump();
-                write_frame(fd_, GGCMD_SUBSCRIBE_EVENTS, ++seq_, pl,
-                            Clock::now() + std::chrono::milliseconds(cfg_.io_timeout_ms));
-            }
             return 0;
         }
         if (attempt == 0) {
