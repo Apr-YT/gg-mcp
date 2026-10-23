@@ -89,22 +89,56 @@ base + 0xA76B028  ->  0x6D20DB7C18   (GUObjectArray)
 
 **到这里，"枚举所有 UObject"已经能做了。**
 
-## 未完成：类名（GName）
+## 未完成：类名（GName）—— 四条路都试过了
 
-有了对象数组只能拿到地址，看不懂"这个对象是什么"。要类名必须解析 FName，
-而 FName 依赖 `FNamePool` 全局对象。
+有了对象数组只能拿到地址，看不懂"这个对象是什么"。要类名必须解析 FName。
 
-现状：
-- `FNamePool::NumSlots` / `DebugDump` 有导出符号，但它们是**成员函数**，
-  `this` 由调用方传入，静态拿不到全局 `GName` 的地址
-- `.dynsym` 里**没有** `GName` 符号（只有 `GEngine`/`GEngineLoop` 等）
+**试过的四条路，全部不成立**（2026-10-23 18:20-18:40）：
 
-下一步可选：
-1. **反汇编 `FNamePool::NumSlots`**，看它读 `this` 的哪些字段 → 得到 FNamePool 布局 →
-   在 `.bss` 里按"8192 块指针数组 + 游标"的特征搜
-2. **走 GEngine**（有导出符号 `0xaaaed68`）→ UEngine → World → 逐层拿对象，
-   用 UObject 的 `Class` 指针 + `FName` 索引反查（仍然需要 FName 池）
-3. 搜字符串 `"None"`（FNameEntry 的第 0 项）→ 反查谁引用它
+| 路线 | 做法 | 结果 |
+|---|---|---|
+| 1. 查符号 | `.dynsym` 里找 `GName` | **没有**。只有 `GEngine` / `GEngineLoop` / `FNamePool::NumSlots` / `DebugDump` |
+| 2. 反汇编成员函数 | `FNamePool::NumSlots`(0x662c5d0) / `DebugDump` | 它们是**成员函数**，`this` 由调用方传入 —— 反汇编只能看布局，拿不到全局 `GName` 的地址 |
+| 3. 扫 `.bss` 找块指针数组 | `.bss` = 0xA81A6C0 + 0x3650F0；找"连续 3+ 个 qword 落在堆范围" | **6303 个候选** —— `.bss` 里到处是堆指针，特征太弱，无法区分 |
+| 4. "None" 反查 | 搜 `4e 6f 6e 65`，期望找到 FName 池第 0 项，再反查谁指向那个块 | 542 命中：**堆里 519 个全是普通字符串**（`None-Match`、`RSA/None/NoPadding`、`e\0None\0OnD`），没有一个符合 `FNameEntryHeader` 布局 |
+
+第 4 条失败的细节：按 UE 4.23+ 的布局
+`{bIsWide:1, LowercaseProbeHash:5, Len:10}`，`"None"` 应该是
+`len=4, wide=0`，即 `(header>>6)&0x3FF == 4`。实测 542 个 "None"
+**没有一个满足**。说明这个游戏要么用非标准 FName 布局，要么池还没按这个形式建起来。
+
+**结论：这个游戏的 GName 不能靠"通用套路"拿，得逐游戏摸。**
+
+## 替代路线（不依赖类名）
+
+拿不到类名不等于做不了事。三条可行的替代：
+
+1. **行为特征识别玩家**：玩家 Pawn 的坐标会随移动变化。
+   模糊搜索 `unknown_init` → 让人走两步 → `refine changed`，收敛出来的就是坐标；
+   再从这个地址反推所属对象（`pointer_scan lookback=对象大小`）。
+   **不需要知道类名，只需要知道"它在动"。**
+
+2. **走 GEngine（有导出符号 `0xaaaed68`）→ UWorld → PlayerArray**
+   UE4 的对象图是版本固定的，偏移要试但结构确定：
+   `UEngine::GameViewport → UWorld → GameState → PlayerArray → Pawn`。
+   比啃 FName 池更直接。
+
+3. **按 Class 聚类 + 数量特征**：玩家类实例数很少（训练场 1 个、对战几十个），
+   而道具/资源类成百上千。78 个类里实例数 ≤ 10 的那批就是候选。
+
+## 今天实际拿到的数据（枪战特训2）
+
+| 项 | 值 |
+|---|---|
+| UObject 总数 | 15003 |
+| 类数量（抽样 323 个） | 78 |
+| 类分布 | 134 / 48 / 33 / 18 / 13 / 4 / 2 / 1×N |
+| Class 指针在数组内 | 78/78（可顺着 Class 追 FName） |
+| 坐标实例 | 对象 `0x6D101ACA00` 的 `+0x28C` = `(-2439.7, -7797.0, 984.3)` |
+| 属性结构 | 备弹 `+0x14`、上限 `+0x50`、`{id,type,value,-1}` 属性槽 |
+
+**偏移按类不同**（抽样 80 个对象扫 `+0x28..+0x400`，每个偏移都只出现 1 次），
+不存在"一个全局坐标偏移通吃"这种事。
 
 ## 工具侧产出（本轮）
 
