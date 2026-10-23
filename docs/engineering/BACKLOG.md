@@ -95,6 +95,17 @@ AI 在后台搜完人的表格自动跟上。
 都有工具，UI 没接。找基址+偏移是仅次于搜索的高频操作。
 成本：每个约 40 行（面板 + 结果显示）。
 
+**状态：已完成（2026-10-23）。** 两个独立浮窗：
+- 模块列表 (F2)：`gg_module_list`，900+ 条带过滤，双击填 base；
+  `module_dirty` 标记控制重拉（不能用"列表空就拉"，失败会每帧重试）
+- 指针 / 符号 (F3)：一步按钮分别接 `gg_resolve_symbol` / `gg_pointer_chain` /
+  `gg_pointer_scan`；扫描完自动把第一个 container 填进地址框
+- CLI：`--modules` / `--pointer` / `--ptr-addr 0x...` / `--analyze`
+- 修了两处误导性文案：`mapped` 是"指针指向的目标"，不是当前地址；
+  匿名映射的 `module:""` 显示成"不在任何模块内"
+- `gg_pointer_scan` 的字段名以实现为准（`hits:[{container,target,ptype}]`），
+  UI 里最初猜的 `pointers/results` 是错的
+
 ### 7. 驱动读路径合并连续物理页
 
 现状：`fast_read_linear` 每页一次 `kmap_local_page` + `memcpy`，实测 559ns/页

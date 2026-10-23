@@ -110,6 +110,13 @@ struct HitRow {
     std::string value_hex;
 };
 
+struct ModuleRow {
+    uint64_t    base = 0;
+    uint64_t    size = 0;
+    std::string name;
+    std::string path;
+};
+
 struct App {
     gg::Session* sess = nullptr;
 
@@ -143,6 +150,20 @@ struct App {
     double      confirm_t = 0.0;
 
     std::vector<std::string> log;
+
+    // ---- 模块 / 指针分析（独立窗口，不挤主布局）----
+    // 模块列表是 900+ 条（Android 上 boot.oat/framework 一大堆），必须带过滤框。
+    bool        show_modules = false;
+    bool        show_pointer = false;
+    std::vector<ModuleRow> modules;
+    char        module_filter[64] = "";
+    int         module_sel = -1;
+    // attach 换了目标进程后模块列表就过期了。用脏标记而不是"列表为空就拉"，
+    // 否则拉失败会每帧重试一次。
+    bool        module_dirty = true;
+    char        ptr_addr[64] = "";
+    int         ptr_depth = 8;
+    std::vector<std::string> analysis_out;   // 指针链 / 符号解析的多行结果
 
     // ---- 与 AI 联动（协议见 server/shared_ctx.h）----
     // search_mode 是给人看的语义标签：手动搜索时 AI 只有知道"这是精确搜索还是
@@ -304,6 +325,9 @@ static void attach_pid(int pid) {
     g_app.search_mode = "none";     // 换进程后旧搜索条件不再成立
     g_app.total_seen = 0;
     g_app.page_offset = 0;
+    g_app.modules.clear();          // 模块列表属于上一个进程，必须重拉
+    g_app.module_dirty = true;
+    g_app.analysis_out.clear();
     logf("[attach] pid=%d %s", pid, g_app.target_name.c_str());
     ui_publish("attach");
 }
@@ -557,6 +581,279 @@ static void do_write_all() {
     refresh_results(g_app.page_limit);
     ui_publish("write_all");
 }
+
+// ===========================================================================
+// 模块与指针分析
+//
+// 这两块原本只能通过 MCP 工具做（要拼 JSON 看返回），但"搜到值 -> 找谁指向它
+// -> 追到模块基址"是最高频的一条链，放在 UI 里能省掉大量手工。
+// 做成独立窗口而不是塞进主布局：主布局已经排满，这两个面板也是"需要时才开"。
+// ===========================================================================
+namespace {
+
+static uint64_t json_num(const json& v) {
+    if (v.is_string()) {
+        const std::string t = v.get<std::string>();
+        return strtoull(t.c_str(), nullptr, 0);
+    }
+    if (v.is_number_unsigned()) return v.get<uint64_t>();
+    if (v.is_number_integer())  return (uint64_t)v.get<int64_t>();
+    return 0;
+}
+
+static void refresh_modules() {
+    if (!g_app.sess || !g_app.target_pid) { logf("[模块] 先 attach 进程"); return; }
+    ToolResult r = call_tool(g_app.sess, "gg_module_list", json::object());
+    if (!r.ok) { logf("[模块] 失败: %s", r.err.c_str()); return; }
+    g_app.modules.clear();
+    if (r.data.contains("modules") && r.data["modules"].is_array()) {
+        for (const auto& m : r.data["modules"]) {
+            ModuleRow x;
+            x.base = json_num(m.value("base", json()));
+            x.size = json_num(m.value("size", json()));
+            x.name = m.value("name", std::string());
+            x.path = m.value("path", std::string());
+            if (x.name.empty()) {
+                const size_t slash = x.path.find_last_of('/');
+                x.name = (slash == std::string::npos) ? x.path : x.path.substr(slash + 1);
+            }
+            g_app.modules.push_back(x);
+        }
+    }
+    g_app.module_sel = -1;
+    logf("[模块] %zu 个", g_app.modules.size());
+}
+
+/* 追加一行分析结果。只留最近 400 行：指针扫描一次能出几千条，
+ * 全存着会一直涨，而人真正会看完的不会超过一屏。 */
+static void push_analysis(const std::string& line) {
+    g_app.analysis_out.push_back(line);
+    if (g_app.analysis_out.size() > 400)
+        g_app.analysis_out.erase(g_app.analysis_out.begin(),
+                                 g_app.analysis_out.begin() + 100);
+}
+
+static void do_resolve_symbol() {
+    if (!g_app.sess) return;
+    if (!g_app.ptr_addr[0]) { logf("[解析] 先填地址"); return; }
+    ToolResult r = call_tool(g_app.sess, "gg_resolve_symbol", json{{"addr", g_app.ptr_addr}});
+    if (!r.ok) { logf("[解析] 失败: %s", r.err.c_str()); return; }
+    g_app.analysis_out.clear();
+    const bool mapped = r.data.value("mapped", false);
+    const std::string mod_raw = r.data.value("module", std::string());
+    const std::string mod = !mapped ? "（该地址未映射）"
+                          : (mod_raw.empty() ? "（不在任何模块内，匿名映射）" : mod_raw);
+    const std::string off = r.data.value("module_offset", std::string(""));
+    const std::string off_s = off.empty() ? "-" : off;
+    const std::string mb  = r.data.value("module_base", std::string("?"));
+    const std::string sym = r.data.value("symbol", std::string(""));
+    char line[512];
+    snprintf(line, sizeof(line), "%s\n  模块: %s (base %s)  偏移: %s\n  权限: %s\n  区域: %s%s%s",
+             g_app.ptr_addr, mod.c_str(), mb.c_str(), off_s.c_str(),
+             r.data.value("perms", std::string("?")).c_str(),
+             r.data.value("region", std::string("?")).c_str(),
+             sym.empty() ? "" : "\n  符号: ", sym.c_str());
+    push_analysis(line);
+    logf("[解析] %s -> %s%s%s", g_app.ptr_addr, mod.c_str(),
+         off.empty() ? "" : " +", off.c_str());
+}
+
+static void do_pointer_chain() {
+    if (!g_app.sess) return;
+    if (!g_app.ptr_addr[0]) { logf("[指针链] 先填地址"); return; }
+    int depth = g_app.ptr_depth;
+    if (depth < 1) depth = 1;
+    if (depth > 32) depth = 32;
+    ToolResult r = call_tool(g_app.sess, "gg_pointer_chain",
+                             json{{"addr", g_app.ptr_addr}, {"max_depth", depth}});
+    if (!r.ok) { logf("[指针链] 失败: %s", r.err.c_str()); return; }
+    g_app.analysis_out.clear();
+    if (r.data.contains("levels") && r.data["levels"].is_array()) {
+        for (const auto& lv : r.data["levels"]) {
+            char line[512];
+            /* mapped 说的是【解引用出来的指针指向哪里】，不是这一级的地址本身。
+             * 之前写成 "(未映射) <addr>" 会让人以为起点没映射 —— 现场就误解过一次：
+             * 0x2d54fc8 存的值是 100，解引用到 0x64，当然不在映射里，链正常结束。 */
+            const std::string mo = lv.value("module_offset", std::string());
+            const bool mapped = lv.value("mapped", false);
+            std::string tail;
+            if (!mapped) {
+                tail = "  -> 目标未映射（该处存的不是指针，链到此为止）";
+            } else {
+                const std::string mod = lv.value("module", std::string());
+                if (!mod.empty()) tail = "  -> " + mod + (mo.empty() ? "" : (" +" + mo));
+                else tail = "  -> " + lv.value("region", std::string("(anonymous)"));
+            }
+            if (lv.value("at_base", false)) tail += "   <- 区域起点（可能是基址）";
+            snprintf(line, sizeof(line), "[%d] %s  ptr=%s%s",
+                     lv.value("depth", 0),
+                     lv.value("addr", std::string("?")).c_str(),
+                     lv.value("pointer", std::string("?")).c_str(),
+                     tail.c_str());
+            push_analysis(line);
+        }
+    }
+    /* 停止原因是新手最容易误解的地方：
+     *   unmapped     —— 这一级读到的值不是指针（最常见，不是错误）
+     *   null_pointer —— 读到 0
+     *   read_failed  —— 该地址读不出来
+     *   cycle        —— 指针自指
+     *   max_depth    —— 到达深度上限，链可能还有后续
+     * 只写英文原词会被当成失败，所以附一句中文。 */
+    const std::string stop = r.data.value("stopped", std::string("?"));
+    const char* stop_zh =
+        stop == "unmapped"     ? "该处存的不是指针（正常结束，不是错误）" :
+        stop == "null_pointer" ? "读到空指针" :
+        stop == "read_failed"  ? "该地址读不出 8 字节（可能已释放/无权限）" :
+        stop == "cycle"        ? "指针自指，已断开" :
+        stop == "max_depth"    ? "到达深度上限，链可能还没走完（调大深度再试）" :
+        stop == "ok"           ? "正常走完" : "未知";
+    logf("[指针链] %s 深度 %d，结束: %s（%s）", g_app.ptr_addr, depth,
+         stop.c_str(), stop_zh);
+}
+
+/* 指针扫描：在可写区找"值等于当前某条结果地址"的指针。依赖搜索结果，
+ * 没结果时直接提示 —— 静默返回空数组会让人以为"没有指针指向"。 */
+static void do_pointer_scan() {
+    if (!g_app.sess) return;
+    if (g_app.hit_total <= 0) {
+        logf("[指针扫描] 先搜出结果再扫（扫的是当前结果集的地址）");
+        return;
+    }
+    ToolResult r = call_tool(g_app.sess, "gg_pointer_scan",
+                             json{{"type", "qword"}, {"cap", 5000}});
+    if (!r.ok) { logf("[指针扫描] 失败: %s", r.err.c_str()); return; }
+    g_app.analysis_out.clear();
+    /* 字段名以 agentd/main.c::h_pointer_scan 为准：
+     *   {hits: [{container, target, ptype}]}
+     * container = 存指针的地址，target = 它指向的目标（当前结果集里的某个地址）。
+     * 之前这里猜成 pointers/results，是错的 —— 猜字段名不如看实现。 */
+    json arr = r.data.contains("hits") ? r.data["hits"] : json::array();
+    int n = 0;
+    if (arr.is_array()) {
+        for (const auto& p : arr) {
+            char line[256];
+            snprintf(line, sizeof(line), "%s   ->   %s",
+                     p.value("container", std::string("?")).c_str(),
+                     p.value("target", std::string("?")).c_str());
+            push_analysis(line);
+            if (++n >= 200) {
+                push_analysis("...（只显示前 200 条；cap 默认 5000）");
+                break;
+            }
+        }
+    }
+    logf("[指针扫描] %d 个容器指向当前结果集（双击容器地址可追链）", n);
+    /* 顺手把第一个容器填进地址框：扫描的目的就是要追它，省一次手抄 */
+    if (n > 0 && arr[0].is_object()) {
+        snprintf(g_app.ptr_addr, sizeof(g_app.ptr_addr), "%s",
+                 arr[0].value("container", std::string("")).c_str());
+    }
+}
+
+static void draw_modules_window() {
+    if (!g_app.show_modules) return;
+    ImGui::SetNextWindowSize(ImVec2(620, 440), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(360, 140), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("模块列表 (F2)", &g_app.show_modules)) { ImGui::End(); return; }
+
+    if (g_app.module_dirty && g_app.target_pid > 0 && g_app.connected) {
+        g_app.module_dirty = false;
+        refresh_modules();
+    }
+    if (ImGui::Button("刷新")) refresh_modules();
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(180);
+    ImGui::InputTextWithHint("##mf", "过滤（名字/路径）", g_app.module_filter,
+                             sizeof(g_app.module_filter));
+    ImGui::SameLine();
+    ImGui::TextDisabled("共 %zu 个 · 双击行=填进指针地址框", g_app.modules.size());
+
+    if (ImGui::BeginTable("mods", 3,
+                          ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders |
+                          ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable)) {
+        ImGui::TableSetupColumn("基址", ImGuiTableColumnFlags_WidthFixed, 120);
+        ImGui::TableSetupColumn("大小", ImGuiTableColumnFlags_WidthFixed, 90);
+        ImGui::TableSetupColumn("模块 / 路径", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+
+        const std::string flt = g_app.module_filter;
+        for (int i = 0; i < (int)g_app.modules.size(); i++) {
+            const ModuleRow& m = g_app.modules[i];
+            if (!flt.empty() && m.name.find(flt) == std::string::npos &&
+                m.path.find(flt) == std::string::npos) continue;
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            char b[32];
+            snprintf(b, sizeof(b), "0x%llx", (unsigned long long)m.base);
+            ImGui::PushID(i);
+            if (ImGui::Selectable(b, g_app.module_sel == i,
+                                  ImGuiSelectableFlags_SpanAllColumns |
+                                  ImGuiSelectableFlags_AllowDoubleClick)) {
+                g_app.module_sel = i;
+                if (ImGui::IsMouseDoubleClicked(0)) {
+                    snprintf(g_app.ptr_addr, sizeof(g_app.ptr_addr), "0x%llx",
+                             (unsigned long long)m.base);
+                    logf("[模块] 选中 %s base=0x%llx", m.name.c_str(),
+                         (unsigned long long)m.base);
+                }
+            }
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextDisabled("%llu KB", (unsigned long long)(m.size / 1024));
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextUnformatted(m.name.c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", m.path.c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::End();
+}
+
+static void draw_pointer_window() {
+    if (!g_app.show_pointer) return;
+    ImGui::SetNextWindowSize(ImVec2(680, 460), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(420, 180), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("指针 / 符号 (F3)", &g_app.show_pointer)) { ImGui::End(); return; }
+
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputTextWithHint("##pa", "地址 0x...", g_app.ptr_addr, sizeof(g_app.ptr_addr));
+    ImGui::SameLine();
+    /* 一键取当前选中行 —— 最常见的一步：搜到值，想知道谁指向它 */
+    ImGui::BeginDisabled(g_app.hit_sel < 0 || g_app.hit_sel >= (int)g_app.hits.size());
+    if (ImGui::Button("取选中行")) {
+        snprintf(g_app.ptr_addr, sizeof(g_app.ptr_addr), "0x%llx",
+                 (unsigned long long)g_app.hits[g_app.hit_sel].addr);
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(90);
+    ImGui::DragInt("深度", &g_app.ptr_depth, 1.0f, 1, 32);
+
+    if (ImGui::Button("解析符号")) do_resolve_symbol();
+    ImGui::SameLine();
+    if (ImGui::Button("追踪指针链")) do_pointer_chain();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(g_app.hit_total <= 0);
+    if (ImGui::Button("扫描谁指向结果集")) do_pointer_scan();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("清空")) g_app.analysis_out.clear();
+
+    ImGui::TextDisabled("扫描依赖当前搜索结果（%lld 条），先搜再扫。"
+                        "结果格式：容器地址 -> 它指向的结果地址。",
+                        (long long)g_app.hit_total);
+    ImGui::Separator();
+
+    ImGui::BeginChild("anout", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    for (const auto& line : g_app.analysis_out)
+        ImGui::TextUnformatted(line.c_str());
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+}  // namespace
 
 // ===========================================================================
 // 与 AI 的联动
@@ -860,7 +1157,11 @@ static void draw_top_bar() {
         ImGui::TextDisabled("(已响应 %d 条)", g_app.ai_cmds_done);
     }
 
-    ImGui::SameLine(ImGui::GetWindowWidth() - 130);
+    ImGui::SameLine(ImGui::GetWindowWidth() - 250);
+    if (ImGui::Button("模块")) g_app.show_modules = true;
+    ImGui::SameLine();
+    if (ImGui::Button("指针")) g_app.show_pointer = true;
+    ImGui::SameLine();
     if (ImGui::Button("刷新进程列表")) refresh_procs();
     ImGui::SameLine();
     ImGui::TextDisabled("F1");
@@ -1081,6 +1382,10 @@ static void draw_log(float height) {
 }
 
 static void draw_ui() {
+    // 快捷键：窗口标题里写了 F2/F3，这里必须真的响应，否则是虚假承诺。
+    if (ImGui::IsKeyPressed(ImGuiKey_F2)) g_app.show_modules = !g_app.show_modules;
+    if (ImGui::IsKeyPressed(ImGuiKey_F3)) g_app.show_pointer = !g_app.show_pointer;
+
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -1115,6 +1420,11 @@ static void draw_ui() {
     draw_log(log_h);
 
     ImGui::End();
+
+    /* 独立窗口要画在 root 之后：root 是 NoBringToFrontOnFocus 的全屏窗口，
+     * 先画它再画这两个，它们才会浮在上面。 */
+    draw_modules_window();
+    draw_pointer_window();
 }
 
 // ===========================================================================
@@ -1182,12 +1492,19 @@ int main(int argc, char** argv) {
     int  auto_page = 0;
     bool auto_search = false;
     bool auto_write_all = false;      // 配合 --write-value；危险操作，见下方注释
+    bool auto_analyze = false;        // --analyze：打开的指针窗口跑一次分析
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pid") && i + 1 < argc) auto_pid = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--page") && i + 1 < argc) auto_page = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--write-value") && i + 1 < argc)
             snprintf(g_app.write_input, sizeof(g_app.write_input), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--write-all")) auto_write_all = true;
+        else if (!strcmp(argv[i], "--modules")) g_app.show_modules = true;
+        else if (!strcmp(argv[i], "--pointer")) g_app.show_pointer = true;
+        else if (!strcmp(argv[i], "--ptr-addr") && i + 1 < argc) {
+            snprintf(g_app.ptr_addr, sizeof(g_app.ptr_addr), "%s", argv[++i]);
+            g_app.show_pointer = true;
+        } else if (!strcmp(argv[i], "--analyze")) auto_analyze = true;
         else if (!strcmp(argv[i], "--search")) auto_search = true;
         else if (!strcmp(argv[i], "--value") && i + 1 < argc)
             snprintf(g_app.value_input, sizeof(g_app.value_input), "%s", argv[++i]);
@@ -1250,6 +1567,18 @@ int main(int argc, char** argv) {
     // **危险**：绕过界面的二次确认，直接写。只给靶场和脚本用 ——
     // 对真实进程批量改内存前，先用界面上那个红色确认按钮走一遍更稳。
     if (auto_write_all && g_app.write_input[0]) do_write_all();
+
+    /* --analyze：给了 --ptr-addr 就解析符号 + 追指针链；没给就退化成"扫谁指向
+     * 当前结果集"。两者都没有时只开窗口不动作，不做无意义的空调用。 */
+    if (auto_analyze) {
+        g_app.show_pointer = true;
+        if (g_app.ptr_addr[0]) {
+            do_resolve_symbol();
+            do_pointer_chain();
+        } else if (g_app.hit_total > 0) {
+            do_pointer_scan();
+        }
+    }
 
     bool done = false;
     while (!done) {
