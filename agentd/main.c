@@ -346,6 +346,8 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
     case GGCMD_SET_RESULTS:        h_set_results(fd, seq, p); break;
     case GGCMD_FREEZE:             h_freeze(fd, seq, p); break;
     case GGCMD_UNFREEZE:           h_unfreeze(fd, seq, p); break;
+    case GGCMD_FREEZE_RESULTS:     h_freeze_results(fd, seq, p); break;
+    case GGCMD_FILTER_RESULTS:     h_filter_results(fd, seq, p); break;
     case GGCMD_MODULE_BASE:        h_module_base(fd, seq, p); break;
     case GGCMD_CALC_OFFSET:        h_calc_offset(fd, seq, p); break;
     case GGCMD_POINTER_SCAN:       h_pointer_scan(fd, seq, p); break;
@@ -364,6 +366,7 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
     case GGCMD_DEVICE_INFO:        h_device_info(fd, seq, p); break;
     case GGCMD_WATCH:              h_watch(fd, seq, p); break;
     case GGCMD_DISASSEMBLE:        h_disassemble(fd, seq, p); break;
+    case GGCMD_AOB_RESOLVE:        h_aob_resolve(fd, seq, p); break;
     case GGCMD_VIEW_MEMORY:        h_view_memory(fd, seq, p); break;
     case GGCMD_RESOLVE_SYMBOL:     h_resolve_symbol(fd, seq, p); break;
     case GGCMD_POINTER_CHAIN:      h_pointer_chain(fd, seq, p); break;

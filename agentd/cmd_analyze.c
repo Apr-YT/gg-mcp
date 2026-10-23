@@ -390,3 +390,192 @@ cJSON *watch_hit_json(const gg_watch_hit_t *h) {
     }
     return o;
 }
+
+/* ---------- 签名 → 全局变量地址（GGCMD_AOB_RESOLVE） ----------
+ *
+ * 为什么把三步合成一条命令：手工做一遍要来回 5 轮 ——
+ *   1) gg_search 扫签名    2) 记下命中地址
+ *   3) gg_disassemble 读命中点之前的字节   4) 人肉看 ADRP/ADD
+ *   5) 心算 page+imm，再读那个地址验证
+ * AI 每轮都要重新组织上下文，实测一次定位要好几分钟。
+ * 合成后一次调用拿到"命中地址 + 指令证据 + 目标地址 + 解引用值"。
+ *
+ * 只解两种真实存在的寻址套路（编译器访问全局变量就这两条）：
+ *   ADRP xN, page ; ADD xM, xN, #off    → target = page + off   （取址）
+ *   ADRP xN, page ; LDR xM, [xN, #off]  → target = page + off   （取指针内容）
+ * 后者 is_load=1，deref 时把 target 处的 8 字节读出来 —— 那才是全局变量本身。
+ */
+
+/* 把 Capstone 的 ops 串按逗号切开（方括号内的逗号不算分隔符） */
+static int split_operands(const char *ops, char parts[][48], int max) {
+    int n = 0, depth = 0;
+    size_t len = 0;
+    if (!ops || max <= 0) return 0;
+    memset(parts[0], 0, 48);
+    for (const char *s = ops; *s && n < max; s++) {
+        if (*s == '[') depth++;
+        else if (*s == ']') depth--;
+        if (*s == ',' && depth == 0) {
+            parts[n][len] = 0;
+            n++; len = 0;
+            if (n < max) memset(parts[n], 0, 48);
+            while (s[1] == ' ') s++;
+            continue;
+        }
+        if (*s != ' ' && len < 47) parts[n][len++] = *s;
+    }
+    if (len && n < max) { parts[n][len] = 0; n++; }
+    return n;
+}
+
+/* "x8" -> 8；不是 x 寄存器返回 -1 */
+static int reg_num(const char *s) {
+    if (!s || s[0] != 'x') return -1;
+    int v = (int)strtol(s + 1, NULL, 10);
+    return (v >= 0 && v <= 30) ? v : -1;
+}
+
+/* "#0x940" / "#2368" -> 值 */
+static int parse_imm(const char *s, uint64_t *out) {
+    if (!s || s[0] != '#') return 0;
+    *out = strtoull(s + 1, NULL, 0);
+    return 1;
+}
+
+/* "[x0, #0x28]" -> (reg=0, disp=0x28)；也接受 "[x0]" 形态 */
+static int parse_mem_operand(const char *s, int *reg, uint64_t *disp) {
+    if (!s || s[0] != '[') return 0;
+    s++;
+    if (s[0] != 'x') return 0;
+    char *endp = NULL;
+    long r = strtol(s + 1, &endp, 10);
+    if (!endp || r < 0 || r > 30) return 0;
+    *reg = (int)r;
+    s = endp;
+    *disp = 0;
+    while (*s == ' ' || *s == ',') s++;
+    if (*s == '#') *disp = strtoull(s + 1, NULL, 0);
+    return 1;
+}
+
+void h_aob_resolve(int fd, uint32_t seq, cJSON *p) {
+    if (g_eng.session_pid <= 0) {
+        send_err(fd, GGCMD_AOB_RESOLVE, seq, GGERR_NO_SESSION, "no session");
+        return;
+    }
+    const char *ps = cJSON_GetObjectItem(p, "pattern") ?
+        cJSON_GetObjectItem(p, "pattern")->valuestring : NULL;
+    if (!ps) { send_err(fd, GGCMD_AOB_RESOLVE, seq, GGERR_BAD_REQUEST, "pattern required"); return; }
+
+    int back = cJSON_GetObjectItem(p, "back") ? cJSON_GetObjectItem(p, "back")->valueint : 32;
+    int max_hits = cJSON_GetObjectItem(p, "count") ? cJSON_GetObjectItem(p, "count")->valueint : 8;
+    int do_deref = 1;
+    cJSON *jd = cJSON_GetObjectItem(p, "deref");
+    if (jd) do_deref = cJSON_IsBool(jd) ? (cJSON_IsTrue(jd) ? 1 : 0) : (jd->valueint != 0);
+    if (back < 0) back = 0;
+    if (back > 256) back = 256;
+    if (max_hits <= 0) max_hits = 1;
+    if (max_hits > 32) max_hits = 32;
+
+    uint8_t pat[256], mask[256];
+    int plen = parse_hex_pattern_masked(ps, pat, mask, sizeof(pat));
+    if (plen <= 0) { send_err(fd, GGCMD_AOB_RESOLVE, seq, GGERR_BAD_REQUEST, "bad pattern"); return; }
+
+    gg_results_t *r = &g_eng.results;
+    int64_t found = search_aob(&g_eng.drv, g_eng.session_pid, r, pat, mask, (size_t)plen, REGION_WRITABLE);
+    if (found < 0) { send_err(fd, GGCMD_AOB_RESOLVE, seq, GGERR_INTERNAL, "aob search failed"); return; }
+    /* 签名通常在代码段（r-x），可写区扫不到 —— 这时必须扫 REGION_ALL。
+     * 注意不能用 REGION_ANONYMOUS：那只是匿名映射（堆/栈），不含 .so 的代码段。 */
+    if (found == 0) {
+        found = search_aob(&g_eng.drv, g_eng.session_pid, r, pat, mask, (size_t)plen, REGION_ALL);
+        if (found < 0) found = 0;
+    }
+
+    cJSON *out = cJSON_CreateObject();
+    cJSON *hits = cJSON_AddArrayToObject(out, "hits");
+    cJSON_AddNumberToObject(out, "scanned_hits", (double)found);
+
+    size_t take = (size_t)found < (size_t)max_hits ? (size_t)found : (size_t)max_hits;
+    for (size_t h = 0; h < take; h++) {
+        uint64_t hit = r->addrs[h];
+        uint64_t start = (hit >= (uint64_t)back) ? hit - (uint64_t)back : hit;
+        start &= ~(uint64_t)3;                  /* adrp 必须落在 4 字节边界 */
+        size_t want = (size_t)back + 64;
+        uint8_t *code = malloc(want);
+        if (!code) continue;
+        ssize_t got = driver_read(&g_eng.drv, g_eng.session_pid, start, code, want);
+        if (got <= 0) { free(code); continue; }
+
+        char mnem[64][64], ops[64][128], byt[64][32], cmt[64][64];
+        int n = disasm_a64(code, (size_t)got, start, mnem, ops, byt, cmt, 64);
+        free(code);
+        if (n <= 0) continue;
+
+        cJSON *o = cJSON_CreateObject();
+        char buf[48];
+        snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)hit);
+        cJSON_AddStringToObject(o, "addr", buf);
+        cJSON *refs = cJSON_AddArrayToObject(o, "refs");
+
+        uint64_t adrp_val[31];
+        uint64_t adrp_pc[31];
+        int adrp_set[31];
+        memset(adrp_set, 0, sizeof(adrp_set));
+
+        for (int i = 0; i < n; i++) {
+            char parts[4][48];
+            int np = split_operands(ops[i], parts, 4);
+            if (np < 1) continue;
+
+            if (strcmp(mnem[i], "adrp") == 0 && np >= 2) {
+                int rd = reg_num(parts[0]);
+                uint64_t page = 0;
+                if (rd >= 0 && parse_imm(parts[1], &page)) {
+                    adrp_val[rd] = page;
+                    adrp_set[rd] = 1;
+                    adrp_pc[rd] = start + (uint64_t)i * 4;
+                }
+                continue;
+            }
+
+            int is_load = 0;
+            int base_reg = -1;
+            uint64_t off = 0;
+            if ((strcmp(mnem[i], "add") == 0 || strcmp(mnem[i], "sub") == 0) && np >= 3) {
+                base_reg = reg_num(parts[1]);
+                parse_imm(parts[2], &off);
+            } else if (strncmp(mnem[i], "ldr", 3) == 0 && np >= 2) {
+                if (parse_mem_operand(parts[1], &base_reg, &off)) is_load = 1;
+            } else {
+                continue;
+            }
+            if (base_reg < 0 || !adrp_set[base_reg]) continue;
+
+            uint64_t target = adrp_val[base_reg];
+            target = (strcmp(mnem[i], "sub") == 0) ? (target - off) : (target + off);
+
+            cJSON *ref = cJSON_CreateObject();
+            snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)(start + (uint64_t)i * 4));
+            cJSON_AddStringToObject(ref, "insn", buf);
+            snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)target);
+            cJSON_AddStringToObject(ref, "target", buf);
+            cJSON_AddBoolToObject(ref, "is_load", is_load);
+            snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)adrp_pc[base_reg]);
+            cJSON_AddStringToObject(ref, "adrp_at", buf);
+            cJSON_AddStringToObject(ref, "text", ops[i]);
+
+            if (do_deref) {
+                uint64_t val = 0;
+                ssize_t vn = driver_read(&g_eng.drv, g_eng.session_pid, target, &val, 8);
+                if (vn == 8 && val != 0) {
+                    snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)val);
+                    cJSON_AddStringToObject(ref, "value", buf);
+                }
+            }
+            cJSON_AddItemToArray(refs, ref);
+        }
+        cJSON_AddItemToArray(hits, o);
+    }
+    send_ok(fd, GGCMD_AOB_RESOLVE, seq, out);
+    cJSON_Delete(out);
+}

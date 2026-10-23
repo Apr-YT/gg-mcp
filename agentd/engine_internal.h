@@ -118,6 +118,7 @@ void h_result_count(int fd, uint32_t seq, cJSON *p);
 void h_get_results(int fd, uint32_t seq, cJSON *p);
 void h_clear_results(int fd, uint32_t seq, cJSON *p);
 void h_set_results(int fd, uint32_t seq, cJSON *p);
+void h_filter_results(int fd, uint32_t seq, cJSON *p);
 
 /* cmd_mem.c — 内存读写 / 冻结 / 暂停恢复 */
 void h_read(int fd, uint32_t seq, cJSON *p);
@@ -125,6 +126,7 @@ void h_read_bytes(int fd, uint16_t cmd, uint32_t seq, cJSON *p);  /* READ_BYTES 
 void h_write(int fd, uint32_t seq, cJSON *p);
 void h_freeze(int fd, uint32_t seq, cJSON *p);
 void h_unfreeze(int fd, uint32_t seq, cJSON *p);
+void h_freeze_results(int fd, uint32_t seq, cJSON *p);
 void h_pause_resume(int fd, uint32_t seq, cJSON *p, int pause);
 
 /* cmd_view.c — 内存视图 / 符号解析 / 指针链
@@ -204,6 +206,7 @@ extern int g_hwbp_probe;
 extern int g_hwbp_probe_rc;
 
 void h_disassemble(int fd, uint32_t seq, cJSON *p);
+void h_aob_resolve(int fd, uint32_t seq, cJSON *p);
 void h_watch(int fd, uint32_t seq, cJSON *p);
 void h_module_base(int fd, uint32_t seq, cJSON *p);
 void h_calc_offset(int fd, uint32_t seq, cJSON *p);

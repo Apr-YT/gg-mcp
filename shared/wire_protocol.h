@@ -124,11 +124,31 @@ enum gg_cmd {
                                  * 负载 {"p":{"type":"annotate","data":{...}}} → 事件 {"ev":{"type":...,"data":...}} */
     GGCMD_GHOST_TAP,            /* 内核虚拟触摸: 单点 tap {"p":{"x":..,"y":..,"hold_ms":..}} */
     GGCMD_GHOST_SWIPE,          /* 内核虚拟触摸: 滑动 {"p":{"x1":..,"y1":..,"x2":..,"y2":..,"ms":..}} */
-    /* 握手鉴权（必须放在枚举末尾，保证既有命令码的数值不变）：
+    /* 握手鉴权（**新命令一律追加在它之后**，插到它前面会让 AUTH 及其后所有命令码整体后移，
+     * 与已部署的另一端错位；下面 FREEZE_RESULTS 就是按这条规则追加的）：
      * 请求 {"p":{"key":"<hex>"}}；成功响应 {"r":{"authed":true}}，失败 GGERR_PERM。
      * 未携带有效密钥的连接只允许 PING / AUTH，其余命令一律 GGERR_PERM。
      * 目的是堵住「设备上任意本地 App 连 127.0.0.1:34127 即可获得 root 能力」的面。 */
     GGCMD_AUTH,
+    /* 批量冻结当前结果集：{"p":{"type":<可选>, "value":<可选>, "limit":<可选>}}
+     * - 不传 value 时按每条地址的**当前值**冻结（"锁住现状"语义），传了则全部冻结成该值；
+     * - 冻结表容量 GG_FREEZE_MAX(256)，超出部分不冻结并在响应里回报 truncated；
+     * - 出现短读的条目跳过并计入 skipped —— 冻结一个读不到的值等于凭空造值。
+     * 追加在 AUTH 之后，保证既有命令码数值不变（见下方 AUTH 注释）。 */
+    GGCMD_FREEZE_RESULTS,
+    /* 结果集内过滤：{"p":{"min":<可选>,"max":<可选>,"exclude_nan":<可选>,"nonzero":<可选>}}
+     * 按**当前值**原地压缩结果集，可用 GGCMD_SEARCH_REFINE(op=undo) 回退。
+     * 与 GGCMD_SEARCH_REFINE 的分工：refine 比"变化方向"，这条比"绝对值区间"。
+     * 搜索后候选上万条时用它砍到几十条 —— 否则 AI 只能分页看上百轮。 */
+    GGCMD_FILTER_RESULTS,
+    /* 签名 → 全局变量地址（一条命令走完 AoB 扫 + 反汇编 + ADRP/ADD 求址）：
+     * {"p":{"pattern":"e1 ?? 40 b9 ...","back":<可选,默认32>,"count":<可选,默认8>,
+     *       "deref":<可选,默认1>}}
+     * 响应 {"r":{"hits":[{"addr":"0x..","refs":[{"insn":"0x..","target":"0x..",
+     *       "is_load":true,"value":"0x.."}]}]}}
+     * 存在理由：手工"扫描→反汇编→算地址"要来回 5 轮，AI 每次都得重新推理；
+     * 固化成一条命令后一次拿到结果。（2026-10-23 UE4 定位实测的痛点） */
+    GGCMD_AOB_RESOLVE,
     GGCMD_MAX
 };
 

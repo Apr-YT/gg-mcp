@@ -86,6 +86,18 @@ static const std::vector<ToolDef>& build() {
              "撤销最近一步细化：恢复上一步的候选集（最多回退 3 步）。"
              "模糊搜索恢复位图，精确/区间搜索恢复地址数组",
              json::object(), json::array()),
+        tool("gg_filter_results",
+             "在现有结果集上按**当前值**过滤，原地砍掉不符合的条目（可 gg_search_undo 回退）。"
+             "搜索出上万条候选时先用它收窄，再去 get_results —— 否则只能分页看上百万条。"
+             "min/max 可选（只给一边也行），exclude_nan 只对 float/double 有意义，nonzero 排掉 0。"
+             "至少给一个条件",
+             json{
+                 {"min", prop("number", "保留 >= min 的条目（可选）")},
+                 {"max", prop("number", "保留 <= max 的条目（可选）")},
+                 {"exclude_nan", prop("boolean", "排除 NaN/Inf（仅 float/double）")},
+                 {"nonzero", prop("boolean", "排除值为 0 的条目")},
+             },
+             json::array()),
         tool("gg_search_range",
              "区间搜索：min <= 值 <= max（按类型解释）",
              json{
@@ -159,12 +171,16 @@ static const std::vector<ToolDef>& build() {
              },
              json{"addr", "value"}),
         tool("gg_set_results",
-             "批量修改搜索结果：values=[{index|addr, value}]",
+             "批量修改搜索结果。两种模式：①values=[{index|addr, value}] 逐条改；"
+             "②all=true + value 把整个结果集改成同一值（在设备端遍历，不占对话带宽）。"
+             "type 省略时用结果集自身类型",
              json{
                  {"values", prop("array", "批量条目：[{\"index\":0,\"value\":\"99999\"}] 或 [{\"addr\":\"0x...\",\"value\":\"...\"}]")},
+                 {"value", prop("string", "all=true 时的目标值（全部结果改成它）")},
+                 {"all", prop("boolean", "true=整个结果集改成 value（与 values 二选一）")},
                  {"type", prop("string", "值类型", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
              },
-             json{"values"}),
+             json::array()),
         tool("gg_freeze",
              "冻结地址：后台循环持续写入锁定值（detach 自动清理）",
              json{
@@ -177,6 +193,17 @@ static const std::vector<ToolDef>& build() {
              "解冻：不带 addr 则全部解冻",
              json{
                  {"addr", prop("string", "可选：解冻指定地址")},
+             },
+             json::array()),
+        tool("gg_freeze_results",
+             "批量冻结当前结果集（一次请求，设备端遍历）。不带 value 时按每条地址的"
+             "**当前值**冻结（锁住现状），带 value 则全部冻结成该值。"
+             "冻结表容量 256：超出部分不冻结并回报 truncated，需要先用更严的 refine 收窄候选。"
+             "读不到当前值的条目会被跳过并计入 skipped，不会被当成 0 冻上",
+             json{
+                 {"value", prop("string", "可选：统一冻结成该值；省略则锁住每条当前值")},
+                 {"type", prop("string", "值类型（省略用结果集自身类型）", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
+                 {"limit", prop("integer", "最多处理多少条（默认全部，受 256 槽位限制）")},
              },
              json::array()),
 
@@ -194,6 +221,25 @@ static const std::vector<ToolDef>& build() {
                  {"module", prop("string", "模块名关键字（缺省返回原地址）")},
              },
              json{"addr"}),
+        tool("gg_aob_resolve",
+             "签名 → 全局变量地址：一条命令走完 \"AoB 扫特征码 + 反汇编命中点附近 + "
+             "解 ARM64 的 ADRP+ADD/LDR + 读目标值\"。"
+             "典型用途：社区工具里的 GNames / GUObjectArray 之类全局指针，"
+             "原本要手工来回 5 轮（扫描→读代码→看反汇编→心算地址→验证），"
+             "现在一次拿到命中地址、指令证据和目标地址。",
+             json{
+                 {"pattern", prop("string",
+                     "特征码（hex，支持通配）：e1 ?? 40 b9 e2 ?? 40 b9 e3 ?? 40 39。"
+                     "?? 整字节通配，?B 只比低半字节，8? 只比高半字节")},
+                 {"back", prop("integer",
+                     "命中点往前读多少字节再做反汇编（默认 32，上限 256）。"
+                     "ADRP 一般在命中点之前几条指令")},
+                 {"count", prop("integer", "最多处理几个命中（默认 8，上限 32）")},
+                 {"deref", prop("boolean",
+                     "是否读取目标地址处的值（默认 true）。ADRP+LDR 那种，"
+                     "target 是存放指针的槽位，value 才是全局变量本身")},
+             },
+             json{"pattern"}),
         tool("gg_pointer_scan",
              "指针扫描：在可写区找指向当前搜索结果地址的指针（dword/qword）。"
              "lookback 用于\"指针指向对象首址、目标字段在对象内部\"的情况"

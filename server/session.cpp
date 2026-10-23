@@ -356,6 +356,17 @@ json tool_search_undo(Session::CallCtx& c, const json& a) {
     c.params["op"] = "undo";
     return c.send(GGCMD_SEARCH_REFINE);
 }
+json tool_filter_results(Session::CallCtx& c, const json& a) {
+    /* 一个条件都不给等于"原样重读全量候选"：设备端会拒绝，这里提前挡掉省一次往返。 */
+    if (!a.contains("min") && !a.contains("max") &&
+        !a.contains("exclude_nan") && !a.contains("nonzero"))
+        return c.fail(GGERR_BAD_REQUEST, "at least one of min/max/exclude_nan/nonzero required");
+    if (a.contains("min")) c.params["min"] = a["min"];
+    if (a.contains("max")) c.params["max"] = a["max"];
+    if (a.contains("exclude_nan")) c.params["exclude_nan"] = a["exclude_nan"];
+    if (a.contains("nonzero")) c.params["nonzero"] = a["nonzero"];
+    return c.send(GGCMD_FILTER_RESULTS);
+}
 json tool_search_range(Session::CallCtx& c, const json& a) {
     if (!a.contains("min") || !a.contains("max"))
         return c.fail(GGERR_BAD_REQUEST, "min and max required");
@@ -582,9 +593,24 @@ json tool_write(Session::CallCtx& c, const json& a) {
     return c.send(GGCMD_WRITE);
 }
 json tool_set_results(Session::CallCtx& c, const json& a) {
-    if (!a.contains("values")) return c.fail(GGERR_BAD_REQUEST, "values required");
-    c.params["values"] = a["values"];
-    if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
+    /* all=true：整个结果集改成同一值，设备端遍历（10000 条不必过线）。
+     * 这条路径**不填 type**：norm_type(空) 默认是 dword，会把 qword 结果集写成半个值；
+     * 缺省交给设备端按结果集自身类型处理。 */
+    bool all = false;
+    if (a.contains("all")) {
+        if (a["all"].is_boolean()) all = a["all"].get<bool>();
+        else if (a["all"].is_number()) all = a["all"].get<double>() != 0;
+    }
+    if (all) {
+        if (!a.contains("value")) return c.fail(GGERR_BAD_REQUEST, "value required when all=true");
+        c.params["all"] = true;
+        c.params["value"] = a["value"];
+    } else {
+        if (!a.contains("values")) return c.fail(GGERR_BAD_REQUEST, "values required");
+        c.params["values"] = a["values"];
+    }
+    if (a.contains("type") && !c.put_type(a["type"]))
+        return c.fail(GGERR_BAD_REQUEST, "invalid type");
     return c.send(GGCMD_SET_RESULTS);
 }
 json tool_freeze(Session::CallCtx& c, const json& a) {
@@ -601,6 +627,18 @@ json tool_unfreeze(Session::CallCtx& c, const json& a) {
         return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     return c.send(GGCMD_UNFREEZE);
 }
+json tool_freeze_results(Session::CallCtx& c, const json& a) {
+    /* value 省略 = 锁住每条当前值（设备端读回再冻），不在这里补默认值。 */
+    if (a.contains("value")) c.params["value"] = a["value"];
+    if (a.contains("type") && !c.put_type(a["type"]))
+        return c.fail(GGERR_BAD_REQUEST, "invalid type");
+    if (a.contains("limit")) {
+        if (!a["limit"].is_number() || a["limit"].get<double>() < 1)
+            return c.fail(GGERR_BAD_REQUEST, "limit must be a positive integer");
+        c.params["limit"] = a["limit"];
+    }
+    return c.send(GGCMD_FREEZE_RESULTS);
+}
 
 // ---- 模块/符号 ----
 json tool_module_base(Session::CallCtx& c, const json& a) {
@@ -614,6 +652,15 @@ json tool_calc_offset(Session::CallCtx& c, const json& a) {
         return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     if (a.contains("module")) c.params["module"] = a["module"];
     return c.send(GGCMD_CALC_OFFSET);
+}
+json tool_aob_resolve(Session::CallCtx& c, const json& a) {
+    if (!a.contains("pattern"))
+        return c.fail(GGERR_BAD_REQUEST, "pattern required");
+    c.params["pattern"] = a["pattern"];
+    if (a.contains("back")) c.params["back"] = a["back"];
+    if (a.contains("count")) c.params["count"] = a["count"];
+    if (a.contains("deref")) c.params["deref"] = a["deref"];
+    return c.send(GGCMD_AOB_RESOLVE);
 }
 json tool_pointer_scan(Session::CallCtx& c, const json& a) {
     if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
@@ -885,6 +932,7 @@ const ToolEntry kTools[] = {
     {"gg_search_unknown_init", tool_search_unknown_init, false},
     {"gg_search_refine",    tool_search_refine,    false},
     {"gg_search_undo",      tool_search_undo,      false},
+    {"gg_filter_results",   tool_filter_results,   false},
     {"gg_search_range",     tool_search_range,     false},
     {"gg_result_count",     tool_result_count,     false},
     {"gg_get_results",      tool_get_results,      false},
@@ -898,9 +946,11 @@ const ToolEntry kTools[] = {
     {"gg_set_results",      tool_set_results,      true},
     {"gg_freeze",           tool_freeze,           true},
     {"gg_unfreeze",         tool_unfreeze,         true},
+    {"gg_freeze_results",   tool_freeze_results,   true},
 
     {"gg_module_base",      tool_module_base,      false},
     {"gg_calc_offset",      tool_calc_offset,      false},
+    {"gg_aob_resolve",      tool_aob_resolve,      false},
     {"gg_pointer_scan",     tool_pointer_scan,     false},
     {"gg_pointer_chain",    tool_pointer_chain,    false},
     {"gg_resolve_symbol",   tool_resolve_symbol,   false},
