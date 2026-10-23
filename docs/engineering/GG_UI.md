@@ -44,7 +44,7 @@ scripts\build_ui.bat
 ## 界面
 
 ```
-┌ 顶栏: GG-UI | 连接/重连 | ● 驱动状态 | 目标: 进程名(pid) | 刷新进程列表 ┐
+┌ 顶栏: GG-UI | 连接/重连 | ● 驱动状态 | 目标: 进程名(pid) | AI 联动 开 | 刷新 ┐
 ├──────────────┬──────────────────────────────────────────────────────┤
 │ 进程列表      │ 值 [100] 类型[dword] 区域[all] [精确搜索][区间搜索]    │
 │ (可过滤)      │ [模糊首次扫描] 然后: [变][不变][增][减] [撤销][清空]   │
@@ -56,6 +56,87 @@ scripts\build_ui.bat
 │ 日志（最近 300 条）                                                   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+## 与 AI 联动（2026-10-23）
+
+### 这件事"几乎不用做"
+
+agentd 的 `g_eng` 是全局单例：UI 和 MCP 服务器各开一条 TCP 连接，**看到的是
+同一个 `session_pid` 和同一份 `results`**。所以"AI 搜完 UI 里能不能看到"
+从来不是数据问题。缺的只是：
+
+- AI 不知道**人**刚才手动搜了什么值、选中了哪一行
+- 人不知道 **AI** 改了结果集
+
+### 两条通道
+
+实现集中在 `server/shared_ctx.h`（header-only，两个构建脚本都不用改），
+文件在 `build/gg-shared/` 下（运行时产物，已 ignore）：
+
+| 文件 | 谁写 | 谁读 | 内容 |
+|---|---|---|---|
+| `context.json` | gg-ui（attach / 搜索 / 选中 + 400ms 心跳） | AI 调 `gg_context` | 目标进程、搜索值/类型/区域/**模式**、结果数、选中行、最近动作、日志尾部 |
+| `cmd.json` | AI 调 `gg_ui_command` | gg-ui（200ms 轮询） | `{id, op, args}`，执行后删文件并写 `cmd_result.json` |
+
+用文件而不是本地 socket，理由：**崩溃安全**（进程挂了文件还在，能看到人最后在
+干什么）、零依赖（不用手写 HTTP）、可调试（`cat` 一下就知道谁写了什么）。
+代价是轮询，实测开销可忽略。
+
+`search.mode`（`exact / range / fuzzy / none`）是关键字段：`value` 是输入框原文，
+`range` 模式下它是 `"90-110"` 这样的区间写法，AI 不知道 mode 会把它当字面量。
+
+### 场景一：手搜完，问 AI
+
+在 UI 里搜 `100`、点中某一行，切到对话说"帮我看看这个地址附近是什么结构"。
+AI 调 `gg_context` 就能拿到 `search.value=100 / type=dword / selected.addr=0x...`，
+不用反问你搜的什么。
+
+工具描述里已经写清触发时机（"用户提到'我刚搜的'、'这个地址'时先调它"）。
+
+### 场景二：AI 搜完，看 UI
+
+AI 直接调 `gg_search` 时，UI 每 900ms 比对一次设备侧 `result_count`，发现变了就
+自动刷新表格，并在搜索区下方提示 `AI: 结果集被外部改动（N → M），已同步`。
+AI 在后台干活时人的窗口自动跟上，不用手动点"重新拉取"。
+
+判"是谁改的"靠本地基准 `total_seen`：本地每次刷新后同步它，所以只有**外部**
+改动才会触发刷新，不会自己刷自己。
+
+### 场景三：让 AI 驱动窗口
+
+```
+gg_ui_command(op="search",  args={"value":"200","type":"dword"})
+gg_ui_command(op="attach",  args={"pid":5409})
+gg_ui_command(op="select",  args={"addr":"0x2d5ff08"})
+```
+
+支持的 op：`attach / search / search_range / fuzzy_init / refine / select /
+read / export / refresh`。
+
+**故意不含 write / freeze**：改内存走 `gg_write` 那条有 safe_mode 拦截和审计的
+路径，不开第二条。
+
+执行结果同步返回（UI 200ms 轮询，正常 1 秒内回执）。UI 没开时**直接报错**，
+不会把命令埋进队列让下次启动的 UI 误执行；即使写进去了，超过 30 秒的指令
+UI 也会丢弃。
+
+### 边界
+
+- **UI 关掉后 AI 仍能读到最后状态**，但 `running=false`。判据是 `closed` 标记
+  （正常退出时写）和 `ts` 新鲜度（3 秒）。这是刻意的：知道"人最后在搜 500"
+  通常比"什么都不知道"有用。**强杀**（任务管理器结束进程）不会写 `closed`，
+  要等 3 秒超时。
+- **两个进程的工作目录必须一致**（`build/gg-shared/` 是相对路径）。
+  不一致时设环境变量 `GG_SHARED_DIR` 指到同一个绝对路径。
+- 顶栏点 `AI 联动 开` 可以关掉共享（会删 `context.json`）。
+- 只支持单实例：开两个 gg-ui 会互相覆盖 `context.json`。
+
+### 改动记录
+
+- `server/shared_ctx.h` — 新增（原子写：tmp + rename，中途崩不留半个 JSON）
+- `server/session.cpp` — `gg_context` / `gg_ui_command` 两个工具
+- `server/mcp/schema.cpp` — 对应 schema（总数 44 → 46）
+- `tools/gg-ui/main.cpp` — `ui_publish` / `ui_run_cmd` / `ui_tick`
 
 ## 几个坑（改这个 UI 前先看）
 

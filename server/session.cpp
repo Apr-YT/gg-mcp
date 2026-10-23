@@ -9,11 +9,23 @@
 
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
+
+#include "shared_ctx.h"
+
+#ifdef _WIN32
+#include <process.h>
+#define GG_GETPID() _getpid()
+#else
+#include <unistd.h>
+#define GG_GETPID() getpid()
+#endif
 
 #ifdef _WIN32
 #include <direct.h>
@@ -676,6 +688,106 @@ json tool_shell(Session::CallCtx& c, const json& a) {
 }
 json tool_device_info(Session::CallCtx& c, const json&) { return c.send(GGCMD_DEVICE_INFO); }
 
+// ---- UI 联动（人和 AI 共用一个工作上下文）--------------------------------
+//
+// 前提：agentd 的 g_eng 是全局单例，UI 和 MCP 服务器各开一条连接时，
+// **搜索结果集、attach 目标本来就是同一份**。所以这里要补的不是数据同步，
+// 而是"对方在干什么"：
+//
+//   gg_context     AI 读人手动搜了什么值/类型/区域、选中了哪一行
+//   gg_ui_command  AI 让人面前的窗口执行动作（人不用把参数再敲一遍）
+//
+// 通道是 build/gg-shared/ 下的文件（见 server/shared_ctx.h）：不用端口、
+// 崩溃安全、出问题 cat 一下就知道谁写了什么。UI 侧每 200ms 轮询指令。
+//
+// 设计取舍：命令只覆盖"看"和"定位"类操作（attach / 搜索 / 选中 / 读取 /
+// 导出），不含 write / freeze —— 改内存让 AI 走 gg_write 那条已有的、
+// 有 safe_mode 拦截和审计的路径，别在这里开第二条。
+
+json tool_context(Session::CallCtx& c, const json&) {
+    json out = json::object();
+    json face;
+    if (!ctx::load(&face)) {
+        out["ui"] = json{{"running", false},
+                         {"hint", "没读到 build/gg-shared/context.json —— gg-ui 没启动过，"
+                                  "或者两个进程的 GG_SHARED_DIR / 工作目录不一致"}};
+    } else {
+        const bool alive = ctx::ui_alive(face);
+        const long long age = ctx::now_secs() - face.value("ts", (long long)0);
+        out["ui"] = json{{"running", alive}, {"stale_secs", age}};
+        // 死了的上下文仍有价值（能看到人最后在搜什么），所以状态字段照给，
+        // 只是显式标出它是旧的 —— 别让 AI 把十分钟前的选中行当成当前值。
+        out["ui"]["target"]      = face.value("target", json::object());
+        out["ui"]["search"]      = face.value("search", json::object());
+        out["ui"]["selected"]    = face.value("selected", json::object());
+        out["ui"]["results"]     = face.value("results", json::object());
+        out["ui"]["last_action"] = face.value("last_action", "");
+        out["ui"]["log_tail"]    = face.value("log_tail", json::array());
+        out["ui"]["window"]      = face.value("window", json::object());
+        if (!alive)
+            out["ui"]["hint"] = "上下文超过 3 秒没更新，gg-ui 可能已关闭；"
+                                "下面的 search/selected 只是它最后的状态";
+    }
+
+    // 设备侧实时快照：文件里的 total 是 UI 上次刷新时的数字，可能已经变了
+    // （比如 AI 刚搜过）。给一份当下的，AI 才不会拿旧数字推理。
+    json live;
+    if (c.device_call(GGCMD_RESULT_COUNT, json::object(), &live) == 0)
+        out["device"] = live;
+    return c.ok(out);
+}
+
+json tool_ui_command(Session::CallCtx& c, const json& a) {
+    const std::string op = a.value("op", "");
+    static const char* kOps[] = {"attach", "search", "search_range", "fuzzy_init",
+                                 "refine", "select", "read", "export", "refresh"};
+    bool known = false;
+    for (const char* k : kOps) if (op == k) { known = true; break; }
+    if (!known)
+        return c.fail(GGERR_BAD_REQUEST,
+                      "op 必须是 attach / search / search_range / fuzzy_init / refine / "
+                      "select / read / export / refresh 之一");
+
+    // 先确认对端活着。UI 没开时把命令写进去等于埋雷：用户下次开 UI 会执行
+    // 一条几十分钟前的 attach。
+    json face;
+    if (!ctx::load(&face) || !ctx::ui_alive(face))
+        return c.fail(GGERR_BUSY,
+                      "gg-ui 没在运行（context.json 缺失或超过 3 秒未更新）——"
+                      "先启动 build\\pc\\gg-ui.exe 再下发指令");
+
+    static unsigned seq = 0;
+    char idbuf[64];
+    // id 带 pid + 时间戳：UI 靠它去重（同一个 id 只执行一次），
+    // 单用递增计数器在多进程/重启后会撞。
+    snprintf(idbuf, sizeof(idbuf), "%d-%lld-%u",
+             (int)GG_GETPID(), ctx::now_secs(), ++seq);
+
+    json cmd;
+    cmd["id"]   = idbuf;
+    cmd["op"]   = op;
+    cmd["args"] = a.value("args", json::object());
+    cmd["ts"]   = ctx::now_secs();
+    if (!ctx::save_cmd(cmd))
+        return c.fail(GGERR_INTERNAL, "写不了 build/gg-shared/cmd.json（目录不可写？）");
+
+    // 等 UI 消费。UI 轮询 200ms，正常 1 秒内出结果；等满 5 秒就当它没处理
+    // （比如 UI 卡在别的同步操作里），返回 queued 让调用方自己决定要不要重试。
+    json res;
+    for (int i = 0; i < 100; ++i) {
+        if (ctx::load_result(&res) && res.value("id", std::string()) == idbuf) {
+            json wrapped = json{{"op", op}, {"ok", res.value("ok", false)}};
+            if (res.contains("data")) wrapped["data"] = res["data"];
+            if (res.contains("err"))  wrapped["err"]  = res["err"];
+            return c.ok(wrapped);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return c.ok(json{{"op", op}, {"queued", true}, {"id", idbuf},
+                     {"hint", "UI 5 秒内没回执，指令仍留在队列里；"
+                              "可以用 gg_context 看它有没有执行"}});
+}
+
 // ---- 硬件断点 ----
 json tool_watch_set(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
@@ -801,6 +913,10 @@ const ToolEntry kTools[] = {
     {"gg_annotate_get",     tool_annotate_get,     false},
     {"gg_annotate_remove",  tool_annotate_remove,  false},
     {"gg_annotate_context", tool_annotate_context, false},
+
+    // UI 联动：和 gg-ui 共用一份工作上下文
+    {"gg_context",          tool_context,          false},
+    {"gg_ui_command",       tool_ui_command,       false},
 };
 
 }  // namespace

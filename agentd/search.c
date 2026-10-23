@@ -8,12 +8,15 @@
 #include "process.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
+#include <unistd.h>      /* close()：pagemap fd 的回收在两个平台都要用 */
+#if defined(__linux__)
+#include <fcntl.h>       /* O_CLOEXEC 只在 Linux 上有 */
+#endif
 
 /* 并行搜索: region 分片, 每 worker 扫一段 region 子集 + 本地结果缓冲。
  * driver_read 为独立 ioctl, 线程安全; handler 级 g_eng.mtx 已保证搜索互斥。 */
@@ -78,6 +81,10 @@ static inline int w_push(search_worker_t *w, uint64_t addr) {
  * ------------------------------------------------------------------------- */
 #define GG_PM_BATCH_PAGES 64u
 
+#if defined(__linux__)
+/* 真实现只在 Linux/Android 上编译：它依赖 /proc/<pid>/pagemap、pread 和
+ * O_CLOEXEC，主机上的 Windows 单测三者都没有。 */
+
 static int pm_open(pid_t pid) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/pagemap", (int)pid);
@@ -133,6 +140,28 @@ static size_t pm_try_skip(int pmfd, uint64_t va, size_t rd, size_t len) {
     if (skip == 0) skip = GG_PAGE_SIZE;
     return skip > len ? len : skip;
 }
+
+#else  /* !__linux__ —— 主机单测 */
+
+/* 退化成"pagemap 不可用"：pm_open 返回 -1，三个查询函数返回 0。
+ * 这条路径在设备上真实存在（pagemap 打不开时），单测跑的就是它，
+ * 所以不是"假实现骗过测试"，而是**测 fallback 分支**。
+ * 真正的 present 位判断只能靠真机 itest + 集合比对验证（见 AGENTS 30）。 */
+static int pm_open(pid_t pid) { (void)pid; return -1; }
+static size_t pm_present_run(int fd, uint64_t va, size_t maxlen) {
+    (void)fd; (void)va; (void)maxlen;
+    return 0;
+}
+static size_t pm_skip_absent(int fd, uint64_t va, size_t len) {
+    (void)fd; (void)va; (void)len;
+    return 0;
+}
+static size_t pm_try_skip(int pmfd, uint64_t va, size_t rd, size_t len) {
+    (void)pmfd; (void)va; (void)rd; (void)len;
+    return 0;
+}
+
+#endif /* __linux__ */
 
 /* 单 worker 扫描 rbegin..rend 的 region 子集（模式由 w->mode 决定） */
 static void *search_worker_main(void *arg) {

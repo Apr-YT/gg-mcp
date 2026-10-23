@@ -591,6 +591,56 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    进程列表一次拉全量靠过滤框缩小。搜索是同步调用（全量 0.2s / 模糊首帧 0.3s），
    会短暂卡界面 —— 要异步就把操作丢线程，别在 UI 线程里 sleep 等。
 
+36. **UI ↔ AI 联动：共享工作上下文**（2026-10-23，用户要求"手动搜索的值能与 AI 联动"）。
+
+   ### 先纠正一个容易搞错的认知
+
+   agentd 的 `g_eng` 是**全局单例**：UI 和 MCP 服务器各开一条 TCP 连接时，
+   `session_pid` 和 `results` **本来就是同一份**。所以"数据同步"从一开始就存在。
+
+   推论（重要）：**任何一方 attach 都会改掉全局 session_pid**。AI 调
+   `gg_ui_command op=attach` 之后，AI 自己的会话也变成那个进程了。
+   两条连接"各看各的进程"不支持，也不打算支持。
+
+   真正缺的是"对方在干什么"，补了三个东西：
+
+   | 能力 | 工具/机制 | 方向 |
+   |---|---|---|
+   | 读人的上下文 | `gg_context` | AI ← UI |
+   | 驱动窗口 | `gg_ui_command`（attach/search/refine/select/read/export/refresh） | AI → UI |
+   | 自动跟随 | UI 每 900ms 比对 `result_count` | AI → UI（被动） |
+
+   `gg_ui_command` **故意不含 write / freeze**：改内存走 `gg_write` 那条有
+   safe_mode 拦截和审计的路径，不开第二条。
+
+   ### 通道
+
+   `build/gg-shared/{context,cmd,cmd_result}.json`，实现 `server/shared_ctx.h`
+   （header-only，两个构建脚本都不用改）。用文件不用本地 socket：崩溃安全
+   （进程挂了文件还在）、零依赖、`cat` 一下就知道谁写了什么。原子写是
+   tmp + rename，中途崩不会留半个 JSON 把读的一方卡死。
+
+   ### 四个实现上的坑
+
+   1. **`search.mode` 必须传**：`value` 是输入框原文，range 模式下它是
+      `"90-110"`。不标模式，AI 会把它当字面量。
+   2. **`ui_alive` 不能只看 ts**：正常退出写 `closed:true`，但**强杀不会**
+      （任务管理器结束进程），所以还要 ts 3 秒过期兜底。两条都要留。
+   3. **自动跟随要用本地基准区分"谁改的"**：记 `total_seen`，本地每次刷新后
+      同步它。否则自己搜完会立刻触发一轮无意义刷新。
+   4. **UI 没开时 `gg_ui_command` 必须直接报错**，不能把命令埋进队列 ——
+      否则用户下次开 UI 会执行一条几十分钟前的 attach。UI 侧也校验 30 秒过期。
+
+   ### 顺带修掉一个上次遗留的单测回归
+
+   `agentd/search.c` 的 pagemap 代码用了 `pread` / `O_CLOEXEC`，Windows 主机
+   编不过 —— 上一轮加完只跑了 itest 和真机验证，**没跑 `run_tests`**。
+   现在用 `#if defined(__linux__)` 包住，非 Linux 给"pagemap 不可用"的桩：
+   那正是设备上打不开 pagemap 的真实分支，所以单测跑的是 fallback 而不是
+   假实现（真机的 present 位判断只能靠 itest + 集合比对验证，见第 30 条）。
+   改完真机复测全量搜索 0.16~0.18s，pagemap 仍生效；`run_tests` 全绿，
+   工具数 44 → 46（dispatch 护栏自动校验通过）。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）

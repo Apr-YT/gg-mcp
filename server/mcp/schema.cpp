@@ -341,6 +341,30 @@ static const std::vector<ToolDef>& build() {
                  {"ms", prop("integer", "滑动时长毫秒（默认 300）")},
              },
              json{"x1", "y1", "x2", "y2"}),
+
+        // ---- UI 联动 ----
+        // 场景：人在 gg-ui 里手动搜了一串值，然后切到 AI 这边说"帮我看看这个"。
+        // 没有这两个工具时，AI 只能反问"你搜的是什么值/哪个地址"；
+        // 有了就直接读到。
+        tool("gg_context",
+             "读取 PC 界面（gg-ui）当前的工作上下文：目标进程、**人手动输入的搜索值/类型/区域**、"
+             "结果条数、选中的那一行地址与值、最近动作、日志尾部。"
+             "另附设备侧实时的 result_count。gg-ui 没运行时仍返回它最后的状态并标 stale。"
+             "用户提到\"我刚搜的\"、\"这个地址\"、\"我选中的\"时先调它，不要反问。",
+             json::object(), json::array()),
+        tool("gg_ui_command",
+             "让正在运行的 gg-ui 执行一个动作（人不用手动重敲参数）。只覆盖\"看\"和\"定位\"类操作，"
+             "不含 write/freeze —— 改内存走 gg_write。"
+             "op 说明：attach(pid) / search(value,type,region) / search_range(min,max,type,region) / "
+             "fuzzy_init(type,region) / refine(op) / select(addr) / read(addr) / export(csv) / refresh",
+             json{
+                 {"op", prop("string", "动作名",
+                             "\"enum\":[\"attach\",\"search\",\"search_range\",\"fuzzy_init\","
+                             "\"refine\",\"select\",\"read\",\"export\",\"refresh\"]")},
+                 {"args", prop("object", "动作参数，见 op 说明。例如 search 传 "
+                                         "{\"value\":\"100\",\"type\":\"dword\",\"region\":\"all\"}")},
+             },
+             json{"op"}),
     };
     return defs;
 }

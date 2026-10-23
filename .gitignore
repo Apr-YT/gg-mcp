@@ -51,3 +51,8 @@ __pycache__/
 # gg-ui（imgui PC 界面）本地状态
 gg-ui.ini
 gg-ui-font.log
+
+# gg-ui / AI 联动的运行时共享文件（进程间通信，不该入库）
+build/gg-shared/
+gg-results.csv
+gg-results.txt

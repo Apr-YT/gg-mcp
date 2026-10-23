@@ -24,6 +24,9 @@
 
 #include "session.h"
 
+// UI <-> AI 的共享工作上下文（文件通道，见该头文件的说明）
+#include "shared_ctx.h"
+
 // ===========================================================================
 // D3D11 设备
 // ===========================================================================
@@ -134,9 +137,29 @@ struct App {
     int         freeze_limit = 200;
 
     std::vector<std::string> log;
+
+    // ---- 与 AI 联动（协议见 server/shared_ctx.h）----
+    // search_mode 是给人看的语义标签：手动搜索时 AI 只有知道"这是精确搜索还是
+    // 区间搜索"，才能正确解释 value_input 里那个 "90-110" 到底是区间还是字面量。
+    std::string search_mode = "none";      // none / exact / range / fuzzy
+    std::string last_action = "";
+    std::string applied_cmd_id;            // 已执行的指令 id，防重复执行
+    double      t_pub = 0.0;               // 上次写 context.json
+    double      t_cmd = 0.0;               // 上次轮询 cmd.json
+    double      t_follow = 0.0;            // 上次比对设备侧结果数
+    int64_t     total_seen = -1;           // 本地已知的 result_count，用于识别外部改动
+    bool        ai_context = true;         // 是否对外提供上下文（关掉就不再写文件）
+    int         ai_cmds_done = 0;          // 已响应的 AI 指令数（顶栏显示）
+    std::string ai_note;                   // 顶栏提示：AI 刚做了什么
+    double      ai_note_t = 0.0;           // 提示的过期时间
 };
 
 static App g_app;
+
+// 定义在下方"与 AI 的联动"一节；业务函数（do_connect / attach_pid / ...）
+// 都在它之前，所以先声明。必须包在匿名 namespace 里 —— 定义在匿名 namespace
+// 内，全局作用域的声明会是另一个实体（匿名 namespace 里所有同名块属于同一个）。
+namespace { void ui_publish(const char* action); }
 
 static void logf(const char* fmt, ...) {
     char buf[1024];
@@ -260,6 +283,7 @@ static void do_connect() {
     g_app.status = r.data.value("driver_state_str", std::string("?"));
     logf("[连接] 成功 driver_state=%d (%s)", g_app.driver_state, g_app.status.c_str());
     refresh_procs();
+    ui_publish("connect");
 }
 
 static void attach_pid(int pid) {
@@ -271,7 +295,10 @@ static void attach_pid(int pid) {
     g_app.hits.clear();
     g_app.hit_total = 0;
     g_app.hit_sel = -1;
+    g_app.search_mode = "none";     // 换进程后旧搜索条件不再成立
+    g_app.total_seen = 0;
     logf("[attach] pid=%d %s", pid, g_app.target_name.c_str());
+    ui_publish("attach");
 }
 
 static void refresh_results(int limit) {
@@ -293,6 +320,7 @@ static void refresh_results(int limit) {
         }
     }
     g_app.hit_sel = -1;
+    g_app.total_seen = g_app.hit_total;   // 本地刚刷过，这个数字就是基准
     logf("[结果] 总数 %lld，本页 %zu 条", (long long)g_app.hit_total, g_app.hits.size());
 }
 
@@ -305,10 +333,12 @@ static void do_exact_search() {
                                   {"type", kTypeNames[g_app.type_idx]},
                                   {"region", kRegionNames[g_app.region_idx]}});
     if (!r.ok) { logf("[搜索] 失败: %s", r.err.c_str()); return; }
+    g_app.search_mode = "exact";
     logf("[搜索] %s=%s -> %lld 条%s", kTypeNames[g_app.type_idx], g_app.value_input,
          (long long)r.data.value("count", (int64_t)0),
          r.data.value("truncated", false) ? "（已截断）" : "");
     refresh_results(g_app.page_limit);
+    ui_publish("exact_search");
 }
 
 static void do_range_search() {
@@ -328,9 +358,11 @@ static void do_range_search() {
                                   {"type", kTypeNames[g_app.type_idx]},
                                   {"region", kRegionNames[g_app.region_idx]}});
     if (!r.ok) { logf("[区间] 失败: %s", r.err.c_str()); return; }
+    g_app.search_mode = "range";
     logf("[区间] %s-%s -> %lld 条", a.c_str(), b.c_str(),
          (long long)r.data.value("count", (int64_t)0));
     refresh_results(g_app.page_limit);
+    ui_publish("range_search");
 }
 
 static void do_unknown_init() {
@@ -343,6 +375,7 @@ static void do_unknown_init() {
          (long long)r.data.value("elements", (int64_t)0));
     g_app.hits.clear();
     g_app.hit_total = 0;
+    ui_publish("fuzzy_init");
 }
 
 static void do_refine(const char* op) {
@@ -351,6 +384,7 @@ static void do_refine(const char* op) {
     if (!r.ok) { logf("[再次扫描 %s] 失败: %s", op, r.err.c_str()); return; }
     int64_t remain = r.data.value("remaining", (int64_t)0);
     logf("[再次扫描 %s] 剩余 %lld", op, (long long)remain);
+    ui_publish("refine");
     if (remain > 0 && remain <= 100000) refresh_results(g_app.page_limit);
     else { g_app.hits.clear(); g_app.hit_total = remain; }
 }
@@ -360,6 +394,7 @@ static void do_undo() {
     ToolResult r = call_tool(g_app.sess, "gg_search_undo", json::object());
     if (!r.ok) { logf("[撤销] 失败: %s", r.err.c_str()); return; }
     logf("[撤销] 恢复到 %lld", (long long)r.data.value("remaining", (int64_t)0));
+    ui_publish("undo");
 }
 
 static void do_clear() {
@@ -367,7 +402,10 @@ static void do_clear() {
     call_tool(g_app.sess, "gg_clear_results", json::object());
     g_app.hits.clear();
     g_app.hit_total = 0;
+    g_app.total_seen = 0;
+    g_app.search_mode = "none";
     logf("[清空]");
+    ui_publish("clear");
 }
 
 static void do_read_one(uint64_t addr) {
@@ -465,6 +503,258 @@ static void do_copy_addrs() {
 }
 
 // ===========================================================================
+// 与 AI 的联动
+//
+// agentd 的 g_eng 是全局的，所以「我在这边搜」和「AI 在那边搜」用的是同一份
+// 结果集。要补的只是"对方在干什么"，走 build/gg-shared/ 下的两个文件：
+//
+//   context.json  ← 我写（attach / 搜索 / 选中 / 每 400ms 心跳）
+//   cmd.json      → 我读（AI 下发的动作，执行完删除并回 cmd_result.json）
+// ===========================================================================
+namespace {
+
+static int type_from_name(const std::string& s) {
+    for (int i = 0; i < (int)(sizeof(kTypeNames) / sizeof(kTypeNames[0])); i++)
+        if (s == kTypeNames[i]) return i;
+    return 2;   // dword
+}
+
+static int region_from_name(const std::string& s) {
+    for (int i = 0; i < (int)(sizeof(kRegionNames) / sizeof(kRegionNames[0])); i++)
+        if (s == kRegionNames[i]) return i;
+    return 0;   // all
+}
+
+// 把当前状态写出去。action 非空时同时更新 last_action（AI 靠它判断人刚做了什么）。
+void ui_publish(const char* action) {
+    if (!g_app.ai_context) return;
+    if (action) g_app.last_action = action;
+
+    json c;
+    c["schema"] = 1;
+    c["ts"] = gg::ctx::now_secs();
+    c["ui_pid"] = (int)GetCurrentProcessId();
+    c["connected"] = g_app.connected;
+    c["driver_state"] = g_app.driver_state;
+    c["last_action"] = g_app.last_action;
+
+    c["target"] = json{{"pid", g_app.target_pid}, {"name", g_app.target_name}};
+
+    // search.value 是用户输入框里的原文；mode 说明怎么解释它
+    // （range 时它是 "90-110" 这样的区间写法，不是字面量）。
+    c["search"] = json{{"mode", g_app.search_mode},
+                       {"value", std::string(g_app.value_input)},
+                       {"type", kTypeNames[g_app.type_idx]},
+                       {"region", kRegionNames[g_app.region_idx]}};
+
+    c["results"] = json{{"total", g_app.hit_total}, {"loaded", (int64_t)g_app.hits.size()}};
+
+    if (g_app.hit_sel >= 0 && g_app.hit_sel < (int)g_app.hits.size()) {
+        const HitRow& h = g_app.hits[g_app.hit_sel];
+        char a[32];
+        snprintf(a, sizeof(a), "0x%llx", (unsigned long long)h.addr);
+        c["selected"] = json{{"addr", std::string(a)},
+                             {"value", h.value},
+                             {"value_hex", h.value_hex}};
+    } else {
+        c["selected"] = nullptr;
+    }
+
+    // 日志尾部：AI 读这几行就知道人遇到过什么报错，比自己复现快。
+    json lt = json::array();
+    const size_t keep = 8;
+    for (size_t i = g_app.log.size() > keep ? g_app.log.size() - keep : 0; i < g_app.log.size(); ++i)
+        lt.push_back(g_app.log[i]);
+    c["log_tail"] = lt;
+
+    gg::ctx::save(c);
+}
+
+// 执行一条 AI 下发的指令。返回的 json 会写进 cmd_result.json。
+static json ui_run_cmd(const json& cmd) {
+    const std::string op = cmd.value("op", "");
+    const json a = cmd.contains("args") && cmd["args"].is_object() ? cmd["args"] : json::object();
+    json out;
+    out["id"] = cmd.value("id", std::string());
+    out["op"] = op;
+
+    auto need_session = [&]() -> bool {
+        if (!g_app.sess || !g_app.connected) {
+            out["ok"] = false;
+            out["err"] = "gg-ui 尚未连接设备";
+            return false;
+        }
+        return true;
+    };
+
+    if (op == "attach") {
+        if (!need_session()) return out;
+        const int pid = a.value("pid", 0);
+        if (pid <= 0) { out["ok"] = false; out["err"] = "args.pid 必须是正整数"; return out; }
+        attach_pid(pid);
+        out["ok"] = g_app.target_pid == pid;
+        out["data"] = json{{"pid", g_app.target_pid}, {"name", g_app.target_name}};
+        if (!out["ok"].get<bool>()) out["err"] = "attach 失败（见日志）";
+        ui_publish("ai_attach");
+        return out;
+    }
+
+    if (op == "search" || op == "search_range") {
+        if (!need_session()) return out;
+        if (g_app.target_pid == 0) { out["ok"] = false; out["err"] = "还没 attach 目标进程"; return out; }
+        // 参数写进输入框再走已有函数：这样界面上的值也跟着变，人能看到 AI 搜了什么。
+        const std::string v = a.value("value", a.contains("min")
+                                      ? (a.value("min", std::string()) + "-" + a.value("max", std::string()))
+                                      : std::string());
+        if (v.empty()) { out["ok"] = false; out["err"] = "args.value 不能为空"; return out; }
+        snprintf(g_app.value_input, sizeof(g_app.value_input), "%s", v.c_str());
+        g_app.type_idx = type_from_name(a.value("type", std::string("dword")));
+        g_app.region_idx = region_from_name(a.value("region", std::string("all")));
+        if (op == "search_range" || a.contains("min")) do_range_search();
+        else do_exact_search();
+        out["ok"] = true;
+        out["data"] = json{{"total", g_app.hit_total}, {"loaded", (int64_t)g_app.hits.size()}};
+        ui_publish(op == "search_range" ? "ai_range_search" : "ai_exact_search");
+        return out;
+    }
+
+    if (op == "fuzzy_init") {
+        if (!need_session()) return out;
+        if (g_app.target_pid == 0) { out["ok"] = false; out["err"] = "还没 attach 目标进程"; return out; }
+        g_app.type_idx = type_from_name(a.value("type", std::string("dword")));
+        g_app.region_idx = region_from_name(a.value("region", std::string("all")));
+        do_unknown_init();
+        out["ok"] = true;
+        out["data"] = json{{"total", g_app.hit_total}};
+        ui_publish("ai_fuzzy_init");
+        return out;
+    }
+
+    if (op == "refine") {
+        if (!need_session()) return out;
+        const std::string r = a.value("op", std::string("unchanged"));
+        do_refine(r.c_str());
+        out["ok"] = true;
+        out["data"] = json{{"total", g_app.hit_total}};
+        ui_publish("ai_refine");
+        return out;
+    }
+
+    if (op == "select") {
+        const std::string as = a.value("addr", std::string());
+        uint64_t want = 0;
+        if (!parse_num(as.c_str(), &want)) {
+            out["ok"] = false; out["err"] = "args.addr 必须是数值或 0x 字符串"; return out;
+        }
+        int found = -1;
+        for (int i = 0; i < (int)g_app.hits.size(); ++i)
+            if (g_app.hits[i].addr == want) { found = i; break; }
+        if (found < 0) {
+            out["ok"] = false;
+            out["err"] = "该地址不在当前已加载的结果页里（可以先用 gg_ui_command op=search 让 UI 重新搜）";
+            return out;
+        }
+        g_app.hit_sel = found;
+        out["ok"] = true;
+        out["data"] = json{{"addr", as}, {"value", g_app.hits[found].value}};
+        ui_publish("ai_select");
+        return out;
+    }
+
+    if (op == "read") {
+        if (!need_session()) return out;
+        const std::string as = a.value("addr", std::string());
+        uint64_t addr = 0;
+        if (!parse_num(as.c_str(), &addr)) {
+            out["ok"] = false; out["err"] = "args.addr 必须是数值或 0x 字符串"; return out;
+        }
+        do_read_one(addr);
+        out["ok"] = true;
+        out["data"] = json{{"addr", as}};
+        ui_publish("ai_read");
+        return out;
+    }
+
+    if (op == "export") {
+        do_export(a.value("csv", true));
+        out["ok"] = true;
+        out["data"] = json{{"file", a.value("csv", true) ? "gg-results.csv" : "gg-results.txt"}};
+        ui_publish("ai_export");
+        return out;
+    }
+
+    if (op == "refresh") {
+        if (!need_session()) return out;
+        refresh_procs();
+        if (g_app.target_pid) refresh_results(g_app.page_limit);
+        out["ok"] = true;
+        ui_publish("ai_refresh");
+        return out;
+    }
+
+    out["ok"] = false;
+    out["err"] = "未知 op: " + op;
+    return out;
+}
+
+// 主循环每帧调用。三个节拍分开，避免一次做三件重活：
+//   400ms 心跳（写 ts，让 AI 知道我还活着）
+//   200ms 取指令（人等着看结果，要紧一点）
+//   900ms 跟随（比对设备侧结果数，发现 AI 改过就自动刷新）
+static void ui_tick() {
+    const double now = ImGui::GetTime();
+
+    if (now - g_app.t_pub > 0.4) {
+        g_app.t_pub = now;
+        ui_publish(nullptr);
+    }
+
+    if (now - g_app.t_cmd > 0.2) {
+        g_app.t_cmd = now;
+        json cmd;
+        if (gg::ctx::load_cmd(&cmd)) {
+            const std::string id = cmd.value("id", std::string());
+            // 30 秒前的指令不执行：UI 可能刚被打开，队列里躺着上一次会话的遗留。
+            const long long age = gg::ctx::now_secs() - cmd.value("ts", (long long)0);
+            if (id != g_app.applied_cmd_id && age <= 30) {
+                g_app.applied_cmd_id = id;
+                json res = ui_run_cmd(cmd);
+                gg::ctx::save_result(res);
+                g_app.ai_cmds_done++;
+                g_app.ai_note = "AI 下发了 " + cmd.value("op", std::string("?")) +
+                                (res.value("ok", false) ? "（已执行）" : "（失败）");
+                g_app.ai_note_t = now;
+                logf("[AI] 执行 %s%s", cmd.value("op", "?").c_str(),
+                     res.value("ok", false) ? "" : " —— 失败");
+            }
+            gg::ctx::remove_file(gg::ctx::cmd_path());
+        }
+    }
+
+    // 自动跟随：AI 那边搜过之后设备侧结果集会变，我这边不刷新就还是旧表格 ——
+    // 人会以为 AI 没干活。只比对数字，不主动拉全量（拉 1000 条要几十毫秒）。
+    if (g_app.connected && g_app.sess && now - g_app.t_follow > 0.9) {
+        g_app.t_follow = now;
+        ToolResult r = call_tool(g_app.sess, "gg_result_count", json::object());
+        if (r.ok) {
+            const int64_t remote = r.data.value("count", (int64_t)0);
+            if (g_app.total_seen >= 0 && remote != g_app.total_seen) {
+                g_app.ai_note = "结果集被外部改动（" + std::to_string(g_app.total_seen) +
+                                " → " + std::to_string(remote) + "），已同步";
+                g_app.ai_note_t = now;
+                logf("[同步] 结果集外部变化 %lld -> %lld，自动刷新",
+                     (long long)g_app.total_seen, (long long)remote);
+                refresh_results(g_app.page_limit);
+            }
+            g_app.total_seen = remote;
+            g_app.hit_total = remote;   // 顶上显示的数字也跟着对
+        }
+    }
+}
+
+}  // namespace
+
+// ===========================================================================
 // 界面
 // ===========================================================================
 static void draw_top_bar() {
@@ -485,10 +775,39 @@ static void draw_top_bar() {
     } else {
         ImGui::TextDisabled("目标: 未选择");
     }
-    ImGui::SameLine(ImGui::GetWindowWidth() - 210);
+
+    // AI 联动开关。开着的时候每次搜索/选中都会写进 build/gg-shared/context.json，
+    // AI 那边调 gg_context 就能读到"人搜的是什么"。关掉会删文件，AI 立刻看不到。
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    if (g_app.ai_context) {
+        ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.4f, 1.0f), "AI 联动 开");
+    } else {
+        ImGui::TextDisabled("AI 联动 关");
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("共享当前目标 / 搜索值 / 选中行给 AI（build/gg-shared/context.json），"
+                          "AI 用 gg_context 读、gg_ui_command 反向驱动本窗口。\n点击切换。");
+    if (ImGui::IsItemClicked()) {
+        g_app.ai_context = !g_app.ai_context;
+        if (g_app.ai_context) {
+            ui_publish("toggle_on");
+            logf("[AI] 联动已开启 —— AI 现在能读到你搜的值和选中的行");
+        } else {
+            gg::ctx::remove_file(gg::ctx::context_path());
+            logf("[AI] 联动已关闭（context.json 已删除，AI 读到的是\"未运行\"）");
+        }
+    }
+    if (g_app.ai_cmds_done > 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(已响应 %d 条)", g_app.ai_cmds_done);
+    }
+
+    ImGui::SameLine(ImGui::GetWindowWidth() - 130);
     if (ImGui::Button("刷新进程列表")) refresh_procs();
     ImGui::SameLine();
-    ImGui::TextDisabled("F1 帮助");
+    ImGui::TextDisabled("F1");
 }
 
 static void draw_proc_panel() {
@@ -569,6 +888,12 @@ static void draw_search_panel() {
     if (ImGui::Combo("##lim", &li, limits, 5)) g_app.page_limit = limit_vals[li];
     ImGui::SameLine();
     ImGui::TextDisabled("显示上限");
+
+    // AI 刚做了什么 / 结果集被外部改了 —— 不弹窗，只在搜索区下方留一句，
+    // 人的视线就在附近，能看到但不打断操作。6 秒后自动消失。
+    if (!g_app.ai_note.empty() && ImGui::GetTime() - g_app.ai_note_t < 6.0) {
+        ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.32f, 1.0f), "AI: %s", g_app.ai_note.c_str());
+    }
 }
 
 static void draw_results() {
@@ -832,6 +1157,7 @@ int main(int argc, char** argv) {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+        ui_tick();      /* 与 AI 的联动：心跳 / 取指令 / 跟随外部结果集变化 */
         draw_ui();
         ImGui::Render();
 
@@ -840,6 +1166,18 @@ int main(int argc, char** argv) {
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, (float*)&clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         g_pSwapChain->Present(1, 0);
+    }
+
+    // 标记为已关闭而不是删文件：AI 那边 gg_context 仍能看到"人最后在搜什么"，
+    // 只是 running=false（shared_ctx::ui_alive 会先看 closed）。
+    if (g_app.ai_context) {
+        json c;
+        if (gg::ctx::load(&c)) {
+            c["closed"] = true;
+            c["ts"] = gg::ctx::now_secs();
+            gg::ctx::save(c);
+        }
+        gg::ctx::remove_file(gg::ctx::cmd_path());
     }
 
     ImGui_ImplDX11_Shutdown();
