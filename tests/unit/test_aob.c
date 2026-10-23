@@ -84,7 +84,7 @@ int main(void) {
     results_init(&r, 100000);
     gg_driver_t drv;
     memset(&drv, 0, sizeof(drv));
-    int64_t n = search_aob(&drv, 1, &r, pat, plen, REGION_ANONYMOUS);
+    int64_t n = search_aob(&drv, 1, &r, pat, NULL, plen, REGION_ANONYMOUS);
     CHECK(n == 3, "3 个特征全命中 (块内+跨块x2)");
     int has_in = 0, has_cross = 0, has_cross2 = 0;
     for (size_t i = 0; i < r.count; i++) {
@@ -103,7 +103,7 @@ int main(void) {
     fault_page_at(0x10000);                             /* 页 0x10000 不可读 */
     region_add(TEST_MEM_BASE, TEST_MEM_BASE + TEST_MEM_SZ);
     results_init(&r, 100000);
-    n = search_aob(&drv, 1, &r, pat, plen, REGION_ANONYMOUS);
+    n = search_aob(&drv, 1, &r, pat, NULL, plen, REGION_ANONYMOUS);
     CHECK(n == 0, "特征跨故障页不命中 (断裂语义)");
     results_clear(&r);
 
@@ -114,9 +114,49 @@ int main(void) {
     memcpy(g_mem + (p3 - TEST_MEM_BASE), pat2, 3);
     region_add(TEST_MEM_BASE, TEST_MEM_BASE + TEST_MEM_SZ);
     results_init(&r, 100000);
-    n = search_aob(&drv, 1, &r, pat2, 3, REGION_ANONYMOUS);
+    n = search_aob(&drv, 1, &r, pat2, NULL, 3, REGION_ANONYMOUS);
     CHECK(n == 1 && r.count == 1 && r.addrs[0] == p3, "短 pattern 跨块命中");
     results_clear(&r);
+
+    /* === 通配符：解析 + 匹配 ===
+     * 社区签名（frida / UE4 系列的 GNames、GUObjectArray）大量使用半字节通配，
+     * 不支持通配等于一个签名都用不了。这里覆盖三种写法。 */
+    {
+        uint8_t wp[16], wm[16];
+        int wn = parse_hex_pattern_masked("e1 ?? 40 b9 ?2 04 ?0 39", wp, wm, sizeof(wp));
+        CHECK(wn == 8, "通配解析: 字节数正确");
+        CHECK(wp[1] == 0 && wm[1] == 0x00, "通配解析: ?? 整字节通配");
+        CHECK(wp[4] == 0x02 && wm[4] == 0x0F, "通配解析: ?2 只比低半字节");
+        /* ?0 = 高半字节任意 + 低半字节固定 0 → pat=0x00 mask=0x0F
+         * （注意别和 0? 搞反：0? 才是只比高半字节） */
+        CHECK(wp[6] == 0x00 && wm[6] == 0x0F, "通配解析: ?0 只比低半字节");
+        {
+            uint8_t hp[4], hm[4];
+            int hn = parse_hex_pattern_masked("0?", hp, hm, sizeof(hp));
+            CHECK(hn == 1 && hp[0] == 0x00 && hm[0] == 0xF0,
+                  "通配解析: 0? 只比高半字节");
+        }
+
+        /* 带通配的实际匹配：内存里放 e1 7f 40 b9 32 04 50 39，应命中 */
+        mem_reset();
+        const uint8_t real[] = { 0xe1, 0x7f, 0x40, 0xb9, 0x32, 0x04, 0x50, 0x39 };
+        uint64_t p4 = TEST_MEM_BASE + 0x330;
+        memcpy(g_mem + (p4 - TEST_MEM_BASE), real, sizeof(real));
+        /* 再放一个"只差通配位"的干扰：低半字节不匹配 (?2 vs 0x33) */
+        const uint8_t fake[] = { 0xe1, 0x7f, 0x40, 0xb9, 0x33, 0x04, 0x50, 0x39 };
+        uint64_t p5 = TEST_MEM_BASE + 0x340;
+        memcpy(g_mem + (p5 - TEST_MEM_BASE), fake, sizeof(fake));
+        region_add(TEST_MEM_BASE, TEST_MEM_BASE + TEST_MEM_SZ);
+        results_init(&r, 100000);
+        n = search_aob(&drv, 1, &r, wp, wm, 8, REGION_ANONYMOUS);
+        CHECK(n == 1 && r.count == 1 && r.addrs[0] == p4,
+              "通配匹配: 命中真实值、跳过只差通配位的干扰");
+        results_clear(&r);
+
+        /* 旧接口必须拒绝带通配的串（保持语义） */
+        CHECK(parse_hex_pattern("e1 ??", wp, sizeof(wp)) < 0,
+              "旧接口 parse_hex_pattern 拒绝通配串");
+    }
 
     printf("\n== %s (%d pass, %d fail) ==\n", fail ? "FAILED" : "ALL PASS", pass, fail);
     return fail ? 1 : 0;

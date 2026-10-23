@@ -54,11 +54,16 @@ void h_search(int fd, uint32_t seq, cJSON *p) {
     int64_t found = 0;
 
     if (type == VT_BYTES) {
-        /* AoB 特征码搜索: value = hex 字符串 "48 65 4C 4C" */
-        uint8_t pat[256];
-        int plen = parse_hex_pattern(vs, pat, sizeof(pat));
+        /* AoB 特征码搜索: value = hex 字符串 "48 65 4C 4C"，支持通配：
+         *   ??  整字节通配
+         *   8?  只比高半字节      ?B  只比低半字节
+         * 社区的 UE4/GNames/GUObjectArray 等签名大量使用半字节通配，
+         * 不支持通配等于一个签名都用不了（2026-10-23 实测卡在这）。 */
+        uint8_t pat[256], mask[256];
+        int plen = parse_hex_pattern_masked(vs, pat, mask, sizeof(pat));
         if (plen <= 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "bad aob pattern"); return; }
-        found = search_aob(&g_eng.drv, g_eng.session_pid, &g_eng.results, pat, (size_t)plen, region);
+        found = search_aob(&g_eng.drv, g_eng.session_pid, &g_eng.results,
+                           pat, mask, (size_t)plen, region);
         if (found < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_INTERNAL, "aob search failed"); return; }
     } else {
         int ok = 0;
@@ -260,15 +265,57 @@ void h_clear_results(int fd, uint32_t seq, cJSON *p) {
 void h_set_results(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.safe_mode) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_SAFE_MODE, "safe mode: write denied"); return; }
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_NO_SESSION, "no session"); return; }
-    int type = parse_vt(p, VT_DWORD);
+    /* all=true：把整个结果集改成同一个值。
+     * 没这条时只能发 values 数组，10000 条 ≈ 300KB JSON 还要逐条解析；而结果集本来就
+     * 在设备端，遍历不必过线。type 缺省(0) 时取结果集自身类型 —— 由调用方猜成 dword
+     * 会把 qword 结果写成半个值。 */
+    int all = 0;
+    cJSON *ja = cJSON_GetObjectItem(p, "all");
+    if (ja) all = cJSON_IsBool(ja) ? (cJSON_IsTrue(ja) ? 1 : 0) : (ja->valuedouble != 0);
+
+    int type = parse_vt(p, all ? 0 : VT_DWORD);
+    if (type < 0) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_BAD_REQUEST, "invalid " VT_HINT); return; }
     cJSON *vals = cJSON_GetObjectItem(p, "values");
-    if (!cJSON_IsArray(vals)) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_BAD_REQUEST, "values array required"); return; }
+    if (!all && !cJSON_IsArray(vals)) {
+        send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_BAD_REQUEST, "values array required (or all=true)");
+        return;
+    }
+    if (all && type == 0) {
+        type = g_eng.results.exact_vt > 0 ? g_eng.results.exact_vt : g_eng.results.fuzzy_vt;
+        if (type <= 0) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_BAD_REQUEST,
+                                  "type required (no search result type on record)"); return; }
+    }
     /* vt_size(VT_BYTES)=0、非法 type 为负：逐条写 0 字节会被计成成功，
      * written 虚报成「全改完了」。与 h_write / h_freeze 对齐，入口一次拒绝。 */
     int isz = vt_size(type);
     if (isz <= 0) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_BAD_REQUEST,
                              "type bytes not supported for set_results"); return; }
     if (g_eng.results.fuzzy_active) results_materialize(&g_eng.results);
+
+    if (all) {
+        const cJSON *jv = cJSON_GetObjectItem(p, "value");
+        if (!jv) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_BAD_REQUEST,
+                            "value required when all=true"); return; }
+        char vbuf[64];
+        int ok = 0;
+        uint64_t value = parse_value_str(type, j_scalar_str((cJSON *)jv, vbuf, sizeof(vbuf)), &ok);
+        if (!ok) { send_err(fd, GGCMD_SET_RESULTS, seq, GGERR_BAD_REQUEST, "bad value"); return; }
+        uint8_t buf[8];
+        encode_value_local(type, value, buf);
+        size_t written = 0, skipped = 0;
+        for (size_t i = 0; i < g_eng.results.count; i++) {
+            if (driver_write(&g_eng.drv, g_eng.session_pid, g_eng.results.addrs[i],
+                             buf, (size_t)isz) == (ssize_t)isz) written++;
+            else skipped++;
+        }
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddNumberToObject(r, "written", (double)written);
+        cJSON_AddNumberToObject(r, "skipped", (double)skipped);
+        cJSON_AddNumberToObject(r, "total", (double)g_eng.results.count);
+        send_ok(fd, GGCMD_SET_RESULTS, seq, r);
+        cJSON_Delete(r);
+        return;
+    }
 
     int n = cJSON_GetArraySize(vals);
     if (n > 10000) n = 10000;

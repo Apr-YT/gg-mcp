@@ -42,6 +42,8 @@ typedef struct {
     int vtype;
     int mode;              /* 0=exact 1=range 2=aob */
     uint8_t pat[256];      /* exact: 编码 pattern; aob: 原始 pattern */
+    uint8_t pat_mask[256]; /* aob: 逐位掩码，1=比较该 bit；全 0xFF 表示无通配 */
+    int     pat_has_wild;  /* aob: 1=含通配，走逐字节比较 */
     size_t pat_len;        /* aob 用 */
     uint64_t ilo, ihi;     /* range 整数边界 */
     double dlo, dhi;       /* range 浮点边界 */
@@ -268,12 +270,30 @@ static void *search_worker_main(void *arg) {
                 if (keep) memmove(chunk, chunk + total - keep, keep);
                 carry = keep;
             } else {
-                /* aob: carry 缓冲跨块匹配 */
+                /* aob: carry 缓冲跨块匹配
+                 *
+                 * 无通配时走 memcmp（快）；有通配时逐字节按位比较 ——
+                 * 社区签名大量使用半字节通配（如 frida's "?8 ?? ?? ?? 08 01"），
+                 * 不支持通配等于一个签名都用不了。 */
                 size_t total = carry + rd;
-                for (size_t i = 0; i + w->pat_len <= total; i++) {
-                    if (memcmp(chunk + i, w->pat, w->pat_len) == 0) {
-                        if (w_push(w, addr + i - carry) < 0) { free(chunk); if (pmfd >= 0) close(pmfd); return NULL; }
-                        found++;
+                if (!w->pat_has_wild) {
+                    for (size_t i = 0; i + w->pat_len <= total; i++) {
+                        if (memcmp(chunk + i, w->pat, w->pat_len) == 0) {
+                            if (w_push(w, addr + i - carry) < 0) { free(chunk); if (pmfd >= 0) close(pmfd); return NULL; }
+                            found++;
+                        }
+                    }
+                } else {
+                    for (size_t i = 0; i + w->pat_len <= total; i++) {
+                        size_t j = 0;
+                        for (; j < w->pat_len; j++) {
+                            uint8_t m = w->pat_mask[j];
+                            if (m && (chunk[i + j] & m) != w->pat[j]) break;
+                        }
+                        if (j == w->pat_len) {
+                            if (w_push(w, addr + i - carry) < 0) { free(chunk); if (pmfd >= 0) close(pmfd); return NULL; }
+                            found++;
+                        }
                     }
                 }
                 size_t keep = total >= w->pat_len - 1 ? w->pat_len - 1 : total;
@@ -528,27 +548,65 @@ int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
 /* ---------- AoB 特征码搜索 ---------- */
 
 /* 解析 hex pattern: 支持 "48 65 4C 4C" / "48654C4C"（空格/逗号可选）。返回字节数; -1 解析失败。 */
-int parse_hex_pattern(const char *s, uint8_t *out, size_t max) {
+static inline int hexval(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+int parse_hex_pattern_masked(const char *s, uint8_t *out, uint8_t *mask, size_t max) {
     size_t n = 0;
     if (!s) return -1;
     while (*s) {
         while (*s == ' ' || *s == '\t' || *s == ',') s++;
         if (!*s) break;
-        if (!isxdigit((unsigned char)s[0]) || !isxdigit((unsigned char)s[1])) return -1;
-        int hi = s[0] <= '9' ? s[0] - '0' : (s[0] | 0x20) - 'a' + 10;
-        int lo = s[1] <= '9' ? s[1] - '0' : (s[1] | 0x20) - 'a' + 10;
         if (n >= max) return -1;
-        out[n++] = (uint8_t)((hi << 4) | lo);
+
+        int h = (s[0] == '?') ? -1 : hexval((unsigned char)s[0]);
+        if (s[0] != '?' && h < 0) return -1;
+        /* 单字符通配（"?" 后面直接是分隔符/结尾）：当成整字节通配 */
+        if (s[0] == '?' && (s[1] == '\0' || s[1] == ' ' || s[1] == '\t' || s[1] == ',')) {
+            out[n] = 0; mask[n] = 0x00; n++; s += 1; continue;
+        }
+        if (!*s || !s[1]) return -1;
+        int l = (s[1] == '?') ? -1 : hexval((unsigned char)s[1]);
+        if (s[1] != '?' && l < 0) return -1;
+
+        /* 半字节组合成 pat + mask：
+         *   8B → pat=0x8B mask=0xFF
+         *   ?B → pat=0x0B mask=0x0F   （只比低半字节）
+         *   8? → pat=0x80 mask=0xF0   （只比高半字节）
+         *   ?? → pat=0x00 mask=0x00   （整字节通配） */
+        uint8_t p = 0, m = 0;
+        if (h >= 0) { p |= (uint8_t)(h << 4); m |= 0xF0; }
+        if (l >= 0) { p |= (uint8_t)l;        m |= 0x0F; }
+        out[n] = p; mask[n] = m; n++;
         s += 2;
     }
     return (int)n;
 }
 
+int parse_hex_pattern(const char *s, uint8_t *out, size_t max) {
+    /* 旧接口：只接受纯 hex 字节。带通配的串交给 _masked 版本。 */
+    uint8_t mask[256];
+    int n = parse_hex_pattern_masked(s, out, mask, max);
+    if (n <= 0) return n;
+    for (int i = 0; i < n; i++)
+        if (mask[i] != 0xFF) return -1;      /* 有通配 → 旧接口不认 */
+    return n;
+}
+
 /* AoB 搜索: 在区域内滑动匹配 pat[plen] 字节序列, 命中记录起始地址。
  * 结果条目值类型记 VT_BYTE。 */
 int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
-                   const uint8_t *pat, size_t plen, int region_type) {
+                   const uint8_t *pat, const uint8_t *mask,
+                   size_t plen, int region_type) {
     if (!pat || plen == 0 || plen > 256) return -1;
+    int has_wild = 0;
+    if (mask) {
+        for (size_t i = 0; i < plen; i++) if (mask[i] != 0xFF) { has_wild = 1; break; }
+    }
 
     size_t nreg = 0;
     gg_map_region_t *regs = process_search_regions(pid, &nreg, region_type);
@@ -568,6 +626,9 @@ int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
             ws[i].d = d; ws[i].pid = pid; ws[i].regs = regs;
             ws[i].vtype = VT_BYTE; ws[i].mode = 2;
             memcpy(ws[i].pat, pat, plen);
+            if (mask) memcpy(ws[i].pat_mask, mask, plen);
+            else memset(ws[i].pat_mask, 0xFF, plen);
+            ws[i].pat_has_wild = has_wild;
             ws[i].pat_len = plen;
             ws[i].hit_cap = keep_cap;
         }

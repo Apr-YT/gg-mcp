@@ -93,9 +93,23 @@ int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
                      int vtype, double vmin, double vmax, int region_type, int aligned);
 
 /* AoB 特征码搜索：pat[plen] 字节序列滑动匹配，命中起始地址。 */
+/* AoB 特征码解析：支持三种写法
+ *   8B            → 整字节精确（pat=0x8B, mask=0xFF）
+ *   8?  / ?B      → 半字节通配（社区签名最常见，如 frida's "?8 ?? ?? ?? 08 01"）
+ *   ??            → 整字节通配
+ * mask 是逐位掩码：匹配条件是 (mem & mask[i]) == pat[i]。
+ * mask 可为 NULL（调用方只想要字节值、不关心通配），此时通配位写 0。
+ * 返回字节数；出错返回 -1。 */
+int parse_hex_pattern_masked(const char *s, uint8_t *out, uint8_t *mask, size_t max);
+
+/* 旧的纯字节接口（不含通配），保留给只接受精确序列的调用方 */
 int parse_hex_pattern(const char *s, uint8_t *out, size_t max);
+
+/* AoB 搜索。mask 为 NULL 表示整串精确（走 memcmp 快速路径）；
+ * 非 NULL 则逐字节按位比较，支持通配。 */
 int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
-                   const uint8_t *pat, size_t plen, int region_type);
+                   const uint8_t *pat, const uint8_t *mask,
+                   size_t plen, int region_type);
 
 /* 模糊初始化：全置候选 + 快照。返回扫描元素数；-1 出错。 */
 int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
