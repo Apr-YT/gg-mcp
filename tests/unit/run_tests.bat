@@ -217,6 +217,14 @@ rem detail fail with -EINVAL while watch_poll silently returned 0 hits.
 echo === hwbp detail guardrail: GET_HWBP_HIT_DETAIL carries a non-zero buf_size ===
 "%PYEXE%" "%ROOT%\tests\unit\check_hwbp_detail.py" "%ROOT%"
 if errorlevel 1 ( echo [FAIL] hwbp detail guardrail & exit /b 1 )
+
+rem scalar-return guard: rwproc_call_ex treats the syscall return value as
+rem "bytes written back", so a command that returns a scalar (CMD_ANON_GET_FD
+rem returns the fd number) trips a bogus "result overflow" as soon as fd > out_cap.
+rem Those commands must use rwproc_call(out=NULL).
+echo === scalar-return guardrail: scalar commands must not use rwproc_call_ex ===
+"%PYEXE%" "%ROOT%\tests\unit\check_scalar_cmd.py" "%ROOT%"
+if errorlevel 1 ( echo [FAIL] scalar-return guardrail & exit /b 1 )
 goto :gg_guardrails_done
 
 :gg_skip_guardrails

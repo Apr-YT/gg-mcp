@@ -166,6 +166,17 @@ static ssize_t rwproc_call_ex(gg_driver_t *d, int fd, char cmd,
         return -1;
     }
     if (out) {
+        /* n 的语义：read()/ioctl() 返回「内核回写了多少字节」（含 32 位头之后的
+         * payload 长度）。**这条约定只对"回写类"命令成立。**
+         *
+         * 少数命令的返回值是**标量本身**而不是长度 —— 典型是
+         * RWPROC_CMD_ANON_GET_FD：驱动直接返回 fd 号。这时 fd=12 而调用方
+         * out_cap=4，就会误报 "result overflow: got 12, cap 4"，错误文案完全
+         * 指不到真正原因。这类命令必须用 rwproc_call()（out=NULL，返回值即标量）。
+         *
+         * 护栏：tests/unit/check_scalar_cmd.py 会扫描本文件的调用点，发现
+         * 标量命令走了 call_ex 就直接失败。新增同类命令时把宏名加进那边的
+         * SCALAR_CMDS 列表。 */
         size_t n = (r > 0) ? (size_t)r : out_cap;
         if (n > out_cap) {
             snprintf(d->last_error, sizeof(d->last_error),
