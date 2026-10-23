@@ -156,13 +156,15 @@ int watch_start(gg_watch_t *w, gg_driver_t *drv, pid_t pid, uint64_t addr,
         int nb = 0;
         if (rwproc_hwbp_start_all(drv, pid, addr, type, len,
                                   w->rwproc_bp_ids, GG_RWPROC_MAX_BPS, &nb) != 0) {
+            /* 精度限定 %.200s：last_error 本身 256 字节，原样拼进同尺寸缓冲会截断
+             * （-Wall 报 snprintf output may be truncated），把最有信息量的尾部丢掉。 */
             snprintf(w->last_error, sizeof(w->last_error),
-                     "rwproc_hwbp_start_all failed: %s", drv->last_error);
+                     "rwproc_hwbp_start_all failed: %.200s", drv->last_error);
             return -1;
         }
         if (nb == 0) {
             snprintf(w->last_error, sizeof(w->last_error),
-                     "rwproc hwbp: no threads registered (%s)", drv->last_error);
+                     "rwproc hwbp: no threads registered (%.200s)", drv->last_error);
             return -1;
         }
         for (int i = 0; i < nb; i++) {

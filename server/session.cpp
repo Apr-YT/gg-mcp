@@ -1,4 +1,6 @@
-// session.cpp — 45 个 MCP 工具实现（薄代理 → gg-agentd）
+// session.cpp — MCP 工具实现（薄代理 → gg-agentd）
+// 工具数量不在这里写死：以 schema.cpp::build() 为准，由
+// tests/unit/check_dispatch_consistency.py 交叉校验（写死数字必然漂移）。
 //
 // M1 表驱动重构（2026-08-18）：call_tool 的分发从 if (name == ...) 链
 // 改为 kTools[] 表（{name, fn, write_op}）。参数映射逐行搬运，零行为变化：
@@ -158,6 +160,21 @@ static bool parse_flag01(const json& v, int* out) {
         return false;
     }
     return false;
+}
+
+/* force 参数已永久禁用：rwproc33 的 is_force_read 在本机内核上对活跃页会 panic
+ * （实测连续两次崩内核重启，见 AGENTS 第 27 条），agentd 侧一律拒绝。
+ * schema 里已不再声明该参数，但旧客户端/直连脚本仍可能传 —— 传了必须明确报错，
+ * 不能静默忽略：那会让调用方以为"强制读生效了"，实际拿到的是普通读的结果。
+ * 返回非 null 即表示本次调用应直接把该错误返回出去。 */
+static json force_guard(Session::CallCtx& c, const json& a) {
+    int f = 0;
+    if (!parse_flag01(a.contains("force") ? a["force"] : json(), &f))
+        return c.fail(GGERR_BAD_REQUEST, "force must be 0 or 1");
+    if (!f) return json();
+    return c.fail(GGERR_BAD_REQUEST,
+                  "force is permanently disabled: rwproc33 is_force_read panics this kernel "
+                  "on live pages. Remove the force parameter (plain reads are unaffected).");
 }
 
 // 把 uint64 地址格式化成下行用的字符串
@@ -450,7 +467,12 @@ json tool_screen_diff(Session::CallCtx& c, const json& a) {
  * 结果集做一次 refine。省掉的不是截图时间，是 AI 自己"截图→比对→再截图"的两三轮推理。
  *
  * 为什么同步阻塞在 handler 里：这本来就是"等一件事发生"，异步化只会让 AI 多一次
- * 轮询问"好了吗"。所以 timeout_ms 有硬上限（60s），避免把 MCP 调用挂死。
+ * 轮询问"好了吗"。所以 timeout_ms 有硬上限。
+ *
+ * 上限为什么是 10s 而不是 60s：call_tool 全程持会话锁（结果集是设备端全局单例，
+ * 并发工具调用会互相踩），阻塞期间其他所有工具调用都在排队。60s 的上限意味着
+ * 一次误用能把整个服务冻住一分钟。10s 足够覆盖"点一下等数字变"，再长请改用
+ * gg_screen_diff + 手动 refine，把等待切回给调用方。
  *
  * settle_ms 存在的理由：数值滚动动画（金币从 100 涨到 150 会逐帧跳）期间 refine，
  * 会按中间值判定。默认等 100ms 再 refine；目标用逐帧插值时调大。
@@ -464,7 +486,7 @@ json tool_screen_watch_refine(Session::CallCtx& c, const json& a) {
 
     auto clamp_i = [](int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); };
     int timeout_ms = clamp_i((a.contains("timeout_ms") && a["timeout_ms"].is_number())
-                                 ? a["timeout_ms"].get<int>() : 5000, 200, 60000);
+                                 ? a["timeout_ms"].get<int>() : 5000, 200, 10000);
     int poll_ms = clamp_i((a.contains("poll_ms") && a["poll_ms"].is_number())
                               ? a["poll_ms"].get<int>() : 250, 100, 5000);
     int settle_ms = clamp_i((a.contains("settle_ms") && a["settle_ms"].is_number())
@@ -612,10 +634,7 @@ json tool_read(Session::CallCtx& c, const json& a) {
         return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
     c.params["addr"] = addr_to_wire(addr);
     if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
-    int force = 0;
-    if (!parse_flag01(a.contains("force") ? a["force"] : json(), &force))
-        return c.fail(GGERR_BAD_REQUEST, "force must be 0 or 1");
-    if (force) c.params["force"] = force;
+    if (json g = force_guard(c, a); !g.is_null()) return g;
     return c.send(GGCMD_READ);
 }
 json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / gg_hex_dump
@@ -677,9 +696,7 @@ json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / 
         if (addr > UINT64_MAX - static_cast<uint64_t>(len))
             return c.fail(GGERR_BAD_REQUEST, "addr + len overflows the address space");
 
-        int force = 0;
-        if (!parse_flag01(a.contains("force") ? a["force"] : json(), &force))
-            return c.fail(GGERR_BAD_REQUEST, "force must be 0 or 1");
+        if (json g = force_guard(c, a); !g.is_null()) return g;
 
         // 先写 .part，全部段成功才改名 —— 避免中途失败把同名旧文件截断成半截数据。
         ensure_parent_dirs(path);
@@ -687,7 +704,10 @@ json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / 
         FILE* f = fopen(tmp_path.c_str(), "wb");
         if (!f) return c.fail(GGERR_BAD_REQUEST, "cannot open save_to: " + tmp_path);
 
-        const long long SEG = 65536;   // 与 agentd h_read_bytes 上限一致
+        /* 每段 256KB：等于 agentd 的 GG_SEARCH_CHUNK，也是驱动单次读上限
+         * （RWPROC_MAX_IO）。此前写的是 65536，注释却声称"与 agentd 一致"，
+         * 实际把 dump 速度白砍到 1/4 —— 设备端一直能收 256KB。 */
+        const long long SEG = 256 * 1024;
         unsigned long long file_len = 0, read_ok = 0;
         int segs = 0;
         int first_err = 0;
@@ -701,7 +721,6 @@ json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / 
             json params;
             params["addr"] = addr_buf;
             params["len"] = chunk;
-            if (force) params["force"] = force;
             json out;
             int rc = c.device_call(GGCMD_READ_BYTES, params, &out);
             std::string hex;
@@ -766,7 +785,9 @@ json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / 
     }
     /* 非落盘模式（hex 返回）：addr/len 同样要显式校验 ——
      * 旧实现直接把 a["addr"] 塞进 params，大地址经 JSON double 会丢精度，
-     * len 传字符串则抛异常被吞成 -32603。上限 65536 与 agentd h_read_bytes 一致。 */
+     * len 传字符串则抛异常被吞成 -32603。
+     * 上限 65536 是**有意收紧**（设备端能收 256KB）：hex 是一字节两字符，
+     * 256KB 会变成 512KB 文本直接灌进对话上下文。要 dump 大段请用 save_to。 */
     uint64_t addr = 0;
     if (!parse_addr(a["addr"], &addr))
         return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or numeric string");
@@ -775,10 +796,7 @@ json tool_read_bytes(Session::CallCtx& c, const json& a) {   // gg_read_bytes / 
         return c.fail(GGERR_BAD_REQUEST, "len must be an integer in 1..65536");
     c.params["addr"] = addr_to_wire(addr);
     c.params["len"] = len;
-    int force = 0;
-    if (!parse_flag01(a.contains("force") ? a["force"] : json(), &force))
-        return c.fail(GGERR_BAD_REQUEST, "force must be 0 or 1");
-    if (force) c.params["force"] = force;
+    if (json g = force_guard(c, a); !g.is_null()) return g;
     return c.send(GGCMD_READ_BYTES);
 }
 json tool_view_memory(Session::CallCtx& c, const json& a) {
@@ -793,10 +811,7 @@ json tool_view_memory(Session::CallCtx& c, const json& a) {
     }
     c.params["range"] = rng;
     if (a.contains("element_type")) c.params["element_type"] = a["element_type"];
-    int force = 0;
-    if (!parse_flag01(a.contains("force") ? a["force"] : json(), &force))
-        return c.fail(GGERR_BAD_REQUEST, "force must be 0 or 1");
-    if (force) c.params["force"] = force;
+    if (json g = force_guard(c, a); !g.is_null()) return g;
     return c.send(GGCMD_VIEW_MEMORY);
 }
 json tool_write(Session::CallCtx& c, const json& a) {
@@ -954,6 +969,7 @@ json tool_ghost_swipe(Session::CallCtx& c, const json& a) {
 }
 
 // ---- 状态/内核 ----
+json tool_self_test(Session::CallCtx& c, const json&) { return c.send(GGCMD_SELF_TEST); }
 json tool_kernel_status(Session::CallCtx& c, const json&) { return c.send(GGCMD_KERNEL_STATUS); }
 json tool_status(Session::CallCtx& c, const json&) {
     return c.ok(c.s->local_status());
@@ -1113,7 +1129,6 @@ json tool_annotate_add(Session::CallCtx& c, const json& a) {
     if (!a.contains("tag")) return c.fail(GGERR_BAD_REQUEST, "tag required");
     json saved = c.store().add(a);
     if (saved.is_null()) return c.fail(GGERR_BAD_REQUEST, "add failed");
-    c.relay_annotate("add", saved);
     return c.ok(json{{"saved", saved}});
 }
 json tool_annotate_list(Session::CallCtx& c, const json& a) {
@@ -1129,7 +1144,6 @@ json tool_annotate_get(Session::CallCtx& c, const json& a) {
 json tool_annotate_remove(Session::CallCtx& c, const json& a) {
     std::string tag = a.value("tag", "");
     bool removed = c.store().remove(tag);
-    c.relay_annotate("remove", json{{"tag", tag}});
     return c.ok(json{{"removed", removed}, {"tag", tag}});
 }
 json tool_annotate_context(Session::CallCtx& c, const json& a) {
@@ -1137,7 +1151,7 @@ json tool_annotate_context(Session::CallCtx& c, const json& a) {
     return c.ok(json{{"context", c.store().context_text(tag)}});
 }
 
-// ---- 分发表（单一数据源；与 schema.cpp::build() 43 工具交叉校验见
+// ---- 分发表（单一数据源；与 schema.cpp::build() 的工具清单交叉校验见
 //      tests/unit/check_dispatch_consistency.py）----
 const ToolEntry kTools[] = {
     {"gg_list_processes",   tool_list_processes,   false},
@@ -1181,6 +1195,7 @@ const ToolEntry kTools[] = {
     {"gg_ghost_tap",        tool_ghost_tap,        true},
     {"gg_ghost_swipe",      tool_ghost_swipe,      true},
 
+    {"gg_self_test",        tool_self_test,        false},
     {"gg_kernel_status",    tool_kernel_status,    false},
     {"gg_status",           tool_status,           false},
     {"gg_shell",            tool_shell,            true},

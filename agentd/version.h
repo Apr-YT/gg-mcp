@@ -23,12 +23,6 @@ int  version_parse(const char *s, gg_ver_t *out);
  *   返回 1=匹配 0=不匹配 -1=解析失败 */
 int  version_match_family(const char *version, const char *pattern);
 
-/* 通过 dumpsys 获取应用版本号。成功返回 0 并填充 out（malloc，调用方 free）。 */
-int  version_from_package(const char *pkg, char **out);
-
-/* 校验版本串符合 "d.d.d" 或 "d.d" 数字形态 */
-int  version_syntactic(const char *s);
-
 /* 从 KO 文件名提取版本: "driverQX114_6.12.9.ko" → "6.12.9"
  * 取第一个"含点的数字段"（跳过名字里的数字如 QX114）。
  * 成功返回 0 并填充 out；无版本段返回 -1。 */

@@ -120,9 +120,11 @@ int main() {
         check(error_code_of(r) == GGERR_BAD_REQUEST, "f1) gg_read_bytes addr=\"-1\" rejected");
     }
 
-    // ---- f2) force 只接受 0/1 ----
-    // 旧写法 a["force"].get<int>() 对 "abc" 抛 json::type_error，
-    // 被协议层统一吞成 -32603 Internal error（参数错报成服务端故障）。
+    // ---- f2) force 参数已永久禁用 ----
+    // 历史：旧写法 a["force"].get<int>() 对 "abc" 抛 json::type_error，被协议层
+    // 统一吞成 -32603（参数错报成服务端故障）。
+    // 现在 schema 不再声明 force，且传 1 必须**明确拒绝**：rwproc33 的
+    // is_force_read 在本机内核上会 panic，静默忽略会让调用方以为强制读生效了。
     {
         json r = s.call_tool("gg_read", json{{"addr", "0x1000"}, {"force", "abc"}});
         check(r.value("isError", false) == true, "f2) force=\"abc\" -> isError");
@@ -131,9 +133,13 @@ int main() {
         r = s.call_tool("gg_read", json{{"addr", "0x1000"}, {"force", 2}});
         check(error_code_of(r) == GGERR_BAD_REQUEST, "f2) force=2 -> GGERR_BAD_REQUEST");
 
-        // 合法值不得被拒（force 合法时才会走到 device_call，无设备 → NO_DEVICE，不是 BAD_REQUEST）
+        // 传 1 现在是显式拒绝（不是"放行后由设备端拒"）
         r = s.call_tool("gg_read", json{{"addr", "0x1000"}, {"force", 1}});
-        check(error_code_of(r) != GGERR_BAD_REQUEST, "f2) force=1 passes validation");
+        check(error_code_of(r) == GGERR_BAD_REQUEST, "f2) force=1 -> GGERR_BAD_REQUEST (disabled)");
+
+        // force=0 视同未传：必须继续走 device_call（无设备 → NO_DEVICE，不是 BAD_REQUEST）
+        r = s.call_tool("gg_read", json{{"addr", "0x1000"}, {"force", 0}});
+        check(error_code_of(r) != GGERR_BAD_REQUEST, "f2) force=0 still accepted");
     }
 
     std::printf(fails ? "\n== FAILED: %d ==\n" : "\n== ALL PASS ==\n", fails);

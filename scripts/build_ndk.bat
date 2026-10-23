@@ -46,7 +46,6 @@ call "%CC%" -O3 -flto -Wall -I"%ROOT%" -I"%CAPSTONE%\include" -o "%ROOT%\build\a
   "%ROOT%\agentd\disasm.c" ^
   "%ROOT%\agentd\elfsym.c" ^
   "%ROOT%\agentd\version.c" ^
-  "%ROOT%\agentd\perf_simple.c" ^
   "%ROOT%\third_party\cJSON.c" ^
   "%CAPSTONE%\libcapstone.a" -pie
 if errorlevel 1 ( echo [FAIL] agentd & exit /b 1 )

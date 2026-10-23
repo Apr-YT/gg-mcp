@@ -118,7 +118,8 @@ static const std::vector<ToolDef>& build() {
         tool("gg_screen_watch_refine",
              "等画面变化并自动 refine：轮询指定区域，一旦检测到变化就对当前结果集做一次 refine。"
              "替代「截图→比对→再截图→refine」的两三轮往返，一次调用完成。"
-             "阻塞到触发或超时（timeout_ms 上限 60s）。"
+             "阻塞到触发或超时（timeout_ms 上限 10s；阻塞期间其他工具调用会排队，"
+             "要等更久请改用 gg_screen_diff 轮询）。"
              "典型用法：搜出一批候选 → 调它 → 在游戏里点一下买东西 → 它返回 triggered=true 和 remaining",
              json{
                  {"x", prop("integer", "左上角 X（px）")},
@@ -126,7 +127,7 @@ static const std::vector<ToolDef>& build() {
                  {"w", prop("integer", "区域宽（px）")},
                  {"h", prop("integer", "区域高（px）")},
                  {"op", prop("string", "触发后的 refine 操作", "\"enum\":[\"increased\",\"decreased\",\"unchanged\",\"changed\"]")},
-                 {"timeout_ms", prop("integer", "最长等待（默认 5000，上限 60000）")},
+                 {"timeout_ms", prop("integer", "最长等待（默认 5000，上限 10000）")},
                  {"poll_ms", prop("integer", "轮询间隔（默认 250；截图本身约 150ms，再小没有意义）")},
                  {"settle_ms", prop("number", "检测到变化后等多久再 refine（默认 100，防数字滚动动画取到中间值）")},
                  {"scale", prop("integer", "降采样倍数（默认 4，ROI 大时设备会自动上调）")},
@@ -170,18 +171,16 @@ static const std::vector<ToolDef>& build() {
              json{
                  {"addr", prop("string", "目标地址（0x 十六进制）")},
                  {"type", prop("string", "值类型", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
-                 {"force", prop("integer", "强制读取（已禁用）：is_force_read 会在本机驱动上崩内核并重启设备，传 1 直接返回错误；请保持 0")},
              },
              json{"addr"}),
         tool("gg_read_bytes",
              "读取指定地址的原始字节（hex）。save_to 指定时为落盘模式："
-             "server 自动分段读取（agentd 单段 64KB 上限），原始二进制写入 export_dir 下的文件，"
+             "server 自动分段读取（每段 256KB），原始二进制写入 export_dir 下的文件，"
              "返回 {saved,size,read_ok,segments,complete}，不占对话带宽（适合大段 dump）。"
              "读取失败的区间会被补 0 保长度对齐，此时 complete=false 并给出 missing 区间，不得当作完整数据使用",
              json{
                  {"addr", prop("string", "目标地址")},
                  {"len", prop("integer", "字节数（默认 64；hex 模式上限 65536，save_to 模式自动分段，受 max_save_bytes 约束）")},
-                 {"force", prop("integer", "强制读取（已禁用）：is_force_read 会在本机驱动上崩内核并重启设备，传 1 直接返回错误；请保持 0")},
                  {"save_to", prop("string", "落盘相对路径（可选）：只能写到配置的 export_dir 内，拒绝绝对路径、盘符与 `..`；不再返回 hex")},
              },
              json{"addr"}),
@@ -190,7 +189,6 @@ static const std::vector<ToolDef>& build() {
              json{
                  {"addr", prop("string", "目标地址")},
                  {"len", prop("integer", "字节数（默认 64）")},
-                 {"force", prop("integer", "强制读取（已禁用）：is_force_read 会在本机驱动上崩内核并重启设备，传 1 直接返回错误；请保持 0")},
              },
              json{"addr"}),
         tool("gg_view_memory",
@@ -201,7 +199,6 @@ static const std::vector<ToolDef>& build() {
                  {"addr", prop("string", "起始地址（十六进制 0x...）")},
                  {"range", prop("integer", "元素个数（按 element_type 宽度逐个解析；默认 8，上限 512）")},
                  {"element_type", prop("string", "元素解释类型", "\"enum\":[\"int32\",\"float32\",\"pointer\"]")},
-                 {"force", prop("integer", "强制读取（已禁用）：is_force_read 会在本机驱动上崩内核并重启设备，传 1 直接返回错误；请保持 0")},
              },
              json{"addr"}),
         tool("gg_write",
@@ -328,6 +325,13 @@ static const std::vector<ToolDef>& build() {
              json::object(), json::array()),
 
         // ---- 内核与 GG 核心加载 ----
+        tool("gg_self_test",
+             "驱动通道自检：打开自身进程句柄并回环读两个静态变量，确认内核通道真的能用。"
+             "不要求 attach，适合会话开始或 gg_kernel_status 报 unavailable 时先跑一次。"
+             "判据看 state/state_str，不要只看 reads —— 本机内核上「读自身进程」可能返回成功"
+             "但内容全 0（驱动对 self 路径的缺陷），跨进程读写不受影响；那种情况 state 仍是 "
+             "kernel-driver，warn 字段会说明。",
+             json::object(), json::array()),
         tool("gg_kernel_status",
              "内核驱动通道状态：kernel-driver / 降级层 / 自检 / 统计",
              json::object(), json::array()),

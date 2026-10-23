@@ -4,7 +4,7 @@
 gg-mcp 分发一致性护栏（工程改动纪律核心）
 
 职责：自动交叉校验 MCP 工具清单的两大事实源，确保「漏挂 / 错挂」立刻暴露：
-  1. server/mcp/schema.cpp  的 build() —— 对外暴露的 45 工具权威清单
+  1. server/mcp/schema.cpp  的 build() —— 对外暴露的工具权威清单
   2. server/session.cpp     的 call_tool() —— 实际分发逻辑（if name == "..." 链）
 
 规则：

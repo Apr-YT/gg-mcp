@@ -125,23 +125,32 @@ int parse_maps_line(const char *line, gg_map_region_t *r) {
 }
 
 /* ---- maps 会话级缓存 ----
- * 高頻 /proc/<pid>/maps 读取是行为特征（每次 handler 都 fopen 全量解析）。
- * 缓存当前 attach 会话的 maps，TTL 5s；attach/detach 时 maps_cache_invalidate 强制失效。
- * 返回副本（调用方 free 不影响缓存）。 */
+ * 高频 /proc/<pid>/maps 读取是行为特征（每次 handler 都 fopen 全量解析）。
+ * 缓存已解析结果，TTL 5s；attach/detach 时 maps_cache_invalidate 强制失效。
+ * 返回副本（调用方 free 不影响缓存）。
+ *
+ * 为什么不是单槽：PC 端 gg-ui 与 MCP 服务器各开一条连接，两边交替操作时会
+ * 互相把对方的 maps 缓存踢掉，等于每次都要重新解析（20ms 级开销 + 反复读
+ * /proc 的行为特征）。4 槽足以覆盖"人和 AI 各看一个进程"的常态。 */
 #define MAPS_CACHE_TTL_SEC 5
-static pid_t      g_maps_pid = -1;
-static gg_map_region_t *g_maps_cache = NULL;
-static size_t     g_maps_n = 0;
-static time_t     g_maps_ts = 0;
+#define MAPS_CACHE_SLOTS   4
+typedef struct {
+    gg_map_region_t *regions;   /* NULL = 空槽 */
+    size_t           n;
+    pid_t            pid;
+    time_t           ts;
+    unsigned long    used;      /* 最近一次命中/写入的序号，淘汰最久未用的 */
+} maps_slot_t;
+static maps_slot_t g_maps_slots[MAPS_CACHE_SLOTS];
+static unsigned long g_maps_tick = 0;
 static pthread_mutex_t g_maps_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 /* 内部版: 调用方须持 g_maps_mtx 锁（process_maps 持锁时复用, 避免递归死锁） */
 static void maps_cache_invalidate_locked(void) {
-    free(g_maps_cache);
-    g_maps_cache = NULL;
-    g_maps_n = 0;
-    g_maps_pid = -1;
-    g_maps_ts = 0;
+    for (int i = 0; i < MAPS_CACHE_SLOTS; i++) {
+        free(g_maps_slots[i].regions);
+        memset(&g_maps_slots[i], 0, sizeof(g_maps_slots[i]));
+    }
 }
 
 void maps_cache_invalidate(void) {
@@ -150,20 +159,23 @@ void maps_cache_invalidate(void) {
     pthread_mutex_unlock(&g_maps_mtx);
 }
 
-static gg_map_region_t *maps_dup_cached(size_t *out_count) {
-    gg_map_region_t *dup = malloc(g_maps_n * sizeof(*dup));
+static gg_map_region_t *maps_dup_slot(const maps_slot_t *s, size_t *out_count) {
+    gg_map_region_t *dup = malloc(s->n * sizeof(*dup));
     if (!dup) { *out_count = 0; return NULL; }
-    memcpy(dup, g_maps_cache, g_maps_n * sizeof(*dup));
-    *out_count = g_maps_n;
+    memcpy(dup, s->regions, s->n * sizeof(*dup));
+    *out_count = s->n;
     return dup;
 }
 
 gg_map_region_t *process_maps(pid_t pid, size_t *out_count) {
     pthread_mutex_lock(&g_maps_mtx);
     /* 命中缓存（同 pid + TTL 内）→ 返回副本 */
-    if (g_maps_pid == pid && g_maps_cache &&
-        (time(NULL) - g_maps_ts) < MAPS_CACHE_TTL_SEC) {
-        gg_map_region_t *d = maps_dup_cached(out_count);
+    for (int i = 0; i < MAPS_CACHE_SLOTS; i++) {
+        maps_slot_t *s = &g_maps_slots[i];
+        if (!s->regions || s->pid != pid) continue;
+        if ((time(NULL) - s->ts) >= MAPS_CACHE_TTL_SEC) break;   /* 过期，重新解析 */
+        s->used = ++g_maps_tick;
+        gg_map_region_t *d = maps_dup_slot(s, out_count);
         pthread_mutex_unlock(&g_maps_mtx);
         return d;
     }
@@ -189,14 +201,24 @@ gg_map_region_t *process_maps(pid_t pid, size_t *out_count) {
     }
     fclose(f);
 
-    /* 写入缓存（持有 arr），返回副本 */
-    maps_cache_invalidate_locked();
-    g_maps_cache = arr;
-    g_maps_n = n;
-    g_maps_pid = pid;
-    g_maps_ts = time(NULL);
+    /* 选槽：同 pid 旧槽优先复用，否则空槽，否则淘汰最久未用 */
+    int slot = -1, empty = -1, lru = 0;
+    for (int i = 0; i < MAPS_CACHE_SLOTS; i++) {
+        if (g_maps_slots[i].regions && g_maps_slots[i].pid == pid) { slot = i; break; }
+        if (!g_maps_slots[i].regions) { if (empty < 0) empty = i; continue; }
+        if (g_maps_slots[i].used < g_maps_slots[lru].used) lru = i;
+    }
+    if (slot < 0) slot = (empty >= 0) ? empty : lru;
+
+    maps_slot_t *s = &g_maps_slots[slot];
+    free(s->regions);
+    s->regions = arr;
+    s->n = n;
+    s->pid = pid;
+    s->ts = time(NULL);
+    s->used = ++g_maps_tick;
     *out_count = n;
-    gg_map_region_t *d = maps_dup_cached(out_count);
+    gg_map_region_t *d = maps_dup_slot(s, out_count);
     pthread_mutex_unlock(&g_maps_mtx);
     return d;
 }

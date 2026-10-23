@@ -128,10 +128,11 @@ typedef struct gg_driver {
     char   rwproc_bp_key[96]; /* 断点模块 auth key */
 
     /* X3: 统计计数原子化——KERNEL_STATUS 走快速通道（无锁）在搜索期间读取，
-     * 与搜索线程的原子累加并发；_Atomic 消除数据竞争（ARM64 上零额外开销）。 */
+     * 与搜索线程的原子累加并发；_Atomic 消除数据竞争（ARM64 上零额外开销）。
+     * 注意这里没有 fallbacks 计数：用户态降级通道（hook/dev/qx）已删除，
+     * 驱动失败一律直接报错，不存在"退化路径"，所以也没有可计的东西。 */
     _Atomic uint64_t stat_reads;
     _Atomic uint64_t stat_writes;
-    _Atomic uint64_t stat_fallbacks;
     char  last_error[256];   /* X3: 快速通道读取容忍撕裂（仅内容短暂不完整, JSON 仍合法） */
 } gg_driver_t;
 

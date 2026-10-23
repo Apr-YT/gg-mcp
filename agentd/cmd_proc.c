@@ -45,7 +45,6 @@ void h_self_test(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddNumberToObject(r, "result", st);
     cJSON_AddNumberToObject(r, "reads", (double)g_eng.drv.stat_reads);
     cJSON_AddNumberToObject(r, "writes", (double)g_eng.drv.stat_writes);
-    cJSON_AddNumberToObject(r, "fallbacks", (double)g_eng.drv.stat_fallbacks);
     cJSON_AddStringToObject(r, "error", g_eng.drv.last_error);
     send_ok(fd, GGCMD_SELF_TEST, seq, r);
     cJSON_Delete(r);

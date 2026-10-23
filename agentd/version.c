@@ -77,47 +77,6 @@ int version_match_family(const char *version, const char *pattern) {
     return 1;
 }
 
-int version_from_package(const char *pkg, char **out) {
-    /* 注入防御: pkg 拼入 popen 命令行。来源虽是本机 readdir 的目录名，
-     * 但共享存储下第三方应用可创建任意名称目录 —— 必须白名单校验，
-     * 只放行 Android 包名的合法字符集，杜绝 ; | $() 等元字符进入 shell。 */
-    if (!pkg || !*pkg) return -1;
-    for (const char *v = pkg; *v; v++) {
-        if (!(isalnum((unsigned char)*v) || *v == '.' || *v == '_')) return -1;
-    }
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "dumpsys package %s 2>/dev/null | grep -m1 'versionName='", pkg);
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return -1;
-    char line[256];
-    *out = NULL;
-    while (fgets(line, sizeof(line), fp)) {
-        char *eq = strstr(line, "versionName=");
-        if (!eq) continue;
-        eq += strlen("versionName=");
-        char *end = eq;
-        while (*end && *end != '\n' && *end != ' ' && *end != '\r') end++;
-        size_t len = (size_t)(end - eq);
-        if (len == 0) continue;
-        char *res = malloc(len + 1);
-        if (!res) break;   /* 分配失败：放弃本次解析（*out 仍为 NULL，调用方按失败处理） */
-        memcpy(res, eq, len);
-        res[len] = 0;
-        *out = res;
-        break;
-    }
-    int rc = pclose(fp);
-    if (*out == NULL) return -1;
-    (void)rc;
-    return 0;
-}
-
-int version_syntactic(const char *s) {
-    gg_ver_t v;
-    return (version_parse(s, &v) == 0 && v.valid) ? 1 : 0;
-}
-
 int version_from_ko_name(const char *name, char *out, size_t outsz) {
     const char *p = name;
     while (*p) {

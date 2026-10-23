@@ -149,6 +149,9 @@ void h_auth(int fd, uint32_t seq, cJSON *p, int *authed) {
         return;
     }
     *authed = 1;
+    /* 认证通过 → 把读超时从"未认证的 10s"放宽到正常值（见 main.c 的
+     * GG_CONN_PREAUTH_TIMEOUT_SEC）。不做这一步，长搜索会被 10s 超时打断。 */
+    conn_arm_idle_timeout(fd);
     /* 客户端声明能重组分片（"frag":1）才给它发分片，否则保持单帧上限。
      * 这个协商是必须的：旧客户端收到 GGWF_MORE 帧会把第一片当完整响应解析。 */
     cJSON *fj = cJSON_GetObjectItem(p, "frag");

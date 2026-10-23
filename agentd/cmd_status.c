@@ -29,7 +29,6 @@ void h_kernel_status(int fd, uint32_t seq, cJSON *p) {
     int st = __atomic_load_n(&d->state, __ATOMIC_RELAXED);
     uint64_t reads  = atomic_load_explicit(&d->stat_reads, memory_order_relaxed);
     uint64_t writes = atomic_load_explicit(&d->stat_writes, memory_order_relaxed);
-    uint64_t falls  = atomic_load_explicit(&d->stat_fallbacks, memory_order_relaxed);
     int ko_loaded = __atomic_load_n(&d->ko_loaded, __ATOMIC_RELAXED);
     int frozen    = freeze_count(&g_eng.freeze);
     int safe      = __atomic_load_n(&g_eng.safe_mode, __ATOMIC_RELAXED);
@@ -53,7 +52,6 @@ void h_kernel_status(int fd, uint32_t seq, cJSON *p) {
     cJSON_AddStringToObject(r, "state_str", driver_state_str(st));
     cJSON_AddNumberToObject(r, "reads", (double)reads);
     cJSON_AddNumberToObject(r, "writes", (double)writes);
-    cJSON_AddNumberToObject(r, "fallbacks", (double)falls);
     cJSON_AddStringToObject(r, "error", err);
     cJSON_AddBoolToObject(r, "ko_loaded", ko_loaded ? 1 : 0);
     cJSON_AddStringToObject(r, "ko_module", ko_mod);
@@ -76,13 +74,8 @@ void h_kernel_status(int fd, uint32_t seq, cJSON *p) {
     cJSON_Delete(r);
 }
 
-/* cmd_view.c（拆分外迁） */
-void h_view_memory(int fd, uint32_t seq, cJSON *p);
-void h_resolve_symbol(int fd, uint32_t seq, cJSON *p);
-void h_pointer_chain(int fd, uint32_t seq, cJSON *p);
-
-/* ---------------- 安全 shell（白名单 argv 直执行, 不经 sh, 防注入） ---------------- */
-/* shell_split_argv / shell_argv_allowed 见 shell_util.h（与单元测试共享单一事实源）。 */
+/* cmd_view.c / cmd_shell.c 的 handler 声明统一在 engine_internal.h，
+ * 本文件不再重复前置声明（拆分期残留，重复声明与头文件不一致时编译器不报错）。 */
 
 void h_device_info(int fd, uint32_t seq, cJSON *p) {
     cJSON *r = cJSON_CreateObject();
@@ -96,8 +89,5 @@ void h_device_info(int fd, uint32_t seq, cJSON *p) {
     send_ok(fd, GGCMD_DEVICE_INFO, seq, r);
     cJSON_Delete(r);
 }
-
-/* cmd_shell.c（拆分外迁） */
-void h_shell(int fd, uint32_t seq, cJSON *p);
 
 

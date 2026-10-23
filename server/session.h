@@ -81,9 +81,6 @@ public:
         int device_call(uint16_t cmd, const json& req, json* out) {
             return s->device_call(cmd, req, out);
         }
-        void relay_annotate(const std::string& op, const json& ann) {
-            (void)op; (void)ann;   /* 事件广播已删除，AI 主力下 agentd 端不再接收 */
-        }
         AnnotationStore& store() { return s->store_; }
         /* 屏幕差分基线：自由函数 handler 访问不到 Session 的 private，
          * 只能经 CallCtx（嵌套类是外层隐式 friend）转一手。 */

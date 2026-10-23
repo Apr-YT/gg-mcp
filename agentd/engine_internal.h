@@ -176,8 +176,10 @@ extern int  g_wire_key_ephemeral;
 int  read_key_file(const char *path, char *out, size_t outsz);
 int  load_or_create_ephemeral_key(char *out, size_t outsz);
 
-/* 握手：成功后把 *authed 置 1，dispatch 才放行其余命令。 */
+/* 握手：成功后把 *authed 置 1，dispatch 才放行其余命令。
+ * 同时把该连接的读超时从"未认证的短超时"放宽到正常值（实现在 main.c）。 */
 void h_auth(int fd, uint32_t seq, cJSON *p, int *authed);
+void conn_arm_idle_timeout(int fd);
 
 
 /* ---------------- 进程/会话域（实现在 cmd_proc.c） ---------------- */

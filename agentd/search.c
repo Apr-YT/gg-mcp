@@ -659,8 +659,23 @@ int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
     int sz = vt_size(vtype);
     if (sz <= 0) return -1;
 
-    /* double 输入本身受 2^53 限制；worker 内整数类型走 u64 比较不丢精度 */
-    uint64_t ilo = (uint64_t)vmin, ihi = (uint64_t)vmax;
+    /* double 输入本身受 2^53 限制；worker 内整数类型走 u64 比较不丢精度。
+     *
+     * 负数下界必须钳掉：worker 比的是 u64，(uint64_t)(-1.0) 会变成 0xFFFF...
+     * 于是 [min,max] 静默退化成"只匹配 ≥2^64-1"，调用方看到 0 条还以为区间没问题。
+     * vmax<0 则是空区间 —— 置成 ilo>ihi 走完整流程（照样清旧结果），不特判返回。 */
+    int is_float = (vtype == VT_FLOAT || vtype == VT_DOUBLE);
+    uint64_t ilo = 0, ihi = 0;
+    if (!is_float) {
+        if (vmax < 0) {
+            ilo = 1; ihi = 0;                       /* 空区间：必然 0 命中 */
+        } else {
+            double lo = vmin < 0 ? 0 : vmin;
+            double hi = vmax >= 18446744073709551616.0 ? 18446744073709551615.0 : vmax;
+            ilo = (uint64_t)lo;
+            ihi = (uint64_t)hi;
+        }
+    }
 
     size_t nreg = 0;
     gg_map_region_t *regs = process_search_regions(pid, &nreg, region_type);
@@ -860,11 +875,16 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
     if (!r->fuzzy_active || !r->fuzzy_bitmap || !r->fuzzy_snapshot || !r->fuzzy_regions) return -1;
     int sz = vt_size(r->fuzzy_vt);
     if (sz <= 0) return -1;
+    /* 读缓冲用堆分配而不是 static：static 缓冲的正确性完全依赖"所有 handler 都在
+     * g_eng.mtx 内执行"这个隐式前提，护栏（check_rwproc_locking.py）只覆盖
+     * driver.c 的 rwproc_buf，覆盖不到这里。一旦有人把某个 handler 挪出锁，
+     * 表现不是报错而是"读到别的地址的数据"。每次 refine 一次 malloc 的代价可忽略。 */
+    uint8_t *chunk = malloc(GG_SEARCH_CHUNK);
+    if (!chunk) return -1;
     /* 先存走这一步之前的位图：refine 只减不增，搜错就没有回头路，
      * 只能重新 init（把整个可写区重读一遍）。 */
     fuzzy_undo_push(r);
 
-    static uint8_t chunk[GG_SEARCH_CHUNK];
     int pmfd = pm_open(pid);   /* <0 = pagemap 不可用，退回逐页探测 */
     uint64_t rf_fails = 0, cmp_n = 0, keep_n = 0;
     for (size_t k = 0; k < r->fuzzy_region_count; k++) {
@@ -929,6 +949,7 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
         }
     }
     if (pmfd >= 0) close(pmfd);
+    free(chunk);
     int64_t remain = (int64_t)bm_count(r->fuzzy_bitmap, r->fuzzy_elem_count);
     if (rf_fails || cmp_n)
         log_msg("fuzzy refine: op=%d fails=%llu compared=%llu kept=%llu remaining=%lld",
@@ -1362,7 +1383,9 @@ size_t pointer_scan(gg_driver_t *d, pid_t pid, const uint64_t *targets, size_t n
     size_t nreg = 0;
     gg_map_region_t *regs = process_search_regions(pid, &nreg, REGION_WRITABLE);
     size_t hits = 0;
-    static uint8_t chunk[GG_SEARCH_CHUNK];
+    /* 同 search_refine：不用 static（隐式依赖全局锁），见那里的说明。 */
+    uint8_t *chunk = malloc(GG_SEARCH_CHUNK);
+    if (!chunk) { free(sorted); free(regs); return 0; }
 
     /* pagemap 跳过 absent 页。可写区里绝大多数是 malloc 保留但从未触碰的页，
      * 逐块 driver_read 会一路读失败、再靠 gg_fault_advance 一页页推进 ——
@@ -1418,6 +1441,7 @@ size_t pointer_scan(gg_driver_t *d, pid_t pid, const uint64_t *targets, size_t n
         }
     }
     if (pmfd >= 0) close(pmfd);
+    free(chunk);
     free(sorted);
     free(regs);
     return hits;

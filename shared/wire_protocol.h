@@ -165,7 +165,9 @@ enum gg_err {
     GGERR_NO_DEVICE = 2,        /* 设备不可达（adb 断连） */
     GGERR_NO_SESSION = 3,       /* 未 attach 或会话已失效 */
     GGERR_PERM = 4,             /* 权限不足（非 root） */
-    GGERR_VERSION_MISMATCH = 5, /* GG 核心版本族不符 */
+    GGERR_VERSION_MISMATCH = 5, /* 未使用，保留占位：GG 核心注入链路已删除，
+                                 * 不再存在"版本族不符"这个失败原因。数值不能回收 ——
+                                 * 删掉会让后续错误码整体前移，与已部署的对端错位。 */
     GGERR_DEGRADED = 6,         /* 驱动不可用，当前为降级模式 */
     GGERR_TIMEOUT = 7,
     GGERR_NOT_FOUND = 8,        /* 进程/模块/地址不存在 */

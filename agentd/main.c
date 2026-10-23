@@ -397,10 +397,24 @@ fast_done:
 
 /* ---------------- 连接处理 ---------------- */
 
+/* 已认证连接的读写空闲超时。搜索/大 dump 期间对端可能长时间不发言，
+ * 300s 是"客户端还在"的宽松判据。 */
+#define GG_CONN_IDLE_TIMEOUT_SEC 300
+/* 未认证连接的读超时：握手前不该有任何长静默。原来沿用 300s，本机任意进程
+ * 只要连上就不说话，就能占住 8 个连接槽里的一个（纯 DoS 面，不提权）。
+ * 10s 足够真实客户端发出 AUTH。 */
+#define GG_CONN_PREAUTH_TIMEOUT_SEC 10
+
+/* AUTH 成功后把本连接的读超时放宽到正常值。由 h_auth 调用。 */
+void conn_arm_idle_timeout(int fd) {
+    struct timeval tv = { .tv_sec = GG_CONN_IDLE_TIMEOUT_SEC, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+}
+
 static void *conn_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
     int authed = 0;   /* 本连接是否已通过 GGCMD_AUTH；未认证只放行 PING/AUTH */
-    struct timeval tv = { .tv_sec = 300, .tv_usec = 0 };
+    struct timeval tv = { .tv_sec = GG_CONN_PREAUTH_TIMEOUT_SEC, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     tv.tv_sec = 5;   /* 发送超时收紧: 事件广播 best-effort, 慢客户端最多拖 5s */
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -585,7 +599,11 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[gg-agentd] wire auth: ENABLED (key %zu chars%s)\n",
             strlen(g_wire_key), g_wire_key_ephemeral ? ", ephemeral" : "");
 
-    hide_process(argc, argv);   /* 清 cmdline 参数与环境（防 ACE 扫 /proc/PID/cmdline） */
+    /* 进程伪装：清 cmdline 参数与环境（防 ACE 扫 /proc/PID/cmdline）。
+     * 只调用一次即可 —— 所有参数值在解析时已 snprintf 到 main() 的 static buffer
+     * （dtype/key/logpath 都不再指向 argv 内存），所以清得早不会影响后续使用。
+     * ⚠ 不要改成"先清再解析"：那样 strcmp 会全部落空，静默退回默认后端。 */
+    hide_process(argc, argv);
 
     /* 注意：g_eng 的清零与锁初始化已前移到参数解析之前（见 main() 开头），
      * 否则 --shell / --safe / --hwbp 会被这里的 memset 抹掉。 */
@@ -629,10 +647,8 @@ int main(int argc, char **argv) {
     if (listen(sfd, 8) < 0) { perror("listen"); return 1; }
     log_msg("listening on 127.0.0.1:%d", port);
 
-    /* 进程伪装：所有 argv 字符串（dtype/keys/logpath/ko_dir 等）已消费完毕，
-     * 此时清 argv 区不再影响任何指针。⚠ 必须放在参数解析与驱动初始化之后：
-     * 提前清空会导致 dtype/key 失效 → 静默降级 hook 型 ko_load + 日志 fopen 失败。 */
-    hide_process(argc, argv);
+    /* 进程伪装在上面已经做过一次（参数与驱动初始化之后、listen 之前）；
+     * 此处不再重复调用 —— argv 区早已清零，第二次 memset 只是重复工作。 */
 
     for (;;) {
         int cfd = accept(sfd, NULL, NULL);
