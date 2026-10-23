@@ -618,6 +618,12 @@ json tool_calc_offset(Session::CallCtx& c, const json& a) {
 json tool_pointer_scan(Session::CallCtx& c, const json& a) {
     if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     c.params["cap"] = a.value("cap", 5000);
+    /* addr：单目标模式（不传则扫当前结果集的每个地址） */
+    if (a.contains("addr")) {
+        if (!put_addr_param(a, c.params))
+            return c.fail(GGERR_BAD_REQUEST,
+                          "addr must be a non-negative integer or hex string");
+    }
     /* lookback / aligned 只在显式给出时才下发，保持与旧版 agentd 的兼容
      * （旧 agentd 不认识这两个键也无害，它会忽略）。 */
     if (a.contains("lookback")) {

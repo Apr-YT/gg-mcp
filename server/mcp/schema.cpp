@@ -202,6 +202,10 @@ static const std::vector<ToolDef>& build() {
              json{
                  {"type", prop("string", "指针宽度", "\"enum\":[\"dword\",\"qword\"]")},
                  {"cap", prop("integer", "输出上限（默认 5000）")},
+                 {"addr", prop("string",
+                     "单目标模式：只扫指向这个地址的指针（十六进制 0x...）。"
+                     "不传则把当前结果集的每个地址都当目标 —— 结果集有几千条时"
+                     "lookback 会被严重稀释，想验证\"到底有没有指针指向它\"必须用这个")},
                  {"lookback", prop("integer",
                      "回看范围（默认 0=精确匹配，上限 0x100000）。命中条件放宽为 "
                      "[目标-lookback, 目标+lookback]，一次抓出所有指向该对象的指针。"

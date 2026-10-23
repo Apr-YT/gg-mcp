@@ -289,8 +289,35 @@ void h_pointer_scan(int fd, uint32_t seq, cJSON *p) {
 
     gg_pointer_hit_t *hits = malloc(cap * sizeof(gg_pointer_hit_t));
     if (!hits) { send_err(fd, GGCMD_POINTER_SCAN, seq, GGERR_INTERNAL, "oom"); return; }
+
+    /* addr：单目标模式。不传则扫"当前结果集的每个地址"（旧行为）。
+     *
+     * 为什么需要：结果集里通常有几百上千个地址（一次常见值搜索就有几千条），
+     * 拿它当目标列表时，lookback 会把"指向任何一个目标附近"的指针全算进来，
+     * 目标一多就彻底稀释 —— 想判断"到底有没有指针指向这个对象"时根本看不清。
+     * CE / ptrscan 都是直接对单个地址做扫描的。 */
+    uint64_t single = 0;
+    const uint64_t *tg = g_eng.results.addrs;
+    size_t nt = g_eng.results.count;
+    cJSON *jaddr = cJSON_GetObjectItem(p, "addr");
+    if (jaddr) {
+        if (!j_addr_u64(jaddr, &single)) {
+            free(hits);
+            send_err(fd, GGCMD_POINTER_SCAN, seq, GGERR_BAD_REQUEST,
+                     "addr must be a non-negative integer or hex string");
+            return;
+        }
+        tg = &single;
+        nt = 1;
+    }
+    if (nt == 0) {
+        free(hits);
+        send_err(fd, GGCMD_POINTER_SCAN, seq, GGERR_BAD_REQUEST,
+                 "no targets: result set is empty and addr not given");
+        return;
+    }
     size_t n = pointer_scan(&g_eng.drv, g_eng.session_pid,
-                            g_eng.results.addrs, g_eng.results.count, type,
+                            tg, nt, type,
                             lookback, aligned, hits, cap);
     cJSON *r = cJSON_CreateObject();
     cJSON *arr = cJSON_AddArrayToObject(r, "hits");
