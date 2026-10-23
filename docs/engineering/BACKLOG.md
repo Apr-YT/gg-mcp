@@ -37,6 +37,111 @@ AI 在后台搜完人的表格自动跟上。
 
 ---
 
+### MCP 侧批量写入 + 批量冻结（2026-10-23，来自外部同类项目对照）
+
+第 2 条的批量写入只做在 UI 入口；MCP 工具面当时只能发 `values` 数组（10000 条 ≈ 300KB JSON
+还要逐条解析）。这两个是设备端遍历，一次请求完成：
+
+- `gg_set_results(all=true, value=V)` —— 整个结果集改成 V。`type` 缺省由设备端取结果集自身类型
+  （PC 侧 `norm_type(空)` 默认 dword，会把 qword 结果写成半个值，所以这条路径故意不填 type）。
+- `gg_freeze_results({value?, type?, limit?})` —— 新命令 `GGCMD_FREEZE_RESULTS`（追加在
+  `GGCMD_AUTH` 之后，既有命令码数值未变）。不带 value 时读每条**当前值**再冻，带 value 则统一冻结；
+  受 `GG_FREEZE_MAX=256` 限制，超出回报 `truncated`，短读条目计入 `skipped`。
+
+验证（真机 134d2f8，靶子 `build/ko/_dev/wt_target.c` pid 11822，64 槽 + 2 处杂值 = 66 条命中）：
+`set all` → written 65 / skipped 1（1 个只读页）→ 读回 99999；
+`freeze_results`（不传 value）→ frozen_new 66；靶子 SIGUSR1 改 54321 后 0.6s 读回仍 99999；
+`unfreeze` 后再改 → 54321。与第 2 条 UI 版实测的 66/65 完全一致（互相交叉验证）。
+ITEST ALL PASS，47 个工具 schema↔dispatch 一致，4 道结构护栏全过。
+
+### `gg_filter_results`（2026-10-23 18:20，补「候选收敛」缺口）
+
+搜索出 28534 条后，AI 要挑出真值只能分页看 —— 100 条/轮 = 285 轮。这条工具在设备端
+按**当前值**原地压缩结果集（`min`/`max`/`exclude_nan`/`nonzero`，至少给一个），一次调用完成。
+
+实现要点：
+- `search_filter_exact()`（`search.c`）复用 `search_refine_exact` 的分块读 + 原地压缩骨架，
+  但比的是「绝对值区间」而不是「变化方向」；压缩同步 `exact_vals`，否则 undo 后 refine 会拿错快照。
+- 整型走 u64 精确比较（负下界钳到 0，避免 `(uint64_t)(-1)` 变成巨大上界）；float/double 走浮点 + `isfinite`。
+- 读不到的条目**剔除**（无法判定）；可 `gg_search_undo` 回退（共用 exact_undo 栈，深度 3）。
+- 只读操作，不受 `--safe` 限制。
+
+真机实测（`systemui` 29230 条 / `wt_target` 混值 66 条）：
+
+| 用例 | 结果 |
+|---|---|
+| 29230 条全是 100，filter [50,150] | 保留 29230（0 删），**23 ms** |
+| 同上 filter [101,∞) | 全删 29230 |
+| undo ×2 | 均恢复 29230 |
+| 66 条中前 10 条改成 50000，filter [40000,60000] | 保留 10 条，值全为 50000，undo 恢复 66 |
+| 无任何条件 / min>max | 均按 `GGERR_BAD_REQUEST` 拒绝 |
+
+工具面 46 → 49（含并发会话加入的 `gg_aob_resolve`），schema↔dispatch 49/49 一致。
+
+### `gg_result_count(summary=true)`（2026-10-23 18:30，看分布不靠分页）
+
+AI 拿到 21481 条候选时，`get_results` 分页看要 214 轮。这一步先告诉它「都是些什么值」：
+设备端读一遍候选的当前值，聚合出 top-8（`search.c` 的 `results_value_histogram`）。
+
+- 聚合键是值的**位模式**而不是 double —— float 0.1 与 0.1000000000000001 不会被误合并。
+- 桶容量 `4×max_bins`，溢出时替换命中数最小的桶；此时 `unique_exact=false`，
+  唯一值数只是下限。这条必须照实传，别让 AI 把下限当精确值写进结论。
+- 读不到的值**不计入分布**：用 0 顶替会造出「0 出现了两万次」的假结论。
+- 模糊态返回 `summary_unavailable:"fuzzy_active"` —— 候选是未知初值，分布无意义，物化代价也不可控。
+
+真机（`systemui` 21481 条 / `wt_target` 混值 66 条）：
+
+| 用例 | 输出 | 耗时 |
+|---|---|---|
+| 21481 条全是 100 | `top_values=[{100: 21481}]`，bins=1，unique_exact=1 | 29.5 ms |
+| 66 条中 56 条 12345 + 10 条 50000 | `top_values=[{12345: 56}, {50000: 10}]`，bins=2 | 0.6 ms |
+| 模糊态请求 summary | `summary_unavailable: "fuzzy_active"` | — |
+
+至此「搜 → 收敛 → 批量」三段都各有 1 轮的工具：`gg_search` / (`gg_result_count(summary)` +
+`gg_filter_results` + `gg_search_refine`) / (`gg_set_results(all)` + `gg_freeze_results`)。
+
+### `gg_screen_diff`（2026-10-23 18:55，视觉只判「变没变」）
+
+感知层的第一个入口。**不做 OCR，不读数字** —— 视觉只回答「这块画面变了没」，
+精确值一律走内存（`gg_read` / `search_refine`）。OCR 认错一个数字（1234→1235）会让整轮搜索报废。
+
+**关键实测（决定实现路线）**，1200×2608：
+
+| 取帧方式 | 实测 | 结论 |
+|---|---|---|
+| `screencap -p`（设备内） | 1080 ms | 1.02s 全是单核 PNG 压缩 |
+| `screencap`（raw，设备内） | 180 ms | 慢的是编码，不是截图 |
+| raw 整帧走 adb | 834 ms（12.2MB） | 超过单帧 1MiB 上限，不可用 |
+| `uiautomator dump` | 2354 ms | 且 UE4/Unity 游戏在 UI 树里只有一个空节点 |
+| `/dev/graphics/fb0` | **不存在** | 现代设备 HWC 合成，内核读帧这条路断掉 |
+
+所以实现是：**设备端读 raw 流 → 切 ROI → 降采样灰度 → 只回传 ROI**（`agentd/screen.c`，
+新命令 `GGCMD_SCREENSHOT_ROI`，工具 `gg_screen_diff`）。基线存在 PC 侧
+（`Session::screen_frames_`），agentd 重启不影响、多客户端不互相踩。
+
+设计要点：
+- `scale` 自动上调，保证 `sw*sh <= 8192`（hex 后 16KB），否则会把单帧 1MiB 撑爆；
+  全屏 + `scale=1` 实测被抬到 32（81×37）。
+- `threshold=16` 挡抗锯齿噪声：静态区域实测 `max_delta=2`，不会误报。
+- 尺寸变化（设备抬了 scale）自动重建基线 —— 不同尺寸的两帧逐像素比毫无意义。
+- `fmt != RGBA_8888` 直接拒绝：像素步长错会让切片全乱，返回垃圾比报错更糟。
+
+真机（前台 `com.ShuiSha.FPS2`，UE4）：
+
+| 用例 | 结果 | 耗时 |
+|---|---|---|
+| 全屏首帧（建基线） | `baseline=true`，81×37 点 | 1075 ms（screencap 冷启动） |
+| 全屏 1s 后 | `changed=true, ratio=4.1%, max_delta=175` | 133 ms |
+| 全屏再 1s | `changed=true, ratio=3.0%` | 182 ms |
+| 静态 HUD 区 1s 后 | `changed=false, max_delta=2` | 186 ms |
+| 越界 ROI / 缺参数 | 均明确报错 | — |
+
+稳态 **133~186 ms**（≈5 fps），首帧 1.07s 是 screencap 首次加载开销。
+
+**风险**：`screencap` 走 SurfaceFlinger 的 `captureDisplay`，部分反作弊会 hook 这个调用 ——
+比读内存更容易被抓。MediaProjection 同样会在 `dumpsys media_projection` 留痕。
+
+
 ## P0 — 收益明确、改动小
 
 ### 1. UI 结果分页
@@ -121,16 +226,35 @@ AI 在后台搜完人的表格自动跟上。
 **收益**：区间搜索是找指针的主力工具，结果不可信等于不能用。
 本轮绕过方式：拿到地址后用 `gg_read type="qword"` 逐条核对。
 
+### 6. PC 端 wire 断线后直接退出，不重连
+
+**现象**（2026-10-23 实测三次）：agentd 重启/断连时，PC 端只做一次
+"reconnect and replay once"，失败就整个进程退出。日志：
+
+```
+[wire] write failed (wr=-1), reconnect and replay once
+[wire] timeout cfg: io=300000ms (winsock DWORD ms)
+<进程结束>
+```
+
+**后果**：AI 侧所有请求变成 `ConnectionResetError`，必须人工重启 server。
+今天因此中断了三次（找 FOV 时最严重，60000 个候选扫到一半）。
+
+**修法**：断线后进入重连循环（指数退避，上限 30s），只在 auth 失败时退出。
+另外 `start_server.bat` 在 explorer 里拉起也会立即退出（前台跑正常），要一起查。
+
+成本：约 40 行。
+
 ## P1 — 收益明确、成本中等
 
-### 6. 搜索真正异步
+### 7. 搜索真正异步
 
 现状：UI 里搜索是同步调用（全量 0.19s、模糊首帧 0.32s），期间界面卡住。
 做法：操作丢进 `std::thread`，结果进队列，UI 线程只做展示；按钮置灰 + 转圈。
 成本：约 80 行（要处理"搜索中再点搜索"、"attach 打断搜索"）。
 注意：`Session` 内部有锁，但**并发调 call_tool 的语义没验证过**，需要串行化。
 
-### 7. UI 接模块基址 / 指针链
+### 8. UI 接模块基址 / 指针链
 
 现状：`gg_module_list` / `gg_module_base` / `gg_pointer_scan` / `gg_pointer_chain`
 都有工具，UI 没接。找基址+偏移是仅次于搜索的高频操作。
@@ -147,7 +271,7 @@ AI 在后台搜完人的表格自动跟上。
 - `gg_pointer_scan` 的字段名以实现为准（`hits:[{container,target,ptype}]`），
   UI 里最初猜的 `pointers/results` 是错的
 
-### 8. 驱动读路径合并连续物理页
+### 9. 驱动读路径合并连续物理页
 
 现状：`fast_read_linear` 每页一次 `kmap_local_page` + `memcpy`，实测 559ns/页
 （物理读部分）。而 `/proc/<pid>/pagemap` 在本机**能读到真实 pfn**（未被屏蔽）。
@@ -156,13 +280,13 @@ AI 在后台搜完人的表格自动跟上。
 **风险高**：这块是"设备重启"和"静默漏读"两次事故的现场，改完必须跑
 `check_stealth` + `run_itest` + 64KB 区间集合比对。
 
-### 9. 搜索快照内存上限
+### 10. 搜索快照内存上限
 
 现状：`GG_FUZZY_MAX_BYTES` 默认 256MB，超过的 region 不纳入扫描（模糊搜索会漏）。
 做法：超限时明确提示"只扫了前 256MB"，并列出被跳过的 region。
 成本：约 20 行。**收益**：避免"搜不到"被误当成"值不存在"。
 
-### 10. `pointer_scan` 支持区间匹配（指向对象任意成员）
+### 11. `pointer_scan` 支持区间匹配（指向对象任意成员）
 
 现状：只做精确相等（`v == target`）。真实 C++ 对象里，持有者存的是**对象首址**，
 而目标字段常在 `+0x14` 这类偏移上 —— 精确匹配必然搜不到。
@@ -175,7 +299,7 @@ AI 在后台搜完人的表格自动跟上。
 成本：约 30 行（bsearch 换成区间判断，或对每个 target 做二分下界）。
 **收益**：一次抓出所有指向该对象的指针，不用每换一个成员偏移就重扫全内存。
 
-### 11. `search_range` 按元素宽度对齐步进
+### 12. `search_range` 按元素宽度对齐步进
 
 现状：`agentd/search.c` mode 1 分支是 `for (...; i++)` —— **每字节**都试。
 后果：一个 8 字节指针落在区间内会被命中 **8 次**（i..i+7 的未对齐窗口都满足），
@@ -189,7 +313,7 @@ ARM64 指针/浮点天然按 4/8 字节对齐，按 `sz` 步进既正确又快 8
 
 ## P2 — 需要架构级权衡
 
-### 12. 驱动主动塞 fd（彻底消除 proc 节点）
+### 13. 驱动主动塞 fd（彻底消除 proc 节点）
 
 现状：proc 节点必须保留（`fd_install` 只能由用户态触发，节点是唯一入口 + 重连入口），
 key 也因此不能随机化。详见 AGENTS 32。
@@ -197,13 +321,13 @@ key 也因此不能随机化。详见 AGENTS 32。
 代价：agentd 重启后 pid 变了就失效，必须重新 insmod（且隐藏模块 rmmod 不了，
 只能装不同模块名的副本）。**这是换一种运维约束，不是纯收益。**
 
-### 13. 匿名通道的 fd 名
+### 14. 匿名通道的 fd 名
 
 现状：`anon_inode:dmabuf`（已从中性的角度选过）。
 可再进一步：用 `eventpoll` / `sync_file` 之类更常见的内核对象名。
 但区别已经不大（都混在 graphics/io 类 fd 里）。
 
-### 14. AGENTS.md 拆分
+### 15. AGENTS.md 拆分
 
 现状：35 条、614 行。已经出现"同一条里塞了三件事"的情况。
 做法：按主题拆成 `AGENTS.driver.md` / `AGENTS.agentd.md` / `AGENTS.build.md`，
@@ -232,5 +356,6 @@ key 也因此不能随机化。详见 AGENTS 32。
 | **pointer_scan（2833 目标）** | **1.1s** | 修 pagemap 前 11.7s |
 | **get_results 分页 10000 条** | **89ms** | 850KB JSON |
 | 驱动单页成本 | walk 357ns + phys 559ns | 逐页 4KB |
+| **AI 直读 vs 工具搜索（2026-10-23 实测）** | 搜索 219ms/次（21557 条） vs 直读 64KB 15.9ms/次 | 341MB 全量直读 = 5456 次 = **87s**；1KB 直读 1.83ms、attach 29.6ms、get_results 100 条 2.0ms |
 | check_stealth | PASS=12 FAIL=0 | 改驱动后必须复跑 |
 | run_itest | ALL PASS | 含 hwbp 三项 |
