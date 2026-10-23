@@ -23,6 +23,7 @@
 | [DRIVER_MATRIX.md](engineering/DRIVER_MATRIX.md) | **驱动通道能力矩阵**：rwproc33 单型的通道与状态值判定依据、`ST_KO_HOOK` 假阳性的成因（三型已删，见 §6）、工具×驱动依赖、**§8 KO 版本谱系（哪个 .ko 能用）**。判断「驱动到底好不好」先看这份。 |
 | [GG_UI.md](engineering/GG_UI.md) | **PC 侧搜索界面（imgui + Win32 + D3D11）**：`scripts\build_ui.bat` 构建，`build\pc\gg-ui.exe` 直接连 agentd。不重复实现协议 —— 链接 `Session::call_tool`，与 MCP 客户端同一条路径。含字体/版本两个坑的记录。 |
 | [BACKLOG.md](engineering/BACKLOG.md) | **项目体检 / 待办清单**：按 P0/P1/P2 分级，每条带证据或实测数据；末尾附"明确不做"及其理由（CFI 还原、结果自动刷新、UI 内做 watch）。动手优化前先看这份，避免重复论证。 |
+| [MAIN_C_SPLIT.md](engineering/MAIN_C_SPLIT.md) | **main.c 拆分方案（规划中）**：按行号切段、每段标注去向与所属 Phase、每步的验收方式。动手拆之前先读，避免和已拆的 `cmd_*.c` 重复。 |
 | [CODE_REVIEW_2026-10-21.md](engineering/CODE_REVIEW_2026-10-21.md) | 2026-10-21 全量代码审查：通信层加固（wire 鉴权）、内存边界修复、静态分析与真机验证记录。 |
 | [RWPROC33_ADAPTER.md](engineering/RWPROC33_ADAPTER.md) | rwProcMem33 驱动接口适配：命令枚举、请求结构、硬件断点与构建要点；§十一 跨内核复用 prebuilt、§十二 rwproc 全扫崩内核的实测证据。 |
 | [HWBP_CRASH_HELP.md](engineering/HWBP_CRASH_HELP.md) | hwBreakpointProc_module 静默挂死排查记录（已解决：命令枚举错位），同类内核挂死可复用其排查法。 |
