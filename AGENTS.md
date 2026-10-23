@@ -745,6 +745,35 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    `check_stealth.sh` 第 10 项也改成锚定"最后一次 `starting (port=`"之后的日志，
    不再看固定尾部窗口。
 
+42. **真实目标实践：判据是"同址前后值交集"，不是"搜到新值就行"**（2026-10-23）
+
+   第一个真实商业游戏（登山赛车）跑通"定位 → 改值 → 游戏接受 → 落盘 → 重启仍在"，
+   全过程见 `docs/engineering/PRACTICE_HILLCLIMB.md`。
+
+   **分工**：AI 主力（attach / 搜索 / 收敛 / 读写 / 截图 OCR / 验落盘），
+   人辅助（在游戏里操作、确认界面）。**AI 不要去模拟游戏内点击**。
+
+   **判据**：
+   ```
+   A = 值=V 时的地址集合     B = 值=V' 时的地址集合
+   A ∩ B  →  真变量（地址不变、值跟着变）
+   ```
+   本轮 9670 搜出 56 条，9775 搜出 45 条，交集 **1 条**，一次命中。
+   单纯搜新值全是噪音（关卡数据里一堆同值）。
+
+   **三个必踩的坑**：
+   - **界面数字有千位分隔**：`9 775` 被读成 "7775"，搜错值白跑一轮。
+     读数值一律截图裁剪 + OCR，不靠转述。
+   - **批量写会稀释有效信息**：8 条里只有 1 条真的，一起写看不出效果 →
+     候选 > 3 条先收敛，最后**单点**写验证。
+   - **UI 与 AI 共用一份全局结果集**：UI 一 attach 就 `session_drop`，
+     AI 建的模糊基线直接没了（`refine failed (search first?)`）。
+     → 要建基线先跟人说别在 UI 里 attach/搜索；长期方案见 BACKLOG 多结果集。
+
+   **截图坐标**：`screencap` 是 2608x1200，看图工具会缩到 ~1080 宽，
+   按缩略图估坐标换算回去偏几十像素（`ghost_tap` 全打空）。
+   用 `scripts/find_button.py`（纯标准库找色块）或 `scripts/crop_png.py` 裁剪后定位。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
@@ -765,4 +794,4 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/engineering/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-10-23（新增 38-41：事件系统删除、wire Nagle、pointer_scan pagemap、日志刷屏）。
+本文件最后校准：2026-10-23（新增 42：真实目标实践判据与三个坑）。
