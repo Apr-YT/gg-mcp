@@ -1,9 +1,17 @@
 # GG-MCP 文档索引
 
-`docs/` 按性质分两类：`engineering/` 承载工程文档（架构/协议/验收/交接/优化记录），`research/` 承载逆向研究笔记。
+`docs/` 按性质分三类：`engineering/` 承载工程文档（架构/协议/验收/交接/优化记录），`audit/` 是历次审计与缺陷清单，`research/` 承载逆向研究笔记。
 
-> 2026-10-22 校准：`PROJECT_MAP.md`、`ARCHITECTURE.md`、`PROTOCOL.md` 已按 HEAD `1736072` 的代码实测更新
-> （代码量、44 个工具、42 条 wire 命令枚举、rwproc33 单通道无降级、16 个单测程序 + 3 道护栏、真机 ITEST ALL PASS）。
+> **2026-10-23 校准**（HEAD `8bddaf5`）：`PROJECT_MAP.md` 已按源码重测重写；同期代码改动见
+> `engineering/SOURCE_REVIEW_20261023.md`（源码梳理 + §九 修复记录）。
+> 当前事实基线：**52 个工具 / 46 条 wire 命令枚举（有效 41，5 条占位）**、rwproc33 单通道无降级、
+> **15 个可执行单测 + 1 项语法检查 + 6 道结构护栏**、agentd 与 PC 端均可本机编译。
+> 真机 itest 在 2026-10-22 晚曾 ALL PASS，**10-23 这轮改动未上机**。
+
+> ⚠️ **文档分层**：`audit/`、`OPTIMIZATION_SUMMARY.md`、`CHECKPOINT_REVIEW_REPORT.md`、
+> `CODE_REVIEW_2026-10-21.md`、`AGENTD_HISTORY.md`、`CHANGELOG_CLOSED.md`、`VERSION_MATCHING.md`
+> 都是**当时的快照**，里面的数字（工具数、行数、测试结果）不保证对现状成立，引用前先看该文顶部的声明。
+> 现状一律以 `PROJECT_MAP.md` 为准。
 
 > ⚠️ `research/` 下的逆向研究笔记**仅限本仓内部使用，不外发**。
 
@@ -12,7 +20,9 @@
 | 文件 | 用途 |
 |---|---|
 | [DESIGN.md](engineering/DESIGN.md) | **设计说明**：信任边界、调用通路、协议约定（ABI / 混淆协商 / AUTH 门 / 单帧上限）、并发与锁层级、引擎数据结构、会话不变量、安全分层、失败语义与限额表、改动 checklist。要动跨组件的东西先看这份。 |
-| [PROJECT_MAP.md](engineering/PROJECT_MAP.md) | **项目总览**：进程边界、通信链路、各模块行数、44 个工具面、构建/测试能力与债务清单。查现状先看这份。 |
+| [PROJECT_MAP.md](engineering/PROJECT_MAP.md) | **项目总览（现状唯一入口）**：进程边界、通信链路、各模块行数、52 个工具面、构建/测试能力与当前债务清单。查现状先看这份。 |
+| [SOURCE_REVIEW_20261023.md](engineering/SOURCE_REVIEW_20261023.md) | **源码全量梳理 + 修复记录**：架构/协议/51→52 工具映射、锁矩阵、风险清单（P0–P2）与 §九 逐条处置（已修/仅缓解/有意不改）。想知道"为什么这么改"看这份。 |
+| [DOC_AUDIT_20261023.md](engineering/DOC_AUDIT_20261023.md) | **文档梳理记录**：48 篇文档的分层（现状/过程/历史快照/研究）、查出的漂移与处置、数字基线取法、维护约定。加文档或改代码后先看这份的 §6。 |
 | [ACCEPTANCE.md](engineering/ACCEPTANCE.md) | KO 驱动方案验收清单，区分「本机可验证」与「需真机」两类项。 |
 | [ARCHITECTURE.md](engineering/ARCHITECTURE.md) | 组件划分、数据流与驱动通道的架构说明。 |
 | [PROTOCOL.md](engineering/PROTOCOL.md) | PC ↔ gg-agentd 的 wire 协议（20B 头 + JSON，含 AUTH 握手）与 rwproc33 驱动协议（33B 头 + read）笔记。 |
@@ -23,7 +33,7 @@
 | [DRIVER_MATRIX.md](engineering/DRIVER_MATRIX.md) | **驱动通道能力矩阵**：rwproc33 单型的通道与状态值判定依据、`ST_KO_HOOK` 假阳性的成因（三型已删，见 §6）、工具×驱动依赖、**§8 KO 版本谱系（哪个 .ko 能用）**。判断「驱动到底好不好」先看这份。 |
 | [GG_UI.md](engineering/GG_UI.md) | **PC 侧搜索界面（imgui + Win32 + D3D11）**：`scripts\build_ui.bat` 构建，`build\pc\gg-ui.exe` 直接连 agentd。不重复实现协议 —— 链接 `Session::call_tool`，与 MCP 客户端同一条路径。含字体/版本两个坑的记录。 |
 | [BACKLOG.md](engineering/BACKLOG.md) | **项目体检 / 待办清单**：按 P0/P1/P2 分级，每条带证据或实测数据；末尾附"明确不做"及其理由（CFI 还原、结果自动刷新、UI 内做 watch）。动手优化前先看这份，避免重复论证。 |
-| [PEER_REVIEW_2026-10-23.md](engineering/PEER_REVIEW_2026-10-23.md) | **外部同类项目对照**：GitHub 上 6 个同类项目的定位、`access_process_vm` / 通道伪装两项技术路线的核实结论、45 vs 46 个工具面的差集与采纳判定。想知道「这功能要不要自己做」先看这份。 |
+| [PEER_REVIEW_2026-10-23.md](engineering/PEER_REVIEW_2026-10-23.md) | **外部同类项目对照**：GitHub 上 6 个同类项目的定位、`access_process_vm` / 通道伪装两项技术路线的核实结论、45 vs 46 个工具面的差集与采纳判定（当时口径；现为 52 个工具）。想知道「这功能要不要自己做」先看这份。 |
 | [MAIN_C_SPLIT.md](engineering/MAIN_C_SPLIT.md) | **main.c 拆分方案（规划中）**：按行号切段、每段标注去向与所属 Phase、每步的验收方式。动手拆之前先读，避免和已拆的 `cmd_*.c` 重复。 |
 | [CODE_REVIEW_2026-10-21.md](engineering/CODE_REVIEW_2026-10-21.md) | 2026-10-21 全量代码审查：通信层加固（wire 鉴权）、内存边界修复、静态分析与真机验证记录。 |
 | [RWPROC33_ADAPTER.md](engineering/RWPROC33_ADAPTER.md) | rwProcMem33 驱动接口适配：命令枚举、请求结构、硬件断点与构建要点；§十一 跨内核复用 prebuilt、§十二 rwproc 全扫崩内核的实测证据。 |
@@ -35,6 +45,10 @@
 | [AGENTD_HISTORY.md](engineering/AGENTD_HISTORY.md) | apk/ggtool 时代的旧版工作区指令归档，仅供追溯。 |
 | [CHANGELOG_CLOSED.md](engineering/CHANGELOG_CLOSED.md) | 已关闭的历史条目（从 AGENTS.md 迁出）：docs 分目录、framework_v1 删除、capstone 就位、构建脚本修复、IDA 联动移除等。仅供追溯，不是现行约束。 |
 | [MEMORY.md](engineering/MEMORY.md) | AI 会话持久记忆：环境事实、命令、踩坑结论的自动维护清单。 |
+| [UE4_REFLECTION.md](engineering/UE4_REFLECTION.md) | UE4 反射体系（GNames / GUObjectArray / GWorld）的定位方法与偏移推导，`gg_aob_resolve` 的实战来源。 |
+| [PRACTICE_HILLCLIMB.md](engineering/PRACTICE_HILLCLIMB.md) | 靶场（登山赛车）实战记录：一轮轮搜索/定位/踩坑的过程与结论。 |
+| [COMMUNITY_TOOLS_SURVEY.md](engineering/COMMUNITY_TOOLS_SURVEY.md) | 同类社区工具的功能面调查（对照自身缺什么）。 |
+| [MERGE_PLAN.md](engineering/MERGE_PLAN.md) | 两条并行工作线（UE4 分析 / 安全审查修复）的合并计划与冲突处理约定。 |
 | [README.md](engineering/README.md) | 2026-09 前的旧版文档索引，已被本文件取代，仅作历史留档。 |
 
 ## 审计记录（`audit/`）
@@ -49,6 +63,12 @@
 | [FINDINGS.md](audit/FINDINGS.md) | 2026-10-21 缺陷清单（逐条编号）。 |
 | [BASELINE.md](audit/BASELINE.md) | 2026-10-21 审查基线（环境、命令、初始状态）。 |
 | [EXTERNAL_AUDIT_TRIAGE.md](audit/EXTERNAL_AUDIT_TRIAGE.md) | 外部审查报告的逐条处置记录。 |
+
+## 参考资料（`reference/`）
+
+| 文件 | 用途 |
+|---|---|
+| [UE4_ESP_TECH.md](reference/UE4_ESP_TECH.md) | UE4 ESP 技术参考（来自 Apr-YT/esp-android）：GWorld 链路、实体遍历与坐标读取的完整思路。 |
 
 ## 逆向研究笔记（`research/`）
 

@@ -1,5 +1,8 @@
 # PROTOCOL.md — KO 驱动协议与 wire 协议笔记
 
+> **数字口径**：命令枚举以 `shared/wire_protocol.h` 为准（当前 46 条，其中 5 条占位/已删），
+> 工具映射见 `PROJECT_MAP.md` §5。本文讲协议语义，不保证枚举计数是最新。
+
 ## 1. wire 协议（PC ↔ gg-agentd）
 
 帧：20 字节头 + JSON 负载（小端）。

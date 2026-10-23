@@ -21,19 +21,18 @@
 ## 项目结构
 - agentd/ - Android端agentd
 - server/ - PC端MCP服务
-- native/ - 内核模块
+- ko/     - 内核模块源码快照（rwNova33 内存模块 / rwNova 断点模块）
 - shared/ - wire 协议唯一事实源 (wire_protocol.h)
 - tests/  - unit / integration / regression
-- scripts/- 构建、部署、测试、基准
+- scripts/- 构建、部署、测试、基准、KO 源码同步
+
+> 内核模块的**工作副本**在 `build/rwProcMem33/`（上游克隆，不入库），
+> 入库的是 `ko/rwProcMem33/` 快照。改完工作副本要 `python scripts/sync_ko_src.py .`
+> 回写快照，否则 `run_tests.bat` 的快照护栏会失败。
 
 ## CI/CD
 GitHub Actions 自动构建（`.github/workflows/build-and-test.yml`），三个 job：
 PC 编译检查、Windows 单元测试 + 结构护栏、NDK 交叉编译。
-
-## 优化模块
-- log_enhance.h - 日志增强
-- atomic_simple.h - 原子操作
-- perf_simple.h/c - 性能统计
 
 
 ## 测试

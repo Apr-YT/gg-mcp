@@ -3,7 +3,9 @@
 ## 项目一句话
 
 内核驱动式内存修改 MCP 服务：PC 上的 AI agent 通过 MCP 直接读写安卓游戏进程内存。
-**只走 KO 内核驱动通道**（rwproc33），GG 核心采用外挂圈子加载（ELF 桩 + hook syscall 270）。
+**只走 KO 内核驱动通道**（rwproc33）。GG 核心注入链路（`lib5_stub` + `libKernelGg.so`，
+含 hook syscall 270）已于 2026-10-21 整条删除，命令码 28/29 只保留占位，调用会得到明确的
+`BAD_REQUEST`。
 
 ## 项目结构
 
@@ -11,11 +13,13 @@
 server/    PC 端 gg-ghost-mcp（C++17）：MCP 协议 + 会话 + wire 客户端
 agentd/    设备端 gg-agentd（C, NDK arm64, root）：搜索/读写/冻结/监视 + 驱动对接
 shared/    wire_protocol.h — PC/设备双端协议唯一事实源（20B 头 + JSON 负载；含 GGCMD_AUTH 握手）
+ko/        内核模块源码快照（rwProcMem33 两个模块，184 源文件）——**改驱动必须同步这里**
 tests/     unit（posix_stub 可 PC 跑）/ integration / regression 三层
-scripts/   构建（build_pc.bat / build_ndk.bat / build_all.bat）、部署、测试、基准
+scripts/   构建（build_pc.bat / build_ndk.bat / build_all.bat）、部署、测试、基准、KO 源码同步
 configs/   gg-ghost.example.json（模板，入库）；gg-ghost.json 由 deploy 生成、**不入库**
 tools/     辅助脚本（cfm_coord_read.py 等）
-docs/      engineering/（工程文档）+ research/（逆向研究笔记，仅限本仓），索引见 docs/README.md
+docs/      engineering/（工程文档）+ audit/（审计记录）+ reference/ + research/（逆向笔记，仅限本仓），索引见 docs/README.md
+build/     构建产物与上游克隆（不入库）；build/rwProcMem33 是 KO 工作副本，含未推送提交
 ```
 
 ## 构建与验证
@@ -31,13 +35,17 @@ scripts\build_ndk.bat
 build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json
 
 # 测试
-tests\unit\run_tests.bat          # 单元 + 两道结构护栏（先跑这个）
+tests\unit\run_tests.bat          # 单元 + 6 道结构护栏（先跑这个）
 scripts\test_all.bat              # 单元 + 集成 + 基准（缺前置会明确 SKIP）
 scripts\benchmark.bat             # ⚠️ 仓内无基准源码，会直接报错退出
 
-# 结构守护（拆分/改分发后必跑；run_tests.bat 已自动执行）
-python tests\unit\check_dispatch_consistency.py
-python tests\unit\check_kernel_only.py
+# 结构守护（拆分/改分发/改驱动对接后必跑；run_tests.bat 已自动执行）
+python tests\unit\check_dispatch_consistency.py      # schema(52) ↔ session(52)
+python tests\unit\check_kernel_only.py               # driver.c 不得回落用户态通道
+python tests\unit\check_rwproc_locking.py            # rwproc_buf 拷贝必须在锁内
+python tests\unit\check_hwbp_detail.py               # HIT_DETAIL 的 buf_size 非 0
+python tests\unit\check_scalar_cmd.py                # 标量返回命令不许走 call_ex
+python scripts\check_ko_src_sync.py                  # ko/ 快照 vs build/ 工作副本
 ```
 
 > **本机工具链现状（2026-10-21 复测）**
@@ -63,13 +71,16 @@ python tests\unit\check_kernel_only.py
 adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）。2026-10-22 晚设备在位并已跑通 itest。
 服务/窗口排查：`dumpsys window windows | grep ggmcp`；崩溃：`logcat -s AndroidRuntime:E`。
 
-## 已知债（2026-10-15 复核，2026-10-23 清理：删除已清项与被取代的重复条目，33 条 → 28 条）
+## 已知债（条目随时间累积，**编号即历史顺序**；已清项保留删除线或标"已修"以便追溯）
 
-1. **main.c 巨型文件**：已拆 shell（`cmd_shell.c`）、view/符号/指针链（`cmd_view.c`）、
-   搜索与结果集（`cmd_search.c`）、内存读写/冻结（`cmd_mem.c`）。现 **2049 行**
-   （2026-10-23 `wc -l`）。待拆 `cmd_proc`（list/attach/target_info/module_* /
-   calc_offset / pointer_scan）与 dispatch。拆前后必跑 `check_dispatch_consistency.py`
-   和 `scripts\build_ndk.bat`（NDK+capstone 已就位，不是盲改）。
+1. **main.c 剩余 683 行**（2026-10-23 `wc -l`）。已拆 shell（`cmd_shell.c`）、
+   view/符号/指针链（`cmd_view.c`）、搜索与结果集（`cmd_search.c`）、内存读写/冻结
+   （`cmd_mem.c`）、进程/会话（`cmd_proc.c`）、分析域（`cmd_analyze.c`）、
+   状态（`cmd_status.c`）、虚拟触摸（`cmd_touch.c`）、屏幕（`screen.c`）、
+   出站帧（`wire_io.c`）、握手鉴权（`wire_auth.c`）。
+   剩 dispatch + 连接生命周期 + 参数解析 helper 留在 main.c，**不再拆**：
+   dispatch 是命令表的唯一映射处，拆出去只会让"命令→handler"多跳一层。
+   各类 handler 的声明统一在 `engine_internal.h`，不要在 `cmd_*.c` 里重复前置声明。
 2. **wire 协议的三个遗留**：XOR seed 固定 `0xA5`（`shared/wire_protocol.h`）；serial
    硬编码在 config；分片虽有（第 18 条）但上限是硬的 —— 单帧
    `GGWM_MAX_PAYLOAD` 1MiB、重组 `GGWM_MAX_REASSEMBLED` 8MiB。
@@ -78,6 +89,8 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
      （`server/device/wire.cpp:286`）直接判非法。
 3. **无真机连接时 `tests/integration/run_itest.ps1` 无法执行** → 设备端改动等于没有闭环，只能等设备接上后补验，
    期间不得把设备端改动当作「已验证」上报（2026-10-21）。
+   2026-10-23 状态：设备 `134d2f8` 在位，但当日那轮改动（`search.c`/`process.c`/`main.c`/
+   `watch.c`/`wire_auth.c`）**只过了编译，没上机** —— 别把"build_ndk 绿"当成"行为正确"。
 4. **rwproc33 崩内核的四点修复（2026-10-22）—— 现状见第 27 条**。
    根因在驱动侧：`__pa(si.totalram)` 当物理地址上界、`get_proc_phy_addr` 不判 pmd 大页、
    `__va()` 后无 pfn 有效性守卫、页表遍历在 `mmap_lock` 外。四处都改在
@@ -134,8 +147,8 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 13. **模糊搜索要在数值稳定的时刻 init**。目标活跃（游戏在跑）时 init，后续
    refine 会把期间所有变化都算进去，收敛不到东西。正确姿势：菜单/暂停/操作
    间隙 init，再让目标发生一次明确变化后 refine。
-14. **`gg_search_undo` 只回退模糊搜索**（位图环形栈 3 级，不回退数据快照）。
-   精确搜索的 undo 需要另存地址数组副本，尚未实现，调用时会明确报错。
+14. ~~**`gg_search_undo` 只回退模糊搜索**~~ —— 已被第 16 条取代。历史状态：位图环形栈 3 级、
+   不回退数据快照，精确搜索误操作只能重搜。
 15. **agentd 重启后 PC 端第一条请求会自动重连重放**（2026-10-22 修）。判据是
    「整帧是否发完」：`wr<0` 才重放，`wr==0` 绝不重放（对端可能已执行）。
    注意实测里失败通常是 `wr=-1`（帧头塞进缓冲成功、payload 阶段断），
@@ -168,9 +181,13 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 
    **两个名字不能相同** —— 同名模块第二个 `insmod` 直接 `-EEXIST`。
 
-   ⚠️ **`build/rwProcMem33/` 整个驱动源码目录不在版本库里**（`.gitignore` 的 `build/*`），
-   所以 `obj-m` 的改动只体现在**本机的 Makefile 和入库的 `.ko` 产物**上。
-   换机器/重新 clone 后要重做这两处改：
+   ⚠️ **`build/rwProcMem33/` 是上游克隆，本身不入库**（`.gitignore` 的 `build/*`，它带自己的
+   `.git`、未推送提交和本地修复，`git add` 会把它当 gitlink）。**源码快照已入库 `ko/rwProcMem33/`**
+   （2026-10-23，184 个源文件），`obj-m` 改名也已在快照里；两边漂移由
+   `scripts/check_ko_src_sync.py` 发现，改完工作副本用 `scripts/sync_ko_src.py` 回写快照。
+   换机器/重新 clone 后：用 `ko/rwProcMem33/` 的源码，或把它 cp 到 `build/rwProcMem33/`
+   （编译脚本按后者路径找文件）。反向（快照→工作副本）没有脚本，手动 cp 前先
+   `git -C build/rwProcMem33 status` 看清会不会覆盖本地修改。
    - `build/rwProcMem33/rwProcMem33Module/rwProcMem_module/Makefile`：
      `obj-m += rwNova33.o` / `rwNova33-y := rwProcMem_module.o`
    - 编出的 `rwNova33.ko` → 放 `build/ko/rwNova33_<内核版本>.ko`
@@ -794,4 +811,6 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/engineering/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-10-23（新增 42：真实目标实践判据与三个坑）。
+本文件最后校准：2026-10-23 19:55（HEAD `8bddaf5`）：项目结构补 `ko/` 与 `build/` 说明、
+结构护栏补到 6 道、main.c 拆分收尾（683 行）、清掉已删除的 GG 核心注入链路表述、
+itest 状态更新、第 14/16 条矛盾合并。同日新增 42。
