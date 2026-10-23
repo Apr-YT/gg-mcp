@@ -27,6 +27,13 @@ if not exist "%CAPSTONE%\libcapstone.a" (
 echo [1/1] gg-agentd (with optimizations) ...
 call "%CC%" -O3 -flto -Wall -I"%ROOT%" -I"%CAPSTONE%\include" -o "%ROOT%\build\agentd\gg-agentd" ^
   "%ROOT%\agentd\main.c" ^
+  "%ROOT%\agentd\wire_io.c" ^
+  "%ROOT%\agentd\events.c" ^
+  "%ROOT%\agentd\wire_auth.c" ^
+  "%ROOT%\agentd\cmd_proc.c" ^
+  "%ROOT%\agentd\cmd_analyze.c" ^
+  "%ROOT%\agentd\cmd_touch.c" ^
+  "%ROOT%\agentd\cmd_status.c" ^
   "%ROOT%\agentd\cmd_shell.c" ^
   "%ROOT%\agentd\cmd_view.c" ^
   "%ROOT%\agentd\cmd_search.c" ^

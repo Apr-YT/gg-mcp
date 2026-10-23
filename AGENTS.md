@@ -641,6 +641,56 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    改完真机复测全量搜索 0.16~0.18s，pagemap 仍生效；`run_tests` 全绿，
    工具数 44 → 46（dispatch 护栏自动校验通过）。
 
+37. **main.c 拆分完成**（2026-10-23）。2049 → **658 行**，方案见
+   `docs/engineering/MAIN_C_SPLIT.md`（含执行记录与三处偏差）。
+
+   | 文件 | 内容 |
+   |---|---|
+   | `wire_io.c` | 出站帧（send_frame/fragmented/ok/err）+ `g_send_mtx` |
+   | `events.c` | 客户端注册表 + 广播 + event_* + cmd_name + watch_hit_json |
+   | `wire_auth.c` | g_wire_key / ct_equal / 临时密钥 / h_auth |
+   | `cmd_proc.c` | ping/self_test/list/attach/detach/target_info/module_list |
+   | `cmd_analyze.c` | disassemble/watch/module_base/calc_offset/pointer_scan |
+   | `cmd_touch.c` | ghost_tap / ghost_swipe |
+   | `cmd_status.c` | kernel_status / device_info / subscribe / relay_event |
+
+   **main.c 只剩**：全局状态、log_msg、参数解析 helper、`j_addr_u64`、
+   dispatch（182 行）、conn_thread、print_usage/hide_process、main()。
+
+   ### 拆的时候踩到的坑（下次拆别再踩）
+
+   1. **按"函数区间"一刀切，会连带删掉别人留下的前向声明。**
+      原 main.c 在 `h_kernel_status` 之后有一小段
+      `/* cmd_view.c（拆分外迁） */` + 3 个声明 + `h_shell` 声明，
+      混在 handler 区里。按区间删除就一起没了，编译报 implicit declaration。
+      现在统一收在 `engine_internal.h` 的对应分段里。
+      **删区间前先 grep 区间内有没有 `^void h_` 这类前向声明。**
+   2. **方案的边界不一定对。** `j_addr_u64` 夹在"wire 鉴权密钥"区中间，
+      不能整块搬 —— 要切成两半，只搬它之前的部分。
+   3. **行数目标别信估算。** 方案估 450，实际 658。差额是 includes(43) +
+      全局状态注释(33) + helper(60) + dispatch(182) + main(182) +
+      conn_thread/usage(60) ≈ 575 的必然结果。**658 就是合理终点。**
+
+   ### 每步的验收（照抄，别省）
+
+   ```
+   scripts\build_ndk.bat          # agentd
+   scripts\build_pc.bat           # PC server
+   tests\unit\run_tests.bat      # 单测 + 5 道护栏（dispatch 一致性会校验 46 工具）
+   tests\integration\run_itest.ps1   # 真机（设备在线时）
+   ```
+   本轮实测：全绿；itest ALL PASS（含 hwbp INST/GET_HIT_COUNT/UNINST）；
+   dispatch 的 `GGCMD_*` case 数拆分前后都是 42，diff 无差异。
+
+   ### 拆分时保持不变的约束（写在各自文件头）
+
+   - `wire_io.c`：负载混淆作用于副本；分片逐片独立 XOR 且同锁发完
+   - `events.c`：`broadcast_event` 的 dup() + 锁外发送顺序
+   - `wire_auth.c`：`ct_equal` 常量时间；密钥永不进日志；空 key 是 fail-closed
+   - `cmd_proc.c`：`session_guard()` 在 `lock(mtx)` 之后、`switch` 之前
+   - `cmd_analyze.c`：`g_hwbp_probe` 是全局缓存的（探测有副作用，别每请求重探）
+   - `cmd_status.c`：`kernel_status`/`device_info` 走无锁快速通道，别挪进锁内
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）

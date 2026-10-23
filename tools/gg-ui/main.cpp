@@ -460,8 +460,21 @@ static void do_read_one(uint64_t addr) {
     ToolResult r = call_tool(g_app.sess, "gg_read",
                              json{{"addr", a}, {"type", kTypeNames[g_app.type_idx]}});
     if (!r.ok) { logf("[读] %s 失败: %s", a, r.err.c_str()); return; }
-    logf("[读] %s = %lld (0x%s)", a, (long long)r.data.value("value", (int64_t)0),
-         r.data.value("value_hex", std::string("?")).c_str());
+    /* gg_read 返回 {bytes, value} —— **没有 value_hex**（这里以前取 value_hex，
+     * 日志一直是 "0x?"）。value 可能是无符号/有符号，也可能是 float/double，
+     * 所以按 JSON 类型分支打印，别硬转 int64。 */
+    const json v = r.data.contains("value") ? r.data["value"] : json(nullptr);
+    const int nb = r.data.value("bytes", 0);
+    if (v.is_number_unsigned())
+        logf("[读] %s = %llu (0x%llx, %d 字节)", a,
+             (unsigned long long)v.get<uint64_t>(),
+             (unsigned long long)v.get<uint64_t>(), nb);
+    else if (v.is_number_integer())
+        logf("[读] %s = %lld (0x%llx, %d 字节)", a,
+             (long long)v.get<int64_t>(),
+             (unsigned long long)(uint64_t)v.get<int64_t>(), nb);
+    else
+        logf("[读] %s = %s (%d 字节)", a, v.dump().c_str(), nb);
 }
 
 static void do_write(uint64_t addr) {
@@ -743,7 +756,7 @@ static void do_pointer_scan() {
             }
         }
     }
-    logf("[指针扫描] %d 个容器指向当前结果集（双击容器地址可追链）", n);
+    logf("[指针扫描] %d 个容器指向当前结果集；首个容器已填进地址框，可直接追链", n);
     /* 顺手把第一个容器填进地址框：扫描的目的就是要追它，省一次手抄 */
     if (n > 0 && arr[0].is_object()) {
         snprintf(g_app.ptr_addr, sizeof(g_app.ptr_addr), "%s",

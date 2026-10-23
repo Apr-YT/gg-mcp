@@ -1,6 +1,7 @@
 # main.c 拆分方案
 
-> **状态**：规划中 · 2026-10-23 · 拆前 main.c 约 2049 行
+> **状态**：**已完成（2026-10-23）** · 拆前 2049 行 → 拆后 **658 行**（-68%）
+> 执行记录与偏差见文末第 11 节 —— 先读那节，方案里有两处与实际不符。
 > **前提**：已有拆分约定（`engine_internal.h` 声明层 + `cmd_*.c` 外迁模式）验证可行，护栏脚本（`check_dispatch_consistency.py` / `check_kernel_only.py` 等）不受影响。每步必须编译 + 跑 `tests/unit/run_tests.bat` 全绿再进下一步。
 
 ---
@@ -393,3 +394,62 @@ cd tests\unit
 | `dispatch` 里的 `g_destructive_cmds[]` 数组抽到 `engine_internal.h` 宏或 const 数组 | 单一清单 | 极低 |
 | `parse_vt` 接受 `"u64"` → `VT_QWORD` 这类别名（已支持 `qword/long`） | 更友好 | 极低 |
 | `h_kernel_status` 的快速通道无锁快照（SNAP 宏 + atomic_load）做成通用宏 | 其他快速通道 handler 复用 | 低 |
+
+---
+
+## 11. 执行记录（2026-10-23，全部完成）
+
+### 实际产出
+
+| 文件 | 行数 | 内容 |
+|---|---|---|
+| `main.c` | **658** | 全局状态 / log_msg / 参数 helper / dispatch / conn_thread / main() |
+| `wire_io.c` | 179 | send_frame / send_frame_fragmented / send_ok / send_err + g_send_mtx |
+| `events.c` | 447 | 客户端注册表 / broadcast / event_* / cmd_name / watch_hit_json |
+| `wire_auth.c` | 164 | g_wire_key / ct_equal / 临时密钥 / h_auth |
+| `cmd_proc.c` | 308 | ping/self_test/list_processes/resolve_pid/session_*/attach/detach/target_info/module_list |
+| `cmd_analyze.c` | 295 | disassemble / watch（四合一）/ module_base / calc_offset / pointer_scan |
+| `cmd_touch.c` | 68 | ghost_tap / ghost_swipe |
+| `cmd_status.c` | 125 | kernel_status / device_info / subscribe / relay_event |
+
+main.c 最终 658 行，比方案估的 ~450 多。原因见下面第 3 条偏差。
+
+### 三处与方案的偏差（下次写这类方案要注意）
+
+1. **方案漏了四个前置声明，拆分时被当代码删掉了。**
+   原 main.c 在 `h_kernel_status` 之后、`dispatch` 之前有一小段：
+   ```c
+   /* cmd_view.c（拆分外迁） */
+   void h_view_memory(int fd, uint32_t seq, cJSON *p);
+   void h_resolve_symbol(int fd, uint32_t seq, cJSON *p);
+   void h_pointer_chain(int fd, uint32_t seq, cJSON *p);
+   ```
+   还有 `h_shell` 的声明。它们混在"handler 区"里，按区间一刀切就一起没了，
+   编译报 `implicit declaration`。现在统一收进 engine_internal.h。
+   **教训：按"函数区间"删除时，要一并检查区间内有没有别人留下的前向声明。**
+
+2. **Phase 1·③ 的边界方案写错了。** 方案说 `j_addr_u64` 留 main.c，
+   但它夹在"wire 鉴权密钥"区中间 —— 不能整块搬。实际做法是把该区切成两半，
+   只搬 `j_addr_u64` 之前的部分，`j_addr_u64` 留下。
+
+3. **main.c 到不了 450 行的原因。** 方案第 5 节估的 380 行里没算：
+   includes 43 + 全局状态（含 hwbp 三开关和它们的长注释）33 + 参数 helper 60 +
+   `j_addr_u64` 15 + dispatch 182 + conn_thread 37 + print_usage/hide_process 23 +
+   main() 182 = **约 575**，实际 658（多出的是一路补的注释）。
+   所以 450 这个目标从一开始就偏乐观。**658 是合理终点。**
+
+### 验收（按方案第 9 节）
+
+- `scripts\build_ndk.bat` → OK
+- `scripts\build_pc.bat` → OK
+- `tests\unit\run_tests.bat` → ALL PASS + 5 道护栏全 OK
+  （dispatch 一致性护栏自动校验 46 个工具，拆分没影响它）
+- `tests\integration\run_itest.ps1` → **ITEST ALL PASS**（真机，含 hwbp 三项）
+- dispatch 的 case 数：拆分前 42 / 拆分后 42，`diff` 无差异
+
+### 顺带修的
+
+- UI 的 `do_read_one` 一直取 `value_hex`，而 `gg_read` 只返回
+  `{bytes, value}` —— 日志里那个 hex 一直是 `0x?`。改成按 JSON 类型分支打印。
+- 验证 `gg_pointer_scan` 时确认了字段名是 `hits:[{container,target,ptype}]`，
+  且 container 里确实存着它报告的 target（读回 `59177788 == 0x386FB3C`）。
