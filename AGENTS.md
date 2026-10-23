@@ -647,7 +647,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    | 文件 | 内容 |
    |---|---|
    | `wire_io.c` | 出站帧（send_frame/fragmented/ok/err）+ `g_send_mtx` |
-   | `events.c` | 客户端注册表 + 广播 + event_* + cmd_name + watch_hit_json |
+   | `events.c` | **当晚又整体删除**（见第 38 条）。`clients_*` 搬到 `wire_io.c`，`watch_hit_json` 搬到 `cmd_analyze.c` |
    | `wire_auth.c` | g_wire_key / ct_equal / 临时密钥 / h_auth |
    | `cmd_proc.c` | ping/self_test/list/attach/detach/target_info/module_list |
    | `cmd_analyze.c` | disassemble/watch/module_base/calc_offset/pointer_scan |
@@ -685,11 +685,65 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    ### 拆分时保持不变的约束（写在各自文件头）
 
    - `wire_io.c`：负载混淆作用于副本；分片逐片独立 XOR 且同锁发完
-   - `events.c`：`broadcast_event` 的 dup() + 锁外发送顺序
    - `wire_auth.c`：`ct_equal` 常量时间；密钥永不进日志；空 key 是 fail-closed
    - `cmd_proc.c`：`session_guard()` 在 `lock(mtx)` 之后、`switch` 之前
    - `cmd_analyze.c`：`g_hwbp_probe` 是全局缓存的（探测有副作用，别每请求重探）
    - `cmd_status.c`：`kernel_status`/`device_info` 走无锁快速通道，别挪进锁内
+
+38. **事件广播子系统已删除（2026-10-23）—— 别再按"订阅推送"设计功能**
+
+   `events.c` / `last_resp.h` / `test_last_resp.c` 整体删除，配套：
+   - `SUBSCRIBE_EVENTS` / `UNSUBSCRIBE_EVENTS` / `RELAY_EVENT` 枚举值保留（不复用），
+     dispatch 里统一回 `command removed: events subsystem was deleted in AI-first mode`
+     —— 客户端要看到"这个功能没了"，不是等到超时
+   - 分片注册表 `clients_register/clients_set_frag/client_supports_frag` 搬到 `wire_io.c`
+     （只剩 `frag_ok` 一个标记，`send_ok` 超长时查它）
+   - `watch_hit_json` 搬到 `cmd_analyze.c`（poll 是唯一消费路径）
+   - **watch 一直是 pull 模型**（`watch_poll`），删推送不改它的语义
+   - `engine_internal.h` 里 4 个 `event_*` 空宏只是让旧调用点先能编译，
+     **新代码不要再用**；见到就顺手删掉调用
+   - PC 端连接后不再发 `SUBSCRIBE_EVENTS`（`server/device/wire.cpp`）
+
+   理由：推送只服务手机悬浮窗，PC 侧一直是空的。留着 = 一个常驻线程 + 一套订阅
+   状态机 + 每个 handler 都要维护的响应存档（`last_resp`）。
+
+39. **wire 小帧 40ms 陷阱：Nagle + delayed ACK（2026-10-23 靶场定案）**
+
+   - **现象**：单点 `READ` 稳定 **40.0ms**，而 64KB `READ_BYTES` 只要 19ms
+     —— 数据量小的反而慢
+   - **判据**：延迟与数据量无关、抖动 < 0.2ms ⇒ 是定时器不是负载
+   - **根因**：`send_frame` 两次 `send`（先 20B header、再 payload）。小 payload 时
+     第二个包卡在"前一个包未确认"状态，触发 Nagle；对端 TCP **delayed ACK 正好 40ms**。
+     大响应含满 MSS 段，不受 Nagle 限制，所以更快
+   - **修法两件套（缺一个仍退化）**：`send_hdr_payload()` 一次 send 发完 header+payload
+     ＋ accept 后 `setsockopt(TCP_NODELAY)`（NDK 的 `arpa/inet.h` 不带，要 `<netinet/tcp.h>`）
+   - **结果**：READ 40.0→0.44ms、WRITE 35.4→0.46ms、MCP 路径 42.9→2.25ms
+   - **回归探针**：`python tests/integration/lat_probe.py`（直连 34127，绕过 HTTP 层）
+   - **教训**：wire 层任何"分两次写"的东西（header/body 分开、分片、chunked）
+     都要先考虑 Nagle；量延迟一律直连测，HTTP + PowerShell 会把 ms 级差异埋掉
+
+40. **pointer_scan 曾漏接 pagemap 跳过（2026-10-23 修，11.7s → 1.1s）**
+
+   可写区里绝大部分是 malloc 保留但从未触碰的页。原实现逐块 256KB `driver_read`，
+   读失败后靠 `gg_fault_advance` 一页页推进 —— 微信 585MB 扫 2833 个目标要 11.7s，
+   九成时间在读不存在的页。搜索路径（第 30 条 X2）早接了 `pm_open`/`pm_try_skip`，
+   指针扫描漏了。
+
+   - 跳过是**等价**的：absent 页读出恒为 0，而目标是地址，`v==0` 分支已直接跳过
+   - `pmfd < 0`（pagemap 打不开）时 `pm_try_skip` 恒返回 0，自动退回逐页探测
+   - **凡是"扫一片内存"的新功能，先确认有没有接 `pm_try_skip`**，否则默认慢 10 倍
+
+41. **日志别逐请求打（2026-10-23）**
+
+   `conn: magic=...` 每请求一行，UI 每 900ms 轮询 `result_count` → 一天上万行。后果：
+
+   - 启动期 `driver self-test: channel OK` 被挤出 `check_stealth.sh` 的 `tail -c 2000`
+     窗口 → 自检**误报 FAIL**（差点被当成模块坏了）
+   - 白写 flash
+
+   现在只在协议异常时记（bad header / payload 超限 / payload 读失败）。
+   `check_stealth.sh` 第 10 项也改成锚定"最后一次 `starting (port=`"之后的日志，
+   不再看固定尾部窗口。
 
 ## 约定
 
@@ -711,4 +765,4 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/engineering/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-10-23（清掉 5 条已清/被取代条目，修正 main.c 行数与分片状态）。
+本文件最后校准：2026-10-23（新增 38-41：事件系统删除、wire Nagle、pointer_scan pagemap、日志刷屏）。

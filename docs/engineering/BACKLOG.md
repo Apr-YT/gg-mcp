@@ -22,6 +22,21 @@ AI 在后台搜完人的表格自动跟上。
 
 ---
 
+### 靶场实测：wire 延迟 / pointer_scan / 日志（2026-10-23 中午）
+
+一次靶场跑出三个问题，都是"功能全对、手感不对"那类：
+
+| 问题 | 现象 | 根因 | 结果 |
+|---|---|---|---|
+| wire 小帧 40ms | 单点 READ 稳定 40.0ms，64KB 读只要 19ms | `send_frame` 两次 send + 未关 Nagle，撞上对端 delayed ACK（40ms） | 0.44ms（90x） |
+| pointer_scan 11.7s | 微信 585MB 扫 2833 目标 | 没接 pagemap 跳过，九成时间在读 absent 页 | 1.1s（10.3x） |
+| 日志一天上万行 | `conn:` 每请求一行 | UI 每 900ms 轮询 result_count | 只在协议异常时记 |
+
+顺带删掉整个事件广播子系统（`events.c`），详见 `AGENTS.md` 第 38-41 条。
+新的回归探针：`python tests/integration/lat_probe.py`（直连 34127 量单次延迟）。
+
+---
+
 ## P0 — 收益明确、改动小
 
 ### 1. UI 结果分页
@@ -158,8 +173,13 @@ key 也因此不能随机化。详见 AGENTS 32。
 | 场景 | 当前 | 备注 |
 |---|---|---|
 | 精确全量搜索（341MB / systemui） | 0.19~0.22s | 结果 2 万条量级 |
+| 精确全量搜索（585MB / 微信） | 0.24~0.46s | 结果 2000~2500 条（writable 0.31s） |
 | 模糊首次扫描（256MB 快照） | 0.31s | 6710 万元素 |
 | 模糊 refine | 0.26s | 全量重读，未按候选页优化 |
+| **wire 单点读写** | **0.44~0.46ms** | 直连；修 Nagle 前是 40.0ms / 35.4ms |
+| **wire 读 64KB / 256KB** | **24ms / 93ms** | 受 USB 带宽限制（~2.8MB/s），非驱动 |
+| **pointer_scan（2833 目标）** | **1.1s** | 修 pagemap 前 11.7s |
+| **get_results 分页 10000 条** | **89ms** | 850KB JSON |
 | 驱动单页成本 | walk 357ns + phys 559ns | 逐页 4KB |
 | check_stealth | PASS=12 FAIL=0 | 改驱动后必须复跑 |
 | run_itest | ALL PASS | 含 hwbp 三项 |
