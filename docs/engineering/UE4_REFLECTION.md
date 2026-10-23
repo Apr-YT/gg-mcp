@@ -165,3 +165,56 @@ $ python scripts/arm64_globals.py build/libUE4.so 0x686F7F0 --count 14
    必须自己验证（读出来是不是合理值）。
 3. **`dyn-syms` 里没有的符号，不代表不存在**，可能只是没导出 ——
    这时用签名，别用符号名猜。
+
+---
+
+## ✅ GWorld 路线打通（19:10 实测，枪战特训2）
+
+前面那套 GName 全是弯路。看用户自己的 `esp-android` 仓库文档才发现，
+UE4 拿实体走的是 **GWorld → ULevel → Actor**，根本不需要 FName。
+
+### 实测偏移（只对本版本成立）
+
+```
+GWorld        = libUE4.so + 0xAAB2D50      （.dynsym 有导出，直接查）
+UWorld + 0x30 = ULevel
+ULevel + 0x98 = TArray<AActor*> data
+ULevel + 0xA0 = TArray count
+AActor + 0x2D0 = FVector 世界坐标
+```
+
+### 实测结果
+
+```
+libUE4.so   0x6D47A5A000
+GWorld      0x6D3179B890
+ULevel      0x6D2A248440
+Actors      data=0x6D10CC9B10  count=66
+其中 13 个 Actor 有有效世界坐标：
+  0x6D13164C00   ( 1405.4, -3824.9,  650.1)
+  0x6D13165100   (-3395.9, -5342.9, 1329.7)
+  0x6D1B02C900   (-2545.0, -7296.3,  913.7)
+  ...
+坐标分布 X∈[-4421,1546] Y∈[-7681,1728] Z∈[576,2179]，符合地图尺度
+```
+
+### 怎么重扫这些偏移（换游戏必做）
+
+| 目标 | 方法 |
+|---|---|
+| GWorld | `.dynsym` 搜 `GWorld`（有导出就一步到位），没有就 Pattern 扫 |
+| UWorld→ULevel | 扫 UWorld 前 0x100 的指针，挑"内部含 TArray、data[0] 指向堆"的那个 |
+| Actors | 在 ULevel 前 0x200 找 `(data_ptr, count)` 相邻组合，且 data[0] 有效 |
+| 坐标 | 遍历所有 Actor，统计哪个偏移在最多 Actor 里出现"合理三元组"（实测 +0x2D0 命中 13/66，次高只有 7） |
+
+### 关键教训
+
+**文档里暗区突围的偏移（GWorld 0xf429248、坐标 0x128、血量 0xD18）在这个游戏上全不适用。**
+换游戏必须重扫，但**链路结构是通用的**。
+
+工具：`scripts/ue4_esp_probe.py`（一条命令输出 Actor 列表 + 坐标）。
+
+### 还差
+
+- **ViewProjection 矩阵**（W2S 必需）：文档给的是 `libUE4 + 0xf3dac88 → +0x20 → +0x2A0`，本游戏要重找
+- 血量/阵营：属性偏移逐个逆
