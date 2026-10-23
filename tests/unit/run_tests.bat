@@ -153,7 +153,7 @@ g++ -std=c++17 -fsyntax-only -Wall -I"%ROOT%\tests\unit\posix_stub" ^
   "%ROOT%\tests\unit\test_wire_posix_syntax.cpp"
 if errorlevel 1 ( echo [FAIL] test_wire_posix_syntax & exit /b 1 )
 
-rem dispatch consistency guardrail: schema.cpp (45-tool authoritative list) cross-checked
+rem dispatch consistency guardrail: schema.cpp (authoritative tool list) cross-checked
 rem against session.cpp (call_tool dispatch) to catch "new/renamed tool wired in only one place".
 rem
 rem python probe (2026-10-15 fix -- both guardrails below used to be DEAD CODE):
@@ -216,6 +216,13 @@ rem Those commands must use rwproc_call(out=NULL).
 echo === scalar-return guardrail: scalar commands must not use rwproc_call_ex ===
 "%PYEXE%" "%ROOT%\tests\unit\check_scalar_cmd.py" "%ROOT%"
 if errorlevel 1 ( echo [FAIL] scalar-return guardrail & exit /b 1 )
+rem KO source snapshot guard: ko/rwProcMem33 must stay identical to the sources in
+rem build/rwProcMem33 (the upstream clone). The module source is the foundation of the
+rem whole kernel channel and used to exist ONLY inside an ignored directory - one lost
+rem laptop away from being unrecoverable. Skipped (OK) when the working copy is absent.
+echo === ko source snapshot: ko/ vs build/rwProcMem33 ===
+"%PYEXE%" "%ROOT%\scripts\check_ko_src_sync.py" "%ROOT%"
+if errorlevel 1 ( echo [FAIL] ko source snapshot drifted - run scripts\sync_ko_src.py & exit /b 1 )
 goto :gg_guardrails_done
 
 :gg_skip_guardrails

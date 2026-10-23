@@ -4,6 +4,17 @@ build/*
 # 两套 6.12.x 分别对应 K90(6.12.23) 与 myron(6.12.69)，vermagic 与符号 CRC 已按设备适配，
 # 生成/复用方法见 docs/engineering/RWPROC33_ADAPTER.md §十一。改动前先读那一节。
 !build/ko/
+# 注意：build/rwProcMem33/ 是上游 rwProcMem33-afei 的 git 克隆（有自己的 .git、未推送提交
+# 与本地修复），**故意不整体入库**（否则会被当成 gitlink）。其中的模块源码以快照形式
+# 存放在 ko/rwProcMem33/，两边漂移由 scripts/check_ko_src_sync.py 检测。
+# KO 源码快照目录内的编译产物不入库
+ko/**/*.o
+ko/**/*.ko
+ko/**/*.mod
+ko/**/*.mod.c
+ko/**/*.cmd
+ko/**/*.order
+ko/**/*.symvers
 # 真机调试的中间产物（设备 BTF 7.8MB、试编的 .ko、设备 config）不入库；
 # 其中 fix_modc.py 是 modpost 空表缺陷的修补脚本，保留在本地即可，需要时按
 # docs/audit/RWPROC33_2026-10-22.md 复现。
