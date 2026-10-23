@@ -17,12 +17,12 @@
 #include "watch.h"
 #include "shell_util.h"   // 安全 shell 纯逻辑 helper（与单元测试共享单一事实源）
 #include "engine_internal.h"  // 拆分过渡层：引擎单例/帧API 跨文件共享声明
-#include "last_resp.h"        // 响应存档（cmd_end 摘要），可测头文件
 
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>   /* TCP_NODELAY（NDK 的 arpa/inet.h 不带） */
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -68,12 +68,6 @@ int g_hwbp_probe = -1;
  * 4 才是「0 起始枚举的旧模块」。两者混在一句话里会把排查方向带偏
  * （AGENTS 第 25 条就是这么误判成模块命令码不一致的）。 */
 int g_hwbp_probe_rc = -1;
-
-/* 最近一次响应存档（send_ok/send_err 写入，dispatch 的 cmd_end 事件使用）。
- * X3: 改为线程局部——每连接线程独立，快速通道（PING/KERNEL_STATUS 等无锁
- * 执行）与锁内引擎操作不再共享同一 buffer，消除跨线程数据竞争。
- * 缓冲/截断语义见 last_resp.h（单独成头以便单测 UTF-8 边界处理）。 */
-_Thread_local gg_last_resp_t g_last_resp;
 
 /* ---------------- 握手鉴权 + 并发闸门 ---------------- */
 
@@ -309,17 +303,12 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
         }
     }
 
-    uint64_t t0 = now_ms();
-    gg_last_resp_reset(&g_last_resp);
-    event_cmd_start(h->cmd, p);
-
     /* X3 快速通道：只读健康命令不持引擎锁——大进程搜索（可数十秒）期间
      * 仍可服务 PING/KERNEL_STATUS/LIST_PROCESSES/DEVICE_INFO，客户端/AI
      * 能随时确认存活与搜索进度（此前全部阻塞在搜索后面, 表现为"假死"）。
      * 写操作与其余命令仍走 g_eng.mtx 全串行（帧原子性不变）。
      * 并发安全：stat_* 为 _Atomic（driver.c 原子累加）；整型状态字段
-     * __atomic_load 读；last_error 快照容忍撕裂（内容短暂不完整, JSON 合法）；
-     * g_last_resp 为线程局部（本线程 handler 写、本线程 cmd_end 读, 无跨线程竞争）。 */
+     * __atomic_load 读；last_error 快照容忍撕裂（内容短暂不完整, JSON 合法）。 */
     switch (h->cmd) {
     case GGCMD_PING:           h_ping(fd, seq, p); goto fast_done;
     case GGCMD_KERNEL_STATUS:  h_kernel_status(fd, seq, p); goto fast_done;
@@ -378,9 +367,12 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
     case GGCMD_VIEW_MEMORY:        h_view_memory(fd, seq, p); break;
     case GGCMD_RESOLVE_SYMBOL:     h_resolve_symbol(fd, seq, p); break;
     case GGCMD_POINTER_CHAIN:      h_pointer_chain(fd, seq, p); break;
-    case GGCMD_SUBSCRIBE_EVENTS:   h_subscribe(fd, seq, p, 1); break;
-    case GGCMD_UNSUBSCRIBE_EVENTS: h_subscribe(fd, seq, p, 0); break;
-    case GGCMD_RELAY_EVENT:        h_relay_event(fd, seq, p); break;
+    case GGCMD_SUBSCRIBE_EVENTS:
+    case GGCMD_UNSUBSCRIBE_EVENTS:
+    case GGCMD_RELAY_EVENT:
+        send_err(fd, h->cmd, seq, GGERR_BAD_REQUEST,
+                 "command removed: events subsystem was deleted in AI-first mode");
+        break;
     case GGCMD_GHOST_TAP:          h_ghost_tap(fd, seq, p); break;
     case GGCMD_GHOST_SWIPE:        h_ghost_swipe(fd, seq, p); break;
     /* AUTH 已在 dispatch 的握手门里提前处理并 return；这里保留 case 只为
@@ -390,15 +382,12 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
         send_err(fd, h->cmd, seq, GGERR_BAD_REQUEST, "unknown command");
         break;
     }
-    /* cmd_end 在锁内发出（线程局部 g_last_resp 与 handler 同线程, 无跨线程竞争） */
-    event_cmd_end(h->cmd, t0);
     pthread_mutex_unlock(&g_eng.mtx);
 
     if (root) cJSON_Delete(root);
     return;
 
 fast_done:
-    event_cmd_end(h->cmd, t0);   /* 读本线程 handler 写入的 g_last_resp */
     if (root) cJSON_Delete(root);
 }
 
@@ -411,16 +400,32 @@ static void *conn_thread(void *arg) {
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     tv.tv_sec = 5;   /* 发送超时收紧: 事件广播 best-effort, 慢客户端最多拖 5s */
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    /* Nagle 必须关：wire 是请求-响应小帧协议，一个响应只有几十字节时，若前一个
+     * 小包还没被确认，内核会把后续小包压到对端 delayed ACK（40ms）。实测单点
+     * gg_read 稳定 40.0ms/次，就是这 40ms（见 wire_io.c send_hdr_payload 注释）。
+     * 与 send_hdr_payload 的"合并 header+payload"是一套组合拳，缺一个仍会退化。 */
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     clients_register(fd);   /* 事件广播注册表（默认未订阅） */
 
     for (;;) {
         gg_wire_header_t h;
         if (read_full(fd, &h, sizeof(h)) < 0) break;
-        log_msg("conn: magic=%08x ver=%u cmd=%u flags=%u len=%u",
-                (unsigned)h.magic, (unsigned)h.ver, (unsigned)h.cmd,
-                (unsigned)h.flags, (unsigned)h.payload_len);
-        if (h.magic != GGWM_MAGIC || h.ver != GGWM_VERSION) break;
-        if (h.payload_len > GGWM_MAX_PAYLOAD) break;   /* 单帧负载上限 1MiB（见 wire_protocol.h） */
+        /* 不再逐请求打印 conn 行（原实现每次命令一条，UI 每秒轮询 result_count
+         * 就能把日志刷到一万多行，把启动期的 self-test 结论挤出尾部窗口，
+         * 隐藏性自检因此误报"日志里没有 channel OK"；顺带省掉每请求一次
+         * flash 写）。协议异常的诊断信息在下面各分支里保留。 */
+        if (h.magic != GGWM_MAGIC || h.ver != GGWM_VERSION) {
+            log_msg("conn: bad header magic=%08x ver=%u (expect %08x/%u), drop",
+                    (unsigned)h.magic, (unsigned)h.ver,
+                    (unsigned)GGWM_MAGIC, (unsigned)GGWM_VERSION);
+            break;
+        }
+        if (h.payload_len > GGWM_MAX_PAYLOAD) {   /* 单帧负载上限 1MiB（见 wire_protocol.h） */
+            log_msg("conn: payload_len %u exceeds max %u, drop",
+                    (unsigned)h.payload_len, (unsigned)GGWM_MAX_PAYLOAD);
+            break;
+        }
         char *payload = malloc(h.payload_len + 1);
         if (!payload) break;
         if (h.payload_len && read_full(fd, payload, h.payload_len) < 0) {

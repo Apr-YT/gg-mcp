@@ -84,10 +84,21 @@ if command -v su >/dev/null 2>&1; then
 fi
 
 # 10. 模块是否真的可用（隐藏不能以功能为代价）
+#
+# 判定范围必须锚在「本次启动」，不能看 tail -c N：agentd 每来一条命令都写
+# 一行日志时，UI 轮询几小时就能把文件刷到一万多行，尾部窗口里全是业务行，
+# 启动期的 self-test 结论被挤出去 → 误报 FAIL（2026-10-23 靶场实测踩到）。
+# 做法：取最后一次 "starting (port=" 之后的全部内容再 grep；连启动标记都
+# 没有（日志被 rotate）时退回全文件 grep —— 有 channel OK 就说明模块可用。
 if [ -n "$pid" ]; then
-    tail -c 2000 /data/adb/GG-Ghost/agentd.log 2>/dev/null | grep -q 'channel OK' \
-        && ok "agentd self-test channel OK" \
-        || bad "agentd 日志里没有 channel OK"
+    LOG=/data/adb/GG-Ghost/agentd.log
+    if awk '/starting \(port=/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$LOG" 2>/dev/null | grep -q 'channel OK'; then
+        ok "agentd self-test channel OK（本次启动）"
+    elif grep -q 'channel OK' "$LOG" 2>/dev/null; then
+        ok "agentd self-test channel OK（历史日志，无启动标记）"
+    else
+        bad "agentd 日志里没有 channel OK"
+    fi
 fi
 
 echo "=== 结果：PASS=$NPASS FAIL=$NFAIL ==="

@@ -30,10 +30,38 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 出站帧全局串行：事件广播线程与各连接线程会同时往**同一个 fd** 写
- * （广播写事件、handler 写响应），没有这把锁时两个线程的 header/payload
- * 会交错，接收端按长度读必然错位。g_clients_mtx 只保护注册表，不是发送锁。 */
+/* 出站帧全局串行：多线程（多连接 + 分片组内同 fd）写同 fd 会交错 —— 锁内统一封装。
+ * 事件广播已删除（AI 主力走 pull 而非 push），不再有广播线程竞争。 */
 pthread_mutex_t g_send_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+/* 一次系统调用发出「header + payload」。
+ *
+ * 为什么要合并：原实现是两次 send_full（先 20B header、再 payload）。响应用户
+ * 请求时 payload 往往只有几十字节，于是第二个包落在「前一个包未确认」的状态下，
+ * 触发 Nagle；对端 TCP 的 delayed ACK 定时器是 40ms —— 实测每个单值请求
+ * （READ/WRITE）稳定 40.0ms，而 64KB 读只要 19ms（满 MSS 段不受 Nagle 限制）。
+ * 合并成单次 send 后没有"未确认小包"这个前提，40ms 空等消失。
+ *
+ * 拷贝代价：plen 最大 1MiB，多一次 memcpy 是 µs 级，远小于省下的 40ms。
+ * 栈缓冲覆盖常见小响应，避免每次请求 malloc/free。 */
+static int send_hdr_payload(int fd, const gg_wire_header_t *h,
+                            const void *payload, size_t plen) {
+    size_t total = sizeof(*h) + plen;
+    unsigned char stackbuf[2048];
+    unsigned char *buf = stackbuf;
+    if (total > sizeof(stackbuf)) {
+        buf = malloc(total);
+        if (!buf) {
+            log_msg("send_hdr_payload: oom allocating %zu bytes", total);
+            return -1;
+        }
+    }
+    memcpy(buf, h, sizeof(*h));
+    if (plen) memcpy(buf + sizeof(*h), payload, plen);
+    int rc = send_full(fd, buf, total);
+    if (buf != stackbuf) free(buf);
+    return rc;
+}
 
 int send_frame(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
                       char *payload, size_t plen) {
@@ -66,9 +94,7 @@ int send_frame(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
     h.flags = flags;
     h.payload_len = (uint32_t)plen;
     pthread_mutex_lock(&g_send_mtx);
-    int rc = 0;
-    if (send_full(fd, &h, sizeof(h)) < 0) rc = -1;
-    else if (plen && send_full(fd, enc, plen) < 0) rc = -1;
+    int rc = send_hdr_payload(fd, &h, enc, plen);
     pthread_mutex_unlock(&g_send_mtx);
     free(enc);
     return rc;
@@ -101,7 +127,7 @@ int send_frame_fragmented(int fd, uint16_t cmd, uint32_t seq, uint32_t flags,
         h.seq = seq;
         h.flags = flags | GGWF_ENC | (more ? GGWF_MORE : 0u);
         h.payload_len = (uint32_t)chunk;
-        if (send_full(fd, &h, sizeof(h)) < 0 || send_full(fd, enc, chunk) < 0) {
+        if (send_hdr_payload(fd, &h, enc, chunk) < 0) {
             log_msg("fragmented send failed at off=%zu/%zu", off, plen);
             free(enc);
             rc = -1;
@@ -128,7 +154,6 @@ void send_ok(int fd, uint16_t cmd, uint32_t seq, cJSON *res) {
          * 旧客户端没声明，下面仍走 GGERR_CAP —— 不能让它们收到看不懂的帧。 */
         log_msg("send_ok: %zu bytes > %u, sending fragmented", len,
                 (unsigned)GGWM_MAX_PAYLOAD);
-        gg_last_resp_snapshot(&g_last_resp, s, 1);
         send_frame_fragmented(fd, cmd, seq, GGWF_RESP, s, len);
         free(s);
         return;
@@ -151,7 +176,6 @@ void send_ok(int fd, uint16_t cmd, uint32_t seq, cJSON *res) {
         send_err(fd, cmd, seq, GGERR_CAP, msg);
         return;
     }
-    gg_last_resp_snapshot(&g_last_resp, s, 1);
     send_frame(fd, cmd, seq, GGWF_RESP, s, len);
     free(s);
 }
@@ -167,13 +191,58 @@ void send_err(int fd, uint16_t cmd, uint32_t seq, int code, const char *msg) {
         /* 连错误帧都序列化不出来：发一个静态最小负载。send_frame 不改写调用者
          * 缓冲，所以这里可以安全传字符串字面量。 */
         static const char kFallback[] = "{\"e\":{\"code\":12,\"message\":\"serialization failed\"}}";
-        gg_last_resp_snapshot(&g_last_resp, kFallback, 0);
         send_frame(fd, cmd, seq, GGWF_RESP | GGWF_ERR, (char *)kFallback, sizeof(kFallback) - 1);
         cJSON_Delete(root);
         return;
     }
-    gg_last_resp_snapshot(&g_last_resp, s, 0);
     send_frame(fd, cmd, seq, GGWF_RESP | GGWF_ERR, s, strlen(s));
     free(s);
     cJSON_Delete(root);
+}
+
+/* =================================================================
+ * 分片注册表（从 events.c 搬来，AI 主力下仅保留 frag_ok 标记）
+ * ================================================================= */
+
+typedef struct gg_client {
+    int fd;
+    int frag_ok;                 /* AUTH 时声明能重组分片响应（"frag":1） */
+    struct gg_client *next;
+} gg_client_t;
+
+static gg_client_t *g_clients = NULL;
+static pthread_mutex_t g_clients_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+void clients_register(int fd) {
+    pthread_mutex_lock(&g_clients_mtx);
+    gg_client_t *c = malloc(sizeof(*c));
+    if (c) { c->fd = fd; c->frag_ok = 0; c->next = g_clients; g_clients = c; }
+    pthread_mutex_unlock(&g_clients_mtx);
+}
+
+void clients_unregister(int fd) {
+    pthread_mutex_lock(&g_clients_mtx);
+    gg_client_t **pp = &g_clients;
+    while (*pp) {
+        gg_client_t *c = *pp;
+        if (c->fd == fd) { *pp = c->next; free(c); break; }
+        pp = &c->next;
+    }
+    pthread_mutex_unlock(&g_clients_mtx);
+}
+
+void clients_set_frag(int fd, int on) {
+    pthread_mutex_lock(&g_clients_mtx);
+    for (gg_client_t *c = g_clients; c; c = c->next)
+        if (c->fd == fd) { c->frag_ok = on ? 1 : 0; break; }
+    pthread_mutex_unlock(&g_clients_mtx);
+}
+
+int client_supports_frag(int fd) {
+    int ok = 0;
+    pthread_mutex_lock(&g_clients_mtx);
+    for (gg_client_t *c = g_clients; c; c = c->next)
+        if (c->fd == fd) { ok = c->frag_ok; break; }
+    pthread_mutex_unlock(&g_clients_mtx);
+    return ok;
 }
