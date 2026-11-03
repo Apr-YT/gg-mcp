@@ -353,6 +353,25 @@ json tool_module_list(Session::CallCtx& c, const json&) { return c.send(GGCMD_MO
 // ---- 搜索 ----
 json tool_search(Session::CallCtx& c, const json& a) {
     if (!a.contains("value")) return c.fail(GGERR_BAD_REQUEST, "value required");
+    /* 字符串搜索：encoding 存在时 value 是原始文本，设备端转字节走 AoB。
+     * type 缺省补 bytes；显式给了别的 type 是调用方搞错了语义，直接拒绝
+     * （静默忽略会让"utf-16 搜玩家名"退化成按 dword 解析文本）。 */
+    bool str_mode = a.contains("encoding");
+    if (str_mode) {
+        const json& e = a["encoding"];
+        if (!e.is_string() || (e.get<std::string>() != "utf-8" &&
+                               e.get<std::string>() != "utf-16"))
+            return c.fail(GGERR_BAD_REQUEST, "encoding must be utf-8 or utf-16");
+        json t = a.value("type", json("bytes"));
+        if (!t.is_string() || t.get<std::string>() != "bytes")
+            return c.fail(GGERR_BAD_REQUEST, "encoding requires type=bytes");
+        c.params["type"] = 7 /* VT_BYTES, shared/wire_protocol.h */;
+        c.params["value"] = a["value"];
+        c.params["encoding"] = e;
+        if (a.contains("substring")) c.params["substring"] = a["substring"];
+        if (!c.put_region(a.value("region", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid region");
+        return c.send(GGCMD_SEARCH);
+    }
     if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     c.params["value"] = a["value"];
     if (!c.put_region(a.value("region", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid region");

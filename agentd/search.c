@@ -598,12 +598,77 @@ int parse_hex_pattern(const char *s, uint8_t *out, size_t max) {
     return n;
 }
 
+/* 字符串搜索的字节序列化（走 AoB 路径）。
+ *
+ * 为什么需要：搜玩家名/公会名/道具名是找对象头的经典入口，但把
+ * "abc中文" 手工转成 UTF-16LE hex 极易错（大小端、终止符、代理对），
+ * AI 调用方十次里错三次。转码放 agentd 侧做，调用方只发原始文本。
+ *
+ * utf16=0: UTF-8 原样字节；utf16=1: UTF-16LE（>0xFFFF 走代理对）。
+ * append_nul=1 时附加终止符 —— 游戏内 C 字符串以 \0 收尾，
+ * 不带终止符会命中长字符串中间的子串（"Gold" 命中 "GoldenSword"），
+ * 带上才能把"完整等于这个词"的位置挑出来；要搜子串就传 0。
+ * 返回字节数；非法 UTF-8 / 超 max 返回 -1。 */
+int gg_str_to_pattern(const char *s, int utf16, int append_nul,
+                      uint8_t *out, size_t max) {
+    if (!s || !out) return -1;
+    size_t n = 0;
+    /* 单字节写入 helper：统一检查上限 */
+#define PUT(b) do { if (n >= max) return -1; out[n++] = (uint8_t)(b); } while (0)
+
+    while (*s) {
+        unsigned char c = (unsigned char)*s;
+        uint32_t cp;                     /* 解码出的码点 */
+        int extra;                       /* 后续字节数 */
+        if (c < 0x80)              { cp = c;          extra = 0; }
+        else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F;  extra = 1; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F;  extra = 2; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07;  extra = 3; }
+        else return -1;                  /* 孤立的续字节 / 非法首字节 */
+        if (extra == 0 && c >= 0x80) return -1;   /* 冗余编码（ASCII 用了多字节） */
+        for (int i = 0; i < extra; i++) {
+            unsigned char cc = (unsigned char)s[1 + i];
+            if ((cc & 0xC0) != 0x80) return -1;   /* 续字节格式错 */
+            cp = (cp << 6) | (cc & 0x3F);
+        }
+        /* 过长编码（如 0xC0 0x80 表示 U+0000）与超界码点 */
+        if (cp > 0x10FFFF) return -1;
+        if ((extra == 1 && cp < 0x80) || (extra == 2 && cp < 0x800) ||
+            (extra == 3 && cp < 0x10000))
+            return -1;
+        /* UTF-16 保留区（代理对范围）在 UTF-8 里合法编码也不该出现 */
+        if (cp >= 0xD800 && cp <= 0xDFFF) return -1;
+
+        if (!utf16) {
+            /* UTF-8 直拷：原字节就是合法序列，直接按长度拷 */
+            for (int i = 0; i <= extra; i++) PUT((unsigned char)s[i]);
+        } else {
+            if (cp < 0x10000) {
+                PUT(cp & 0xFF); PUT((cp >> 8) & 0xFF);          /* LE 低字节在前 */
+            } else {
+                cp -= 0x10000;
+                uint32_t hi = 0xD800 + (cp >> 10);              /* 高代理 */
+                uint32_t lo = 0xDC00 + (cp & 0x3FF);            /* 低代理 */
+                PUT(hi & 0xFF); PUT((hi >> 8) & 0xFF);
+                PUT(lo & 0xFF); PUT((lo >> 8) & 0xFF);
+            }
+        }
+        s += 1 + extra;
+    }
+    if (append_nul) {
+        PUT(0);
+        if (utf16) PUT(0);             /* UTF-16 终止符是 2 字节 */
+    }
+#undef PUT
+    return (int)n;
+}
+
 /* AoB 搜索: 在区域内滑动匹配 pat[plen] 字节序列, 命中记录起始地址。
  * 结果条目值类型记 VT_BYTE。 */
 int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
                    const uint8_t *pat, const uint8_t *mask,
                    size_t plen, int region_type) {
-    if (!pat || plen == 0 || plen > 256) return -1;
+    if (!pat || plen == 0 || plen > 512) return -1;
     int has_wild = 0;
     if (mask) {
         for (size_t i = 0; i < plen; i++) if (mask[i] != 0xFF) { has_wild = 1; break; }

@@ -58,11 +58,17 @@ static const std::vector<ToolDef>& build() {
 
         // ---- 内存搜索 ----
         tool("gg_search",
-             "已知值精确搜索。value 支持十进制/0x十六进制，float/double 支持小数；type=bytes 时 value 为 hex 字节序列（AoB 特征码，如 \"48 65 4C 4C\"）",
+             "已知值精确搜索。value 支持十进制/0x十六进制，float/double 支持小数；"
+             "type=bytes 时 value 为 hex 字节序列（AoB 特征码，如 \"48 65 4C 4C\"）。"
+             "字符串搜索：传 encoding（utf-8/utf-16）+ type=bytes，value 为原始文本"
+             "（玩家名/道具名），设备端转字节扫描 —— 搜完整词默认带终止符，"
+             "substring=true 搜子串",
              json{
                  {"value", prop("string", "要搜索的值（如 \"100\"、\"0x64\"、\"3.14\"；type=bytes 时为 hex 序列如 \"48 65 4C 4C\"）")},
                  {"type", prop("string", "值类型", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\",\"bytes\"]")},
                  {"region", prop("string", "搜索区域", "\"enum\":[\"anonymous\",\"writable\",\"all\"]")},
+                 {"encoding", prop("string", "字符串搜索编码（utf-8 / utf-16），value 为原始文本", "\"enum\":[\"utf-8\",\"utf-16\"]")},
+                 {"substring", prop("boolean", "true=搜子串（不带终止符）。默认 false=完整匹配（带 NUL 终止符）")},
              },
              json{"value"}),
         tool("gg_search_unknown_init",

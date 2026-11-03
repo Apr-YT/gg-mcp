@@ -370,6 +370,50 @@ int main(void) {
     }
     }   /* 用例 6 的块（这个块一直开到 main 尾部，中间用例都在里面） */
 
+    /* === 11) 字符串搜索: gg_str_to_pattern 转码器（UTF-8→UTF-16LE）=== */
+    {
+        uint8_t b[64];
+        /* ASCII + 终止符: "abc" → 61 62 63 00 00 (UTF-16LE 每字符2字节+NUL2字节) */
+        int n = gg_str_to_pattern("abc", 1, 1, b, sizeof(b));
+        check(n == 8 && b[0]==0x61 && b[1]==0 && b[2]==0x62 && b[3]==0 &&
+              b[4]==0x63 && b[5]==0 && b[6]==0 && b[7]==0,
+              "11) utf16 ascii+NUL: 8 字节");
+        /* 中文 U+4E2D (中): LE = 2D 4E */
+        n = gg_str_to_pattern("\xE4\xB8\xAD", 1, 0, b, sizeof(b));
+        check(n == 2 && b[0] == 0x2D && b[1] == 0x4E, "11) utf16 中文 U+4E2D → 2D 4E (LE)");
+        /* emoji U+1F600 (😀): 代理对 D83D DE00 → LE: 3D D8 00 DE */
+        n = gg_str_to_pattern("\xF0\x9F\x98\x80", 1, 0, b, sizeof(b));
+        check(n == 4 && b[0]==0x3D && b[1]==0xD8 && b[2]==0x00 && b[3]==0xDE,
+              "11) utf16 emoji U+1F600 → 代理对 D83D DE00 (LE)");
+        /* UTF-8 直通模式 */
+        n = gg_str_to_pattern("AB", 0, 1, b, sizeof(b));
+        check(n == 3 && b[0]=='A' && b[1]=='B' && b[2]==0, "11) utf8 直通+单字节NUL");
+        /* 非法序列必须拒绝: 孤立续字节 / 截断序列 / 代理区码点 */
+        check(gg_str_to_pattern("\x80", 1, 0, b, sizeof(b)) == -1, "11) 拒绝孤立续字节");
+        check(gg_str_to_pattern("\xE4\xB8", 1, 0, b, sizeof(b)) == -1, "11) 拒绝截断序列");
+        check(gg_str_to_pattern("\xED\xA0\x80", 1, 0, b, sizeof(b)) == -1, "11) 拒绝代理区码点 U+D800");
+        check(gg_str_to_pattern("\xC0\x80", 1, 0, b, sizeof(b)) == -1, "11) 拒绝过长编码 U+0000");
+        /* 上限检查 */
+        check(gg_str_to_pattern("abcdef", 0, 0, b, 4) == -1, "11) 超上限返回 -1");
+    }
+
+    /* === 11b) 端到端: UTF-16LE 字符串进内存后能搜到 === */
+    mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + 0x10000);
+    {
+        uint64_t where = TEST_MEM_BASE + 0x1000;
+        /* "中" U+4E2D + NUL: 2D 4E 00 00 */
+        uint8_t utf16[4] = {0x2D, 0x4E, 0x00, 0x00};
+        memcpy(g_mem + (where - TEST_MEM_BASE), utf16, 4);
+        uint8_t pat[64], mask[64];
+        int plen = gg_str_to_pattern("\xE4\xB8\xAD", 1, 1, pat, sizeof(pat));
+        check(plen == 4, "11b) 转码出 4 字节 pattern");
+        memset(mask, 0xFF, (size_t)plen);
+        results_init(&r, 0);
+        int64_t nh = search_aob(NULL, 0, &r, pat, mask, (size_t)plen, 0);
+        check(nh == 1 && results_has(&r, where), "11b) UTF-16LE 中文搜索命中正确地址");
+        results_clear(&r);
+    }
+
     printf(fails ? "\n== FAILED: %d ==\n" : "\n== ALL PASS ==\n", fails);
     return fails ? 1 : 0;
 }

@@ -12,6 +12,19 @@
 
 ## 已完成（近期）
 
+### 字符串搜索 encoding 参数（2026-11-03）
+
+`gg_search` 传 `encoding`（utf-8/utf-16）+ `type=bytes`：value 为原始文本
+（玩家名/公会名/道具名），agentd 侧转字节走 AoB 路径。此前调用方要自己把
+"abc中文" 拼 UTF-16LE hex，大小端/终止符/代理对十次错三次。
+
+- `gg_str_to_pattern`（search.c）：手写 UTF-8→UTF-16LE 转码器，代理对、
+  过长编码、代理区码点、截断序列全拒绝；默认带 NUL 终止符搜"完整匹配"，
+  `substring=true` 搜子串（否则 "Gold" 会命中 "GoldenSword" 中间）
+- server 侧 encoding 时强制 type=bytes，显式给别的 type 直接拒绝
+- search_aob pattern 上限 256→512（UTF-16 下 128 字符）
+- 单测 11（转码器 9 断言）/ 11b（端到端中文命中）
+
 ### UI ↔ AI 联动（2026-10-23）
 
 用户需求："我手动搜索的值可以与 AI 联动"。

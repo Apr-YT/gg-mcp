@@ -114,6 +114,9 @@ int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
  * mask 可为 NULL（调用方只想要字节值、不关心通配），此时通配位写 0。
  * 返回字节数；出错返回 -1。 */
 int parse_hex_pattern_masked(const char *s, uint8_t *out, uint8_t *mask, size_t max);
+/* 字符串 → AoB 字节序列（utf16=1 转 UTF-16LE 含代理对）。见 search.c 注释。 */
+int gg_str_to_pattern(const char *s, int utf16, int append_nul,
+                      uint8_t *out, size_t max);
 
 /* 旧的纯字节接口（不含通配），保留给只接受精确序列的调用方 */
 int parse_hex_pattern(const char *s, uint8_t *out, size_t max);

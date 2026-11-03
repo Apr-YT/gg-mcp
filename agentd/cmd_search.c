@@ -54,14 +54,40 @@ void h_search(int fd, uint32_t seq, cJSON *p) {
     int64_t found = 0;
 
     if (type == VT_BYTES) {
-        /* AoB 特征码搜索: value = hex 字符串 "48 65 4C 4C"，支持通配：
-         *   ??  整字节通配
-         *   8?  只比高半字节      ?B  只比低半字节
-         * 社区的 UE4/GNames/GUObjectArray 等签名大量使用半字节通配，
-         * 不支持通配等于一个签名都用不了（2026-10-23 实测卡在这）。 */
-        uint8_t pat[256], mask[256];
-        int plen = parse_hex_pattern_masked(vs, pat, mask, sizeof(pat));
-        if (plen <= 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "bad aob pattern"); return; }
+        uint8_t pat[512], mask[512];
+        int plen;
+        /* encoding：字符串搜索模式。value 是原始文本（玩家名/道具名），
+         * 转字节走 AoB 路径 —— 调用方自己拼 UTF-16LE hex 十次错三次。
+         * 不传 encoding 保持 hex 特征码语义（向后兼容）。 */
+        cJSON *jenc = cJSON_GetObjectItem(p, "encoding");
+        if (jenc && cJSON_IsString(jenc)) {
+            const char *enc = jenc->valuestring;
+            int utf16 = !strcmp(enc, "utf-16") || !strcmp(enc, "utf-16le") ||
+                        !strcmp(enc, "utf16");
+            if (!utf16 && strcmp(enc, "utf-8") && strcmp(enc, "utf8")) {
+                send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST,
+                         "encoding must be utf-8 or utf-16");
+                return;
+            }
+            /* 带终止符搜"完整匹配这个词"，不带搜子串 —— 调用方选 */
+            cJSON *jsub = cJSON_GetObjectItem(p, "substring");
+            int append_nul = !(jsub && cJSON_IsTrue(jsub));
+            plen = gg_str_to_pattern(vs, utf16, append_nul, pat, sizeof(pat));
+            if (plen <= 0) {
+                send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST,
+                         "bad string (invalid utf-8 or too long)");
+                return;
+            }
+            memset(mask, 0xFF, (size_t)plen);   /* 文本模式无通配 */
+        } else {
+            /* AoB 特征码搜索: value = hex 字符串 "48 65 4C 4C"，支持通配：
+             *   ??  整字节通配
+             *   8?  只比高半字节      ?B  只比低半字节
+             * 社区的 UE4/GNames/GUObjectArray 等签名大量使用半字节通配，
+             * 不支持通配等于一个签名都用不了（2026-10-23 实测卡在这）。 */
+            plen = parse_hex_pattern_masked(vs, pat, mask, sizeof(pat));
+            if (plen <= 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "bad aob pattern"); return; }
+        }
         found = search_aob(&g_eng.drv, g_eng.session_pid, &g_eng.results,
                            pat, mask, (size_t)plen, region);
         if (found < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_INTERNAL, "aob search failed"); return; }
