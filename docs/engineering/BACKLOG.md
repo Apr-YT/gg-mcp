@@ -394,6 +394,11 @@ key 也因此不能随机化。详见 AGENTS 32。
 
 ### 14. 匿名通道的 fd 名
 
+**状态：已完成（2026-11-03，随 anon_ring 批次）**：两个模块统一
+`anon_inode:[eventpoll]`（epoll fd 是 Android 上最常见的内核对象之一，
+且真 eventpoll 的 readlink 也长这样）。原 `dmabuf` 判死理由：真 dma-buf
+的 readlink 是设备路径，名字一扫就露馅。见 RING_REVIEW_20261103.md。
+
 现状：`anon_inode:dmabuf`（已从中性的角度选过）。
 可再进一步：用 `eventpoll` / `sync_file` 之类更常见的内核对象名。
 但区别已经不大（都混在 graphics/io 类 fd 里）。
