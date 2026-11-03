@@ -731,18 +731,46 @@ int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
     results_clear(r);
     results_init(r, keep_cap);
 
-    /* 收集区域直到快照上限 */
+    /* 收集区域直到快照上限。被截掉的部分记进 skipped_*（见 search.h 注释），
+     * 由调用方透传给 UI/AI —— 静默截断 = 模糊搜索漏扫一大片还以为扫完了。
+     * 放不下的大 region 跳过后继续尝试后面的（原实现直接 break，
+     * 按地址序扫到一个巨大 region 就提前收工，哪怕后面还有能塞进的小 region）。 */
     uint64_t total = 0;
     uint64_t n_used = 0;
+    uint64_t skipped_bytes = 0, skipped_from = 0;
     for (size_t k = 0; k < nreg; k++) {
         uint64_t l = regs[k].end - regs[k].start;
         if (total + l > GG_FUZZY_MAX_BYTES) {
-            l = GG_FUZZY_MAX_BYTES - total;
-            if (l < (uint64_t)sz) break;
+            uint64_t take = GG_FUZZY_MAX_BYTES - total;
+            if (take < (uint64_t)sz) {
+                /* 整个 region 放不下：它一个字节都不纳入 */
+                if (!skipped_from) skipped_from = regs[k].start;
+                skipped_bytes += l;
+                continue;
+            }
+            /* region 头部纳入、尾部截掉 */
+            if (!skipped_from) skipped_from = regs[k].start + take;
+            skipped_bytes += l - take;
+            l = take;
         }
         total += l;
         n_used++;
-        if (total >= GG_FUZZY_MAX_BYTES) break;
+        if (total >= GG_FUZZY_MAX_BYTES) {
+            /* 之后的 region 全部跳过 */
+            for (size_t j = k + 1; j < nreg; j++) {
+                if (!skipped_from) skipped_from = regs[j].start;
+                skipped_bytes += regs[j].end - regs[j].start;
+            }
+            break;
+        }
+    }
+    r->fuzzy_skipped_bytes = skipped_bytes;
+    r->fuzzy_skipped_from = skipped_from;
+    if (skipped_bytes) {
+        log_msg("unknown_init: 快照上限 %llu 字节，另有 %llu 字节（起 0x%llx）未纳入模糊搜索",
+                (unsigned long long)GG_FUZZY_MAX_BYTES,
+                (unsigned long long)skipped_bytes,
+                (unsigned long long)skipped_from);
     }
     if (n_used == 0 || total == 0) { free(regs); if (pmfd >= 0) close(pmfd); return -1; }
 

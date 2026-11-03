@@ -67,6 +67,8 @@ static const std::vector<ToolDef>& build() {
              json{"value"}),
         tool("gg_search_unknown_init",
              "模糊搜索初始化：未知初值，建立候选位图+快照（内存上限 256MB）。"
+             "响应含 skipped_bytes/warning 时表示有内存没纳入扫描"
+             "（此时\"搜不到\"可能只是\"没扫\"，想覆盖可以换 region 或用精确搜索）。"
              "注意：目标处于活跃状态（游戏在跑、数值持续变化）时，后续 refine 会把"
              "期间所有变化都算进去，难以收敛；建议在数值稳定的时刻（菜单/暂停/操作间隙）"
              "初始化，再让目标发生一次明确变化后 refine",

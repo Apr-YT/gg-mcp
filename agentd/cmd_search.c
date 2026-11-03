@@ -115,6 +115,21 @@ void h_unknown_init(int fd, uint32_t seq, cJSON *p) {
     if (elems < 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_INTERNAL, "unknown-init failed"); return; }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "elements", (double)elems);
+    /* 快照上限截断报告：>0 时模糊搜索没扫到这部分内存，"搜不到"可能只是
+     * "没扫"——必须让调用方知道边界在哪（P1-10）。 */
+    if (g_eng.results.fuzzy_skipped_bytes > 0) {
+        char from[32];
+        snprintf(from, sizeof(from), "0x%llx",
+                 (unsigned long long)g_eng.results.fuzzy_skipped_from);
+        cJSON_AddNumberToObject(r, "skipped_bytes",
+                                (double)g_eng.results.fuzzy_skipped_bytes);
+        cJSON_AddStringToObject(r, "skipped_from", from);
+        char warn[160];
+        snprintf(warn, sizeof(warn),
+                 "snapshot cap reached: %llu bytes beyond 0x%s not scanned",
+                 (unsigned long long)g_eng.results.fuzzy_skipped_bytes, from);
+        cJSON_AddStringToObject(r, "warning", warn);
+    }
     send_ok(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, r);
     cJSON_Delete(r);
 }

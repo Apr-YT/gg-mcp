@@ -321,11 +321,25 @@ AI 拿到 21481 条候选时，`get_results` 分页看要 214 轮。这一步先
 
 ### 10. 搜索快照内存上限
 
+**状态：已完成（2026-11-03）**：`search_unknown_init` 统计被截掉的部分
+（`fuzzy_skipped_bytes` / `fuzzy_skipped_from`），响应带
+`skipped_bytes` + `skipped_from` + `warning`，schema 描述同步。
+顺带修了收集语义：原实现扫到一个放不下的大 region 就 break，
+现在跳过它继续尝试后面的小 region。
+单测用例 9（300MB region 截断断言）/ 9b（小 region 零误报）。
+
 现状：`GG_FUZZY_MAX_BYTES` 默认 256MB，超过的 region 不纳入扫描（模糊搜索会漏）。
 做法：超限时明确提示"只扫了前 256MB"，并列出被跳过的 region。
 成本：约 20 行。**收益**：避免"搜不到"被误当成"值不存在"。
 
 ### 11. `pointer_scan` 支持区间匹配（指向对象任意成员）
+
+**状态：已实现（`lookback` 参数，2026-11-03 补记 + 补回归单测）**：
+命中条件 `[target-lookback, target+lookback]`（`find_near_target` 二分），
+默认 0 = 精确匹配；上限 0x100000。比本条方案多两件事：单目标 `addr` 模式
+（结果集几千条时 lookback 会被稀释，验证"有没有指针指向它"必须单目标）、
+`aligned` 对齐过滤。回归单测用例 6b：精确匹配对象内字段 0 命中（证明缺口）、
+lookback=0x200 抓到存首址的持有者、差 0x201 边界外不命中。
 
 现状：只做精确相等（`v == target`）。真实 C++ 对象里，持有者存的是**对象首址**，
 而目标字段常在 `+0x14` 这类偏移上 —— 精确匹配必然搜不到。

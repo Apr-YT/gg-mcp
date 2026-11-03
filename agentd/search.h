@@ -63,6 +63,13 @@ typedef struct gg_results {
     fz_region_t *fuzzy_regions;
     size_t    fuzzy_region_count;
 
+    /* 快照上限截断报告（P1-10）：扫描区总大小超过 GG_FUZZY_MAX_BYTES 时，
+     * 超出部分不纳入快照 —— 静默截断会让"模糊搜索搜不到"被误当成
+     * "值不存在"。这两个字段把被丢掉的部分亮出来给调用方看。
+     * 0 = 没有截断（全部纳入）。skipped_from 是第一个未纳入的字节地址。 */
+    uint64_t  fuzzy_skipped_bytes; /* 被丢掉的字节数（含末尾 region 截短部分） */
+    uint64_t  fuzzy_skipped_from;  /* 第一个未纳入的地址（0 = 无截断） */
+
     /* 模糊 refine 的撤销栈：每次 refine 前把位图拷一份。
      *
      * 为什么需要：refine 是**破坏性**的（位图只减不增），搜错一次就只能重新

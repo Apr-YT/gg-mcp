@@ -189,6 +189,41 @@ int main(void) {
         /* lookback=0（精确）、aligned=1：与旧行为一致 */
         size_t nh = pointer_scan(NULL, 0, &target, 1, VT_DWORD, 0, 1, hits, 16);
         check(nh >= 1, "6) pointer_scan: found container holding target");
+        int found_exact = 0;
+        for (size_t i = 0; i < nh; i++)
+            if (hits[i].container == container) found_exact = 1;
+        check(found_exact, "6) pointer_scan: 精确命中 container 地址正确");
+        results_clear(&r);
+
+        /* === 6b) lookback 区间匹配（P1-11 回归）===
+         * 真实 C++ 对象场景：持有者存对象首址，目标字段在对象内部
+         * （+0x14 之类）—— 精确匹配必然 0 命中，lookback 才能抓到。 */
+        mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + TEST_MEM_SZ);
+        {
+            uint64_t obj_base = TEST_MEM_BASE + 0x3000;      /* 对象首址 */
+            uint64_t field    = obj_base + 0x14;             /* 金币字段在对象内 */
+            uint64_t holder   = TEST_MEM_BASE + 0x6000;      /* 持有者存的是对象首址 */
+            mem_write_u32(holder, (uint32_t)(obj_base & 0xFFFFFFFFu));
+            gg_pointer_hit_t hits2[16];
+            /* 精确匹配字段地址：必然 0 命中（持有者存的是首址不是字段地址） */
+            size_t n_exact = pointer_scan(NULL, 0, &field, 1, VT_DWORD, 0, 1, hits2, 16);
+            check(n_exact == 0, "6b) 精确匹配对象内字段: 0 命中（证明缺口存在）");
+            /* lookback=0x200: 命中持有者, target 报告为被匹配的目标本身 */
+            size_t n_lb = pointer_scan(NULL, 0, &field, 1, VT_DWORD, 0x200, 1, hits2, 16);
+            int found_lb = 0;
+            for (size_t i = 0; i < n_lb; i++)
+                if (hits2[i].container == holder) found_lb = 1;
+            check(n_lb >= 1 && found_lb,
+                  "6b) lookback=0x200: 抓到存对象首址的持有者");
+            /* 边界外差 0x201 的持有者不该被算进来（find_near_target 边界） */
+            uint64_t holder2 = TEST_MEM_BASE + 0x7000;
+            mem_write_u32(holder2, (uint32_t)((obj_base - 0x201) & 0xFFFFFFFFu));
+            size_t n_lb2 = pointer_scan(NULL, 0, &field, 1, VT_DWORD, 0x200, 1, hits2, 16);
+            int leaked = 0;
+            for (size_t i = 0; i < n_lb2; i++)
+                if (hits2[i].container == holder2) leaked = 1;
+            check(!leaked, "6b) 差 0x201 超出 lookback: 不命中（边界正确）");
+        }
         results_clear(&r);
 
     /* === 7) 恒逐页语义: 全不可读区逐页前进(无大步), 不漏、不卡死 === */
@@ -272,11 +307,25 @@ int main(void) {
         check(elems == (int64_t)(GG_FUZZY_MAX_BYTES / 4),
               "9) fuzzy 快照截断到 256MB (67M 元素, 300MB region 只取前 256MB)");
         check(r.fuzzy_elem_count == (size_t)(GG_FUZZY_MAX_BYTES / 4), "9) fuzzy_elem_count 正确");
+        /* P1-10: 截断不再是静默的 —— 被丢掉的字节数和起点都要报出来 */
+        check(r.fuzzy_skipped_bytes == (300ull << 20) - GG_FUZZY_MAX_BYTES,
+              "9) skipped_bytes = 300MB-256MB = 44MB");
+        check(r.fuzzy_skipped_from == TEST_MEM_BASE + GG_FUZZY_MAX_BYTES,
+              "9) skipped_from = 截断点地址");
         /* 截断后 refine 不崩、不误报 */
         int64_t kept = search_refine(NULL, 0, &r, REFINE_UNCHANGED);
         check(kept >= 0, "9) refine 截断快照不崩");
         results_clear(&r);
     }
+    {
+        /* P1-10: 未超限时 skipped 报告必须为零（不能误报） */
+        mem_reset(); g_nregions = 0;
+        region_add(TEST_MEM_BASE, TEST_MEM_BASE + 0x10000);
+        results_init(&r, 0);
+        int64_t elems = search_unknown_init(NULL, 0, &r, VT_DWORD, 0);
+        check(elems > 0 && r.fuzzy_skipped_bytes == 0 && r.fuzzy_skipped_from == 0,
+              "9b) 小 region: 无截断报告");
+        results_clear(&r);
     }
 
     /* === 10) 区间搜索: exact_vt 生效 + refine 首轮建基线（2026-11-03 P0-5 回归）
@@ -319,6 +368,7 @@ int main(void) {
         check(n == 1, "10b) exact: 首次 refine 直接比较 (不走建基线轮)");
         results_clear(&r);
     }
+    }   /* 用例 6 的块（这个块一直开到 main 尾部，中间用例都在里面） */
 
     printf(fails ? "\n== FAILED: %d ==\n" : "\n== ALL PASS ==\n", fails);
     return fails ? 1 : 0;
