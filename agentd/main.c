@@ -69,6 +69,11 @@ int g_hwbp_probe = -1;
  * （AGENTS 第 25 条就是这么误判成模块命令码不一致的）。 */
 int g_hwbp_probe_rc = -1;
 
+/* --ring：内存模块命令改走共享内存控制环（驱动 CONFIG_ANON_RING）。
+ * 默认关 —— 现有 ioctl 路径已验证，环只在真机验证过之后才谈得上默认。
+ * 环建不起来时自动回落 ioctl，功能不受影响（见 driver.c rwproc_ring_setup）。 */
+int g_ring_enabled = 0;
+
 /* ---------------- 握手鉴权 + 并发闸门 ---------------- */
 
 
@@ -478,6 +483,7 @@ static void print_usage(const char *argv0) {
         "           [--wire-key <hex>]            # wire 握手密钥（PC 端须配置同一值）\n"
         "           [--wire-key-file <path>]      # 从文件读握手密钥（推荐：0600 权限，仅 root 可读）\n"
         "           [--hwbp]                      # 启用硬件断点（当前 KO 的模块会崩内核，勿开）\n"
+        "           [--ring]                      # 内存命令走 mmap 控制环（去掉数据面 ioctl；未真机验证）\n"
         "           [--log /path/log] [--safe] [--shell]\n",
         argv0);
 }
@@ -553,6 +559,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--safe") == 0) g_eng.safe_mode = 1;
         else if (strcmp(argv[i], "--shell") == 0) g_eng.shell_enabled = 1;
         else if (strcmp(argv[i], "--hwbp") == 0) g_hwbp_allowed = 1;
+        else if (strcmp(argv[i], "--ring") == 0) g_ring_enabled = 1;
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;

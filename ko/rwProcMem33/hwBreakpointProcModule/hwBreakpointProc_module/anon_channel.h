@@ -234,9 +234,13 @@ static int anon_channel_install_fd(void)
 	 * /proc/<pid>/fd/N -> anon_inode:rwproc，看起来像内核对象。
 	 */
 	/* 名字会显示成 /proc/<pid>/fd/N -> anon_inode:<name>。
-	 * 用 "dmabuf" 而不是 "rwproc"：后者等于在 fd 表里直接写着"内存读写通道"。
-	 * dmabuf 是 Android 上极常见的内核对象，混在 graphics 相关 fd 里不显眼。 */
-	file = anon_inode_getfile("dmabuf", &anon_channel_fops, NULL, O_RDWR);
+	 * "[eventpoll]"：内核里 epoll 的匿名 inode 名就是这个，readlink 出来
+	 * 与真实 epoll fd 逐字符一致（方括号是内核命名习惯，别去掉）。
+	 * 之前用 "dmabuf" 是站不住的伪装——真正的 dma-buf fd 来自
+	 * /dev/dma_heap 或 /dev/kgsl，readlink 是设备路径，永远不会是
+	 * anon_inode:dmabuf，名字比对一扫就露馅（详见内存模块 anon_channel.h
+	 * 2026-10-24 的修正说明）。★只骗过名字比对，行为探测仍会暴露。 */
+	file = anon_inode_getfile("[eventpoll]", &anon_channel_fops, NULL, O_RDWR);
 	if (IS_ERR(file)) {
 		put_unused_fd(fd);
 		printk_debug(KERN_INFO "[rwanon] failed to create anon inode file\n");

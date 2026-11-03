@@ -84,10 +84,18 @@ struct anon_ioctl_request {
 };
 #pragma pack(pop)
 
+/* 分发函数签名。定义在这里、而非文件下方的 typedef，
+ * 是因为 anon_ring.h 要用它声明自己的 dispatcher 槽位 ——
+ * 引入顺序：先布局/签名，再 ring，最后本文件的实现。 */
+typedef long (*anon_dispatch_fn)(struct anon_ioctl_request *req, char __user *buf);
+
+#include "anon_ring.h"
+
 /* 匿名通道会话上下文（按需裁剪，不做 AFEI 的 0xCC0 全量拷贝）*/
 struct anon_channel_ctx {
 	u32 magic;              /* 用于私有数据校验，防止 fd 混用 */
 	void *priv;             /* 对应 AFEI 的 4 字节小对象 */
+	struct ring_owner *ring;/* mmap 出来的共享控制环；未 mmap 时为 NULL */
 };
 
 #define ANON_CHANNEL_MAGIC 0x41464549u   /* "AFEI" */
@@ -107,6 +115,7 @@ static int anon_channel_open(struct inode *inode, struct file *filp)
 		return -ENOMEM;
 
 	ctx->magic = ANON_CHANNEL_MAGIC;
+	ctx->ring  = NULL;   /* x_kmalloc 不清零，这里必须显式置空 */
 	ctx->priv  = x_kmalloc(4, GFP_KERNEL);
 	if (!ctx->priv) {
 		kfree(ctx);
@@ -128,6 +137,9 @@ static int anon_channel_release(struct inode *inode, struct file *filp)
 	(void)inode;
 
 	if (ctx) {
+		/* 先停控制环线程（幂等）。ring 内存不在这里释放 —— vma 仍映射着，
+		 * 由 vm_close 负责 vfree，详见 anon_ring.h 的生存期说明。 */
+		ring_owner_detach(&ctx->ring);
 		if (ctx->priv)
 			kfree(ctx->priv);
 		kfree(ctx);
@@ -145,13 +157,12 @@ static int anon_channel_release(struct inode *inode, struct file *filp)
  *   保证 /proc 通道与匿名通道走同一套命令实现，不重复代码。
  *   由 anon_channel_set_dispatcher() 在 init 时注入。
  * ------------------------------------------------------------------------*/
-typedef long (*anon_dispatch_fn)(struct anon_ioctl_request *req, char __user *buf);
-
 static anon_dispatch_fn g_anon_dispatcher;
 
 static void anon_channel_set_dispatcher(anon_dispatch_fn fn)
 {
 	g_anon_dispatcher = fn;
+	anon_ring_set_dispatcher(fn);   /* 控制环走同一条分发，避免两套命令表 */
 }
 
 static long anon_channel_ioctl(struct file *filp, unsigned int cmd,
@@ -186,11 +197,38 @@ static long anon_channel_ioctl(struct file *filp, unsigned int cmd,
 	return g_anon_dispatcher(&req, ubuf + sizeof(req));
 }
 
+/* --------------------------------------------------------------------------
+ * mmap：把共享控制环映射给用户态（数据面，见 anon_ring.h）
+ *
+ * 为什么值得用：映射之后请求头/payload/结果全部是普通内存读写，
+ * ioctl 从数据路径上消失。但真实收益是"少一条 syscall 审计记录"，
+ * 不是提速 —— 现有 ioctl 路径本来就不做 payload 中转拷贝。
+ *
+ * ★ 一个 fd 只允许一个环。允许重复 mmap 会出现两个 owner 抢 ctx->ring
+ *   同一个槽位，且第二个环的请求没有线程处理（表现为永久超时）。
+ *   要换环就 munmap 后重来，或换 fd。
+ * ★ 映射后必须保持 fd 打开，环线程挂在 ctx 上。close(fd) 之后共享页
+ *   仍可读写，但不再有人处理请求。
+ * ------------------------------------------------------------------------*/
+static int anon_channel_mmap(struct file *filp, struct vm_area_struct *vma)
+{
+	struct anon_channel_ctx *ctx = filp->private_data;
+
+	if (!ctx || ctx->magic != ANON_CHANNEL_MAGIC)
+		return -EINVAL;
+
+	if (ctx->ring)
+		return -EBUSY;
+
+	return ring_owner_attach(&ctx->ring, vma);
+}
+
 /* 对应 AFEI same_anon_fops @.rodata+0xfc0 */
 static const struct file_operations anon_channel_fops = {
 	.owner          = THIS_MODULE,
 	.open           = anon_channel_open,
 	.release        = anon_channel_release,
+	.mmap           = anon_channel_mmap,
 	.unlocked_ioctl = anon_channel_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl   = anon_channel_ioctl,
@@ -230,9 +268,20 @@ static int anon_channel_install_fd(void)
 	 * /proc/<pid>/fd/N -> anon_inode:rwproc，看起来像内核对象。
 	 */
 	/* 名字会显示成 /proc/<pid>/fd/N -> anon_inode:<name>。
-	 * 用 "dmabuf" 而不是 "rwproc"：后者等于在 fd 表里直接写着"内存读写通道"。
-	 * dmabuf 是 Android 上极常见的内核对象，混在 graphics 相关 fd 里不显眼。 */
-	file = anon_inode_getfile("dmabuf", &anon_channel_fops, NULL, O_RDWR);
+	 *
+	 * 【2026-10-24 修正】原用 "dmabuf"，是个站不住的伪装：
+	 *   真正的 dma-buf fd 来自 open("/dev/dma_heap/<heap>") 或 /dev/kgsl-3d0，
+	 *   readlink 出来是那个设备路径，**永远不会**是 "anon_inode:dmabuf"。
+	 *   也就是说这个字符串本身不在合法 fd 形态集合里 —— 任何做
+	 *   「anon_inode: 前缀 → 与内核已知匿名对象名比对」的扫描器一行就能挑出来。
+	 *
+	 * 现在改成 "[eventpoll]"：内核里 eventpoll 的匿名 inode 名就是这个，
+	 * readlink 结果为 "anon_inode:[eventpoll]"，与真实 epoll fd 逐字符一致。
+	 * 方括号是内核真实命名习惯（[eventfd]/[timerfd]/[eventpoll]），别去掉。
+	 *
+	 * ★上限提醒：本项只骗过"名字比对"。若检测方对该 fd 做行为探测
+	 *   （例如发 EPOLL_CTL 期望特定返回值），仍会暴露 —— 提高门槛，不是隐身。 */
+	file = anon_inode_getfile("[eventpoll]", &anon_channel_fops, NULL, O_RDWR);
 	if (IS_ERR(file)) {
 		put_unused_fd(fd);
 		printk_debug(KERN_INFO "[rwanon] failed to create anon inode file\n");

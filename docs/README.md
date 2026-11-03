@@ -27,6 +27,7 @@
 | [TOOLCHAIN.md](engineering/TOOLCHAIN.md) | 本机工具链实况（NDK r30 / capstone 5.0.1 / MinGW），跨平台构建 agentd 的可复制步骤。 |
 | [BACKLOG.md](engineering/BACKLOG.md) | 待办清单，按 P0/P1/P2 分级，每条带证据；末尾附"明确不做"及理由。动手优化前先看。 |
 | [SOURCE_REVIEW_20261023.md](engineering/SOURCE_REVIEW_20261023.md) | **源码全量梳理 + 修复记录**：锁矩阵、风险清单（P0–P2）、§九 逐条处置（已修/仅缓解/有意不改）。想知道"为什么这么改"看这份。 |
+| [RING_REVIEW_20261103.md](engineering/RING_REVIEW_20261103.md) | **anon_ring 控制环审查**：上真机前的对抗性审查（R-1 超时复用环 P0 已修、生存期注释纠偏、fd 伪装名统一）、真机验收 5 步清单。动环/验环先看这份。 |
 | [DOC_AUDIT_20261023.md](engineering/DOC_AUDIT_20261023.md) | **文档梳理记录**：分层与归档规则、查出的漂移、数字基线取法、维护约定。加文档或改代码后先看 §6。 |
 
 ## 参考资料（`reference/`）

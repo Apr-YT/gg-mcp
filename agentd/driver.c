@@ -35,10 +35,12 @@ void log_msg(const char *fmt, ...);
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #if defined(__linux__) || defined(__ANDROID__)
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/sysmacros.h>
 #include <sys/uio.h>
 #endif
@@ -97,6 +99,169 @@ static uint8_t rwproc_buf[RWPROC_HDR_SZ + RWPROC_MAX_IO];
  * 删掉这把锁不是性能优化，是数据破坏。 */
 static pthread_mutex_t rwproc_mtx = PTHREAD_MUTEX_INITIALIZER;
 
+/* ---------- 共享内存控制环（驱动 anon_ring.h 的对端） ----------
+ * 协议与 ko/rwProcMem33/rwProcMem33Module/rwProcMem_module/anon_ring.h
+ * 逐字节一致，改一边必须同步另一边 —— 不同步的表现是 mmap 成功但 magic
+ * 校验不过，自动回落 ioctl，功能不坏、环白开。
+ *
+ * 它解决的是**足迹**，不是速度：现有 ioctl 路径本来就只 copy_from_user
+ * 33 字节头，payload 一直是在用户缓冲上直接读写。上环之后请求与结果
+ * 完全走内存，数据面上不再产生 ioctl 系统调用。 */
+#define GG_RING_MAGIC    0x31474E52u   /* "RNG1" */
+#define GG_RING_VERSION  1u
+#define GG_RING_SLOT_OFF 4096u         /* 头独占第一页，必须与驱动 RING_SLOT_OFF 一致 */
+#define GG_RING_ST_STOPPED 2u          /* 驱动侧线程已停（存活期协议，见 anon_ring.h） */
+
+/* 忙等上限（迭代次数）。ARM64 单次 yield ~10ns，2 万次约 200us，
+ * 覆盖一次物理内存读（实测 69us/页）还有余量。超过就转 nanosleep：
+ * 搜索这类秒级命令不该把 CPU 烧在自旋上。 */
+#define GG_RING_SPIN_MAX   20000u
+#define GG_RING_TIMEOUT_MS 10000
+
+typedef struct __attribute__((aligned(8))) gg_ring_hdr {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t slot_off;
+    uint32_t ring_size;
+    uint64_t req_seq;      /* 我方写（release） */
+    uint64_t done_seq;     /* 驱动写（release） */
+    int64_t  result;
+    int32_t  err;          /* 驱动侧写的正 errno */
+    uint32_t state;
+    uint8_t  pad[16];
+} gg_ring_hdr_t;
+
+_Static_assert(sizeof(gg_ring_hdr_t) == 64, "ring header must be 64 bytes");
+
+static void rwproc_ring_setup(gg_driver_t *d);
+static void rwproc_ring_destroy(gg_driver_t *d);
+
+/* 提交一笔环请求并等结果。返回：>=0 = 驱动回写的字节数；-1 = 驱动报 errno；
+ * -2 = 环已不可信（超时/驱动线程已停）——调用方必须拆环回落 ioctl，
+ * 不能复用：见 call_ex 里 -2 分支的说明。 */
+static ssize_t rwproc_ring_submit(gg_driver_t *d, char cmd,
+                                  uint64_t p1, uint64_t p2, uint64_t p3,
+                                  const void *data, size_t data_size) {
+    gg_ring_hdr_t *h = (gg_ring_hdr_t *)d->rwproc_ring;
+    /* 用常量而不是 h->slot_off：共享页里的字段不可信，setup 校验过一次就够了 */
+    uint8_t *slot = (uint8_t *)h + GG_RING_SLOT_OFF;
+    rwproc_request_t req;
+    uint64_t seq;
+    unsigned spins = 0;
+    struct timespec t0, now;
+
+    /* 序列号以 done+1 为基准，不用本地自增：上一轮可能已超时被放弃，
+     * 只有驱动实际完成的进度才是可靠基准，否则两边会永久错位。 */
+    seq = __atomic_load_n(&h->done_seq, __ATOMIC_ACQUIRE) + 1;
+
+    memset(&req, 0, sizeof(req));
+    req.cmd = cmd;
+    req.param1 = p1;
+    req.param2 = p2;
+    req.param3 = p3;
+    req.buf_size = data_size;
+    memcpy(slot, &req, sizeof(req));
+    if (data && data_size) memcpy(slot + RWPROC_HDR_SZ, data, data_size);
+
+    __atomic_store_n(&h->req_seq, seq, __ATOMIC_RELEASE);
+
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        if (__atomic_load_n(&h->done_seq, __ATOMIC_ACQUIRE) == seq) break;
+        if (spins < GG_RING_SPIN_MAX) {
+            spins++;
+#if defined(__aarch64__)
+            __asm__ __volatile__("yield" ::: "memory");
+#else
+            __asm__ __volatile__("" ::: "memory");
+#endif
+            continue;
+        }
+        /* 退避阶段才取时间：忙等路径上每轮读时钟会把 vDSO 开销叠进延迟 */
+        {
+            struct timespec ts;
+            ts.tv_sec = 0;
+            ts.tv_nsec = 20 * 1000 * 1000;
+            nanosleep(&ts, NULL);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if ((now.tv_sec - t0.tv_sec) * 1000 +
+            (now.tv_nsec - t0.tv_nsec) / 1000000 >= GG_RING_TIMEOUT_MS) {
+            snprintf(d->last_error, sizeof(d->last_error),
+                     "ring(cmd=%d) timeout after %d ms — 驱动侧线程已停？"
+                     "（fd 是否在 munmap 之前就 close 了）",
+                     (int)cmd, GG_RING_TIMEOUT_MS);
+            return -2;
+        }
+        /* 线程已停（vm_close 已跑）：共享页没人处理，等下去只会白等 10s。
+         * 与超时同路径处理（-2 = 环已不可信，调用方拆环回落）。 */
+        if (__atomic_load_n(&h->state, __ATOMIC_RELAXED) == GG_RING_ST_STOPPED) {
+            snprintf(d->last_error, sizeof(d->last_error),
+                     "ring(cmd=%d) driver thread stopped — 环已失效", (int)cmd);
+            return -2;
+        }
+    }
+
+    if (h->err) {
+        errno = h->err;
+        snprintf(d->last_error, sizeof(d->last_error),
+                 "ring(cmd=%d) failed: %s", (int)cmd, strerror(h->err));
+        return -1;
+    }
+    return (ssize_t)h->result;
+}
+
+/* 在匿名 fd 上建环。任何一步失败都只记日志并保持 ioctl 路径 ——
+ * 环是可选的数据面，通道可用性不该依赖它。 */
+static void rwproc_ring_setup(gg_driver_t *d) {
+    size_t size;
+    void *p;
+    gg_ring_hdr_t *h;
+
+    if (!g_ring_enabled || d->rwproc_anon_fd < 0) return;
+
+    /* attach 重入（重连）时环形同旧 fd，旧环的线程已经不在服务新 fd，
+     * 直接舍弃重建；不这么做会泄漏一块映射并让旧 fd 的环继续占着槽位。 */
+    if (d->rwproc_ring) rwproc_ring_destroy(d);
+
+    /* payload 区按单次读写上限开；更大的命令（maps 全量列表）回落 ioctl */
+    size = GG_RING_SLOT_OFF + RWPROC_HDR_SZ + RWPROC_MAX_IO;
+    size = (size + 4095u) & ~(size_t)4095u;
+
+    p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, d->rwproc_anon_fd, 0);
+    if (p == MAP_FAILED) {
+        log_msg("ring: mmap failed: %s (fallback to ioctl)", strerror(errno));
+        return;
+    }
+
+    h = (gg_ring_hdr_t *)p;
+    if (h->magic != GG_RING_MAGIC || h->version != GG_RING_VERSION ||
+        h->slot_off != GG_RING_SLOT_OFF) {
+        /* 最常见原因：驱动没编 CONFIG_ANON_RING（没有 .mmap，拿到的是全零页），
+         * 或两边协议版本不同步。 */
+        log_msg("ring: header mismatch (magic=%08x ver=%u slot=%u) — "
+                "驱动是否没编 CONFIG_ANON_RING？fallback to ioctl",
+                h->magic, h->version, h->slot_off);
+        munmap(p, size);
+        return;
+    }
+
+    d->rwproc_ring = p;
+    d->rwproc_ring_size = size;
+    log_msg("ring ready: %zu bytes (payload %zu) — ioctl 已从数据面移除",
+            size, size - GG_RING_SLOT_OFF - RWPROC_HDR_SZ);
+}
+
+/* 先 munmap 再 close(fd)。驱动侧 munmap 走 vm_close 释放共享页、close 走
+ * release 停 kthread，两条路径都幂等，顺序不影响安全；反过来先 close 会让
+ * 环线程先停，munmap 时只是释放一块没人处理的页。 */
+static void rwproc_ring_destroy(gg_driver_t *d) {
+    if (!d->rwproc_ring) return;
+    munmap(d->rwproc_ring, d->rwproc_ring_size);
+    d->rwproc_ring = NULL;
+    d->rwproc_ring_size = 0;
+}
+
 /* 通用调用: 往节点 fd 发一个请求。data 为 buf+33 处数据（可 NULL）。
  * 成功返回 read() 结果（>=0）；失败返回 -1 并置 last_error。
  *
@@ -140,28 +305,63 @@ static ssize_t rwproc_call_ex(gg_driver_t *d, int fd, char cmd,
     size_t rd = RWPROC_HDR_SZ + (resp_cap > data_size ? resp_cap : data_size);
     ssize_t r;
     pthread_mutex_lock(&rwproc_mtx);
-    rwproc_request_t *req = (rwproc_request_t *)rwproc_buf;
-    /* 清到 rd：残留数据会被误当成内核回写的结果 */
-    memset(rwproc_buf, 0, rd);
-    req->cmd = cmd;
-    req->param1 = p1;
-    req->param2 = p2;
-    req->param3 = p3;
-    req->buf_size = data_size;
-    if (data && data_size) memcpy(rwproc_buf + RWPROC_HDR_SZ, data, data_size);
+
+    /* 结果数据源：环路径在共享页的 payload 区，其余在 rwproc_buf+33。
+     * 环只服务内存模块，装不下的请求自动回落 —— payload 区按 RWPROC_MAX_IO 开。
+     *
+     * ★必须用 `anon_fd == d->rwproc_anon_fd` 判断归属，不能用 use_anon：
+     *   use_anon 对断点模块同样为真，那样 bp 的命令会发到内存模块的环上，
+     *   而两套命令码语义完全不同（RWBP_OPEN_PROCESS=1 vs RWPROC_INIT_DEVICE_INFO=1）
+     *   —— 等于让内核拿 bp 命令去跑初始化。同一个 fd 归属坑在下面 anon_fd
+     *   的注释里已经记过一次（GET_NUM_BRPS 拿到 -14），别重演。 */
+    const uint8_t *res_src = rwproc_buf + RWPROC_HDR_SZ;
+    /* 尺寸不用再判：data_size 在函数入口已挡掉 >RWPROC_MAX_IO，resp_cap 上面
+     * 已 clamp 到同一个上限，而环的 payload 区正是按 RWPROC_MAX_IO 开的。 */
+    int use_ring = (anon_fd >= 0 && anon_fd == d->rwproc_anon_fd && d->rwproc_ring);
+
     errno = 0;
-    if (use_anon) {
-        /* 匿名 inode 通道：驱动侧 anon_channel_ioctl 要求 cmd >= sizeof(请求头)
-         * （用作布局校验），arg 指向同一块 [33B 头][payload]，语义与 proc 的
-         * read() 完全一致 —— 所以这里只是换了系统调用，报文布局不动。 */
-        r = ioctl(anon_fd, (unsigned long)RWPROC_HDR_SZ, rwproc_buf);
+    if (use_ring) {
+        /* 请求与结果都在共享页上，rwproc_buf 完全不参与 —— 也就没有那
+         * 256KB 的 memset。 */
+        r = rwproc_ring_submit(d, cmd, p1, p2, p3, data, data_size);
+        if (r == -2) {
+            /* 环已不可信：内核线程可能还在处理超时的那笔请求，此时复用环
+             * 会在同一个 seq 上拿到**旧命令的结果**（协议第 6 条，anon_ring.h）。
+             * munmap 走驱动 vm_close → kthread_stop，会阻塞到旧请求做完
+             * （有界，与 ioctl 阻塞等命令完成同一量级），之后本进程内所有
+             * 命令回落 ioctl，直到下次重连（rwproc_try_anon → ring_setup）。 */
+            rwproc_ring_destroy(d);
+            log_msg("ring: stalled (%s) — 已拆除, 数据面回落 ioctl",
+                    d->last_error);
+        }
+        if (r >= 0)
+            res_src = (const uint8_t *)d->rwproc_ring + GG_RING_SLOT_OFF + RWPROC_HDR_SZ;
     } else {
-        r = read(fd, rwproc_buf, rd);
+        rwproc_request_t *req = (rwproc_request_t *)rwproc_buf;
+        /* 清到 rd：残留数据会被误当成内核回写的结果 */
+        memset(rwproc_buf, 0, rd);
+        req->cmd = cmd;
+        req->param1 = p1;
+        req->param2 = p2;
+        req->param3 = p3;
+        req->buf_size = data_size;
+        if (data && data_size) memcpy(rwproc_buf + RWPROC_HDR_SZ, data, data_size);
+        if (use_anon) {
+            /* 匿名 inode 通道：驱动侧 anon_channel_ioctl 要求 cmd >= sizeof(请求头)
+             * （用作布局校验），arg 指向同一块 [33B 头][payload]，语义与 proc 的
+             * read() 完全一致 —— 所以这里只是换了系统调用，报文布局不动。 */
+            r = ioctl(anon_fd, (unsigned long)RWPROC_HDR_SZ, rwproc_buf);
+        } else {
+            r = read(fd, rwproc_buf, rd);
+        }
     }
     if (r < 0) {
-        snprintf(d->last_error, sizeof(d->last_error),
-                 "rwproc %s(cmd=%d) failed: %s", use_anon ? "ioctl" : "read",
-                 (int)cmd, strerror(errno));
+        /* ring 的失败原因由 submit 写（超时/errno 文案更具体），别被通用文案盖掉 */
+        if (!use_ring) {
+            snprintf(d->last_error, sizeof(d->last_error),
+                     "rwproc %s(cmd=%d) failed: %s", use_anon ? "ioctl" : "read",
+                     (int)cmd, strerror(errno));
+        }
         pthread_mutex_unlock(&rwproc_mtx);
         return -1;
     }
@@ -185,7 +385,7 @@ static ssize_t rwproc_call_ex(gg_driver_t *d, int fd, char cmd,
             pthread_mutex_unlock(&rwproc_mtx);
             return -1;
         }
-        if (n) memcpy(out, rwproc_buf + RWPROC_HDR_SZ, n);
+        if (n) memcpy(out, res_src, n);
     }
     pthread_mutex_unlock(&rwproc_mtx);
     return r;
@@ -406,6 +606,8 @@ static void rwproc_try_anon(gg_driver_t *d) {
         if (b >= 0) { d->rwproc_bp_anon_fd = b; d->rwproc_bp_fd = b; }
     }
     log_msg("anon fd map: mem=%d bp=%d (已用 ioctl 通道)", d->rwproc_mem_fd, d->rwproc_bp_fd);
+    /* 环建在内存模块的匿名 fd 上。建不起来只记日志，命令继续走 ioctl。 */
+    rwproc_ring_setup(d);
 }
 
 int rwproc_open_process(gg_driver_t *d, pid_t pid, uint64_t *handle) {
@@ -767,6 +969,9 @@ void driver_close(gg_driver_t *d) {
                         d->rwproc_handle, 0, 0, NULL, 0);
             d->rwproc_handle = 0;
         }
+        /* 先拆环再关 fd：munmap 走驱动 vm_close 释放共享页，close 走 release
+         * 停 kthread，两条路径都幂等。 */
+        rwproc_ring_destroy(d);
         /* 拿到匿名通道后 rwproc_mem_fd 就是 anon fd，关一次就够 */
         if (d->rwproc_mem_fd >= 0) { close(d->rwproc_mem_fd); d->rwproc_mem_fd = -1; }
         d->rwproc_anon_fd = -1;

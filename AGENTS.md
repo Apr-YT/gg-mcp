@@ -792,6 +792,19 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    按缩略图估坐标换算回去偏几十像素（`ghost_tap` 全打空）。
    用 `scripts/find_button.py`（纯标准库找色块）或 `scripts/crop_png.py` 裁剪后定位。
 
+43. **共享内存控制环（anon_ring）：审查已过，真机未验（2026-11-03）**。
+   工作区那批未提交改动 = 内核 `anon_ring.h`（mmap 数据面，去 ioctl 足迹）
+   + agentd `--ring` 对端 + 两模块 fd 改名 `[eventpoll]`。对抗性审查结论、
+   修复与真机验收清单见 **`docs/engineering/RING_REVIEW_20261103.md`**，要点：
+
+   - **已修的 P0**：环超时后不得复用（同一 seq 会让新命令静默拿到旧命令的
+     结果）—— submit 超时/STOPPED 返回 -2，call_ex 拆环回落 ioctl，重连才重建。
+   - **改环/动这段前先读那份报告的"遗留观察"**：R-4（handler 定长回写无视
+     buf_size）是有意不修，理由在报告里。
+   - 真机验收 5 步在第 5 步要**同步改 `check_stealth.sh` 第 8 项判据**
+     （fd 名 dmabuf → [eventpoll]）。当前设备上的 .ko 没有 .mmap，`--ring`
+     会自动回落 ioctl——这条本身就是一条回归验证路径，别当成故障排查。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
@@ -812,6 +825,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-10-23 19:55（HEAD `8bddaf5`）：项目结构补 `ko/` 与 `build/` 说明、
+本文件最后校准：2026-11-03（anon_ring 审查，见第 43 条与 RING_REVIEW_20261103.md）。
+上一条校准：2026-10-23 19:55（HEAD `8bddaf5`）：项目结构补 `ko/` 与 `build/` 说明、
 结构护栏补到 6 道、main.c 拆分收尾（683 行）、清掉已删除的 GG 核心注入链路表述、
 itest 状态更新、第 14/16 条矛盾合并。同日新增 42。

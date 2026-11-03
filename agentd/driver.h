@@ -127,6 +127,14 @@ typedef struct gg_driver {
     char   rwproc_mem_key[96];/* 内存模块 auth key（节点名, 空=自动扫描） */
     char   rwproc_bp_key[96]; /* 断点模块 auth key */
 
+    /* 共享内存控制环（驱动 anon_ring.h 的对端）。
+     * 非 NULL 时内存模块的命令改走环：请求/payload/结果都是纯内存读写，
+     * 数据面上不再产生 ioctl 系统调用。环容量装不下的请求自动回落到 ioctl。
+     * ★环是单槽且无并发保护，所有提交都在 rwproc_mtx 内串行 —— 与 rwproc_buf
+     *   同一理由（见 driver.c 里那把锁的说明）。 */
+    void  *rwproc_ring;
+    size_t rwproc_ring_size;
+
     /* X3: 统计计数原子化——KERNEL_STATUS 走快速通道（无锁）在搜索期间读取，
      * 与搜索线程的原子累加并发；_Atomic 消除数据竞争（ARM64 上零额外开销）。
      * 注意这里没有 fallbacks 计数：用户态降级通道（hook/dev/qx）已删除，
@@ -135,6 +143,8 @@ typedef struct gg_driver {
     _Atomic uint64_t stat_writes;
     char  last_error[256];   /* X3: 快速通道读取容忍撕裂（仅内容短暂不完整, JSON 仍合法） */
 } gg_driver_t;
+
+extern int g_ring_enabled;
 
 /* 初始化 rwproc33 后端。mem_key/bp_key 为两模块的 proc 节点 auth key
  * （可 NULL/空 → 自动扫描 /proc 找 <key>/<key> 节点，但节点被隐藏时扫描不到）。 */

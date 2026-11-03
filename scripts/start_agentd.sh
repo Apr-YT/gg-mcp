@@ -28,6 +28,13 @@ KO_TYPE=rwproc
 RWPROC_MEM_KEY=e84523d7b60d5d341a7c4d1861773ecd
 RWPROC_BP_KEY=dce3771681d4c7a143d5d06b7d32548e
 
+# 共享内存控制环（--ring）：内存模块命令改走 mmap 换来的环，数据面上不再有
+# ioctl。需要驱动是编了 CONFIG_ANON_RING 的版本，否则 mmap 拿不到 magic，
+# agentd 会自己回落 ioctl（日志 "ring: header mismatch"）。
+# ★当前默认关：驱动侧与客户端都只过了交叉编译，未上真机。
+#   真机验证通过后再把这里改成 1。
+RING=0
+
 # wire 握手密钥文件（0600, 仅 root 可读）。存在即启用鉴权：
 # 设备上普通 App 即使能连 127.0.0.1:$PORT，没有密钥也无法调用任何 root 级命令。
 # 首次启动自动生成；PC 端需配置同一值（deploy.ps1 会自动拉取并写入 configs）。
@@ -67,6 +74,7 @@ case "$1" in
     # 所以绝不能再传 --dev / --qx-key 这类已删除的历史参数。
     [ -n "$RWPROC_MEM_KEY" ] && ARGS="$ARGS --rwproc-key $RWPROC_MEM_KEY"
     [ -n "$RWPROC_BP_KEY" ] && ARGS="$ARGS --rwproc-bp-key $RWPROC_BP_KEY"
+    [ "$RING" = "1" ] && ARGS="$ARGS --ring"
     setsid nohup "$BIN" $ARGS --log "$LOG" >/dev/null 2>&1 < /dev/null &
     echo $! > "$PIDFILE"
     # 轮询就绪(最多 5s, 每 0.5s), 避免 KO 加载慢时过早判失败

@@ -55,6 +55,13 @@
  *      （HIGHMEM 等），把下面这行注释掉即可回到慢路径，接口完全一致。 */
 #define CONFIG_ENABLE_FAST_PHYMEM
 
+/* ④ 匿名通道共享内存控制环（anon_ring.h，mmap 数据面）
+ *    目的不是提速（现有 ioctl 路径已无 payload 中转拷贝），而是让 ioctl
+ *    从数据路径上消失，减少 syscall 审计足迹。代价是一个常驻内核线程做轮询。
+ *    ★依赖 CONFIG_USE_ANON_CHANNEL；不 mmap 就完全不生效，对现有行为零影响。
+ *    ★状态：2026-10-24 新增，交叉编译通过，**未上真机验证**。 */
+#define CONFIG_ANON_RING
+
 /* 打印内核调试信息 */
 //#define CONFIG_DEBUG_PRINTK
 

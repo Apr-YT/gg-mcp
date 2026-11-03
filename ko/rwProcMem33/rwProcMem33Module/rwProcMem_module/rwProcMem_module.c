@@ -25,7 +25,18 @@ struct arg_info {
 
 static ssize_t OnCmdInitDeviceInfo(struct ioctl_request *hdr, char __user* buf) {
 	long err = 0;
-	struct init_device_info* pinit_device_info = (struct init_device_info*)x_kmalloc(sizeof(struct init_device_info), GFP_KERNEL);
+	struct init_device_info* pinit_device_info;
+
+	/* 【控制环防护·不可删】控制环（anon_ring.h）由 kthread 处理请求。
+	 * 本函数下面要跑的 init_*_offset() 全都用 x_get_current() 做基准推结构体
+	 * 偏移；kthread 的 current->mm 为 NULL，探测会算出错误偏移并静默缓存下来
+	 * —— 之后所有读写都按错位解释内存，症状是"偶发读到垃圾"，极难回溯。
+	 * 该命令只能在真实进程上下文执行（proc 通道 / 匿名 fd 的 ioctl）。 */
+	if (current->flags & PF_KTHREAD) {
+		return -EPERM;
+	}
+
+	pinit_device_info = (struct init_device_info*)x_kmalloc(sizeof(struct init_device_info), GFP_KERNEL);
 	if (!pinit_device_info) {
 		return -ENOMEM;
 	}
@@ -404,6 +415,14 @@ static ssize_t OnCmdAnonGetFd(struct ioctl_request *hdr, char __user* buf) {
 
 	(void)hdr;
 	printk_debug(KERN_INFO "CMD_ANON_GET_FD\n");
+
+	/* 【控制环防护·不可删】fd_install() 装的是"发起本系统调用的进程"的 fd 表。
+	 * 控制环由 kthread 处理，在 kthread 里进来就是往一个没有 mm 的内核线程
+	 * fd 表里装 fd —— 用户态永远拿不到，且匿名 inode 的 file 会跟着泄漏。
+	 * 本命令只在真实进程上下文有意义。 */
+	if (current->flags & PF_KTHREAD) {
+		return -EPERM;
+	}
 
 	fd = anon_channel_install_fd();
 	if (fd < 0) {
