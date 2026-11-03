@@ -76,8 +76,11 @@ static const std::vector<ToolDef>& build() {
              },
              json::array()),
         tool("gg_search_refine",
-             "模糊细化：按比较结果收缩候选（需先 gg_search_unknown_init）。"
-             "搜错了用 gg_search_undo 回退",
+             "细化候选：按「当前值 vs 基线」的比较结果收缩。模糊搜索（unknown_init）与"
+             "精确/区间搜索共用本命令；op=undo 回退上一步（最多 3 步）。"
+             "⚠ 区间/AoB 搜索后的**首次 refine 只建立基线（候选数不变，op 被忽略），第二次起才按 op 收缩**"
+             "——这是设计而非 bug：区间候选值各不相同，第一轮必须先读回真实值。"
+             "精确搜索（搜已知值）搜索即基线，无此限制",
              json{
                  {"op", prop("string", "细化操作", "\"enum\":[\"increased\",\"decreased\",\"unchanged\",\"changed\"]")},
              },
@@ -137,12 +140,16 @@ static const std::vector<ToolDef>& build() {
              },
              json{"x", "y", "w", "h"}),
         tool("gg_search_range",
-             "区间搜索：min <= 值 <= max（按类型解释）",
+             "区间搜索：min <= 值 <= max（按类型解释）。找指针/地址类目标的主力工具。"
+             "注意：区间搜索后**首次 gg_search_refine 只建立基线（候选数不变），第二次起才按 op 收缩**"
+             "—— 区间候选值各不相同，无法像精确搜索那样拿单一值当基线。"
+             "aligned=false 可扫非对齐位置（查 packed 结构才需要，默认只扫自然对齐）",
              json{
                  {"min", prop("number", "区间最小值")},
                  {"max", prop("number", "区间最大值")},
                  {"type", prop("string", "值类型", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
                  {"region", prop("string", "搜索区域", "\"enum\":[\"anonymous\",\"writable\",\"all\"]")},
+                 {"aligned", prop("boolean", "只扫自然对齐位置（默认 true）")},
              },
              json{"min", "max"}),
         tool("gg_result_count",

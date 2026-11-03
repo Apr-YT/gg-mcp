@@ -65,7 +65,15 @@ std::string McpProtocol::handle(const std::string& raw) {
             resp.erase("result");
             resp["error"] = {{"code", -32603}, {"message", "Internal error"}};
         }
-        return resp.dump();
+        /* dump 也要在防线内：结果里含无效 UTF-8（读内存数据转字符串很常见）
+         * 时 dump() 抛 type_error.316，此前它在 try 外 —— 未捕获异常直接
+         * terminate 整个进程，表现为「server 莫名退出」。 */
+        try {
+            return resp.dump();
+        } catch (const std::exception& e) {
+            std::cerr << "[gg-mcp] response not serializable: " << e.what() << "\n";
+            return make_error(m["id"], -32603, "Internal error: response not serializable");
+        }
     };
 
     /* JSON-RPC 2.0 批量请求。MCP 2024-11-05 建立在 JSON-RPC 2.0 之上，数组是合法输入：

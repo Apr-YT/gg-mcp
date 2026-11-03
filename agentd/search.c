@@ -536,6 +536,7 @@ int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
      * 搜索时所有候选的值都 == value，快照直接填 value 即可，无需逐地址读回。 */
     r->exact_vt = vtype;
     r->exact_value = value;
+    r->exact_vals_valid = 1;
     if (r->count > 0) {
         r->exact_vals = malloc(r->count * sizeof(uint64_t));
         if (r->exact_vals) {
@@ -638,14 +639,13 @@ int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
     }
     free(regs);
 
+    /* AoB 命中的字节各不相同（就是 pattern 本身，含通配符），不能像精确搜索
+     * 那样拿单一值填快照——旧实现填全 0，之后 REFINE_UNCHANGED 会把"当前
+     * 恰好为 0"误判成不变。exact_vt=VT_BYTE 只为 get_results 定读值宽度；
+     * 基线由 refine 第一轮建立（exact_vals_valid=0）。 */
     r->exact_vt = VT_BYTE;
     r->exact_value = 0;
-    if (r->count > 0) {
-        r->exact_vals = malloc(r->count * sizeof(uint64_t));
-        if (r->exact_vals) {
-            for (size_t i = 0; i < r->count; i++) r->exact_vals[i] = 0;
-        }
-    }
+    r->exact_vals_valid = 0;
     return (int64_t)total;
 }
 
@@ -704,6 +704,14 @@ int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
         total = search_run_parallel(ws, ths, nt, r, &err);
     }
     free(regs);
+
+    /* 只定类型不定基线：区间搜索的候选值各不相同，无法像精确搜索那样拿单一
+     * 值填快照。exact_vt 在此设置是为了 h_get_results 按 vtype 宽度读值
+     * （旧实现不设 → 永远按 dword 读，qword 指针只显示低 32 位）。
+     * 基线由 refine 第一轮建立（exact_vals_valid=0）。 */
+    r->exact_vt = vtype;
+    r->exact_value = 0;
+    r->exact_vals_valid = 0;
     return (int64_t)total;
 }
 
@@ -1006,6 +1014,53 @@ int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) 
     if (r->exact_vt <= 0 || r->exact_vt > VT_DOUBLE) return -1;
     int sz = vt_size(r->exact_vt);
     if (sz <= 0) return -1;
+
+    /* 区间/AoB 搜索没有 t0 快照（候选值各不相同，单一值填充会全错）。
+     * 本轮只建立基线：逐地址读当前值填 exact_vals，不按 op 筛选、
+     * count 不变（读失败的候选被剔除——后续 refine 对它们同样读不到）。
+     * 下一轮 refine 才有"变化"可比较。不 push undo（没发生筛选）。
+     * 这意味着区间搜索后第一次 refine 是"建基线"，第二次起才收敛——
+     * 与精确搜索（搜索即基线）不同，MCP 工具说明里已注明。 */
+    if (!r->exact_vals_valid) {
+        uint64_t *vals = malloc(r->count * sizeof(uint64_t));
+        uint8_t *buf = malloc(GG_SEARCH_CHUNK);
+        if (!vals || !buf) { free(vals); free(buf); return -1; }
+        size_t n = 0;
+        for (size_t i = 0; i < r->count; ) {
+            size_t seg_n = 0;
+            uint64_t cur = r->addrs[i];
+            while (i + seg_n < r->count && r->addrs[i + seg_n] == cur &&
+                   (seg_n + 1) * (size_t)sz <= GG_SEARCH_CHUNK) {
+                seg_n++;
+                cur += (uint64_t)sz;
+            }
+            ssize_t got = driver_read(d, pid, r->addrs[i], buf, seg_n * (size_t)sz);
+            if (got == (ssize_t)(seg_n * (size_t)sz)) {
+                for (size_t j = 0; j < seg_n; j++) {
+                    r->addrs[n] = r->addrs[i + j];
+                    vals[n] = read_bits(buf + j * (size_t)sz, r->exact_vt);
+                    n++;
+                }
+            } else {
+                for (size_t j = 0; j < seg_n; j++) {
+                    uint8_t one[8] = {0};
+                    if (driver_read(d, pid, r->addrs[i + j], one, (size_t)sz) != sz) continue;
+                    r->addrs[n] = r->addrs[i + j];
+                    memcpy(&vals[n], one, (size_t)sz);
+                    n++;
+                }
+            }
+            i += seg_n;
+        }
+        free(buf);
+        free(r->exact_vals);
+        r->exact_vals = vals;
+        r->count = n;
+        r->exact_vals_valid = 1;
+        log_msg("refine: baseline established for %zu candidates (range/aob first refine)", n);
+        return (int64_t)r->count;
+    }
+
     if (!r->exact_vals) {
         r->exact_vals = malloc(r->count * sizeof(uint64_t));
         if (!r->exact_vals) return -1;
@@ -1155,6 +1210,9 @@ int64_t search_filter_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
     }
     free(bigbuf);
     r->count = n;
+    /* filter 之后 exact_vals 已是各候选的真实当前值 —— 基线就此建立，
+     * 后续 refine（变化方向比较）可直接用，无需再跑建基线轮。 */
+    r->exact_vals_valid = 1;
     log_msg("filter: kept %zu candidates", n);
     return (int64_t)n;
 }

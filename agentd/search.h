@@ -42,8 +42,14 @@ typedef struct gg_results {
     size_t    cap;
 
     /* 精确搜索 refine 状态（GG 标准流程: 搜已知值 → 游戏内值变化 → refine）
-     * exact_vals[i] 为 addrs[i] 最近一轮的值快照（位模式） */
+     * exact_vals[i] 为 addrs[i] 最近一轮的值快照（位模式）
+     *
+     * exact_vals_valid: exact_vals 是否已建立"所有候选的真实基线"。
+     * 1 = 精确搜索（快照 == 搜索值）或 refine 已跑过至少一轮，可直接比较；
+     * 0 = 区间/AoB 搜索刚结束——候选值各不相同，快照尚未建立，
+     *     search_refine_exact 的第一轮会先读基线（不筛选），之后才有效。 */
     int       exact_vt;
+    int       exact_vals_valid;
     uint64_t  exact_value;          /* 精确搜索目标值（位模式） */
     uint64_t *exact_vals;           /* 并行数组: 每候选最近值快照 */
 

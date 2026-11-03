@@ -135,6 +135,40 @@ int AgentClient::ensure_connected() {
     return ensure_connected_locked();
 }
 
+/* 断线重连退避（2026-11-03，BACKLOG P0-6）。
+ * 背景：agentd 重启/断连时旧实现只做一次「reconnect and replay once」，
+ * 失败立即把整次调用判 GGERR_NO_DEVICE —— 部署脚本重启 agentd 的几秒窗口内，
+ * AI 侧所有请求都变成错误，长流程（搜索收敛到一半）只能人工重来。
+ *
+ * 策略：连接失败后指数退避重试（200ms→400→800…单次上限 2s），
+ * 总预算 min(30s, 截止时间剩余)。鉴权被拒（-2）不进循环 —— 密钥不匹配
+ * 是配置问题，重试只会把错误掩盖成 30 秒的卡顿。
+ *
+ * 为什么放在 AgentClient 而不是上层：上层（Session）不知道「连接失败」和
+ * 「请求执行失败」的区别，盲目重试请求有副作用（write 类命令可能执行两次）；
+ * 只有这里能区分 CallOutcome::ConnectFailed（一个字节都没发出去，安全）。 */
+int AgentClient::ensure_connected_retry(Clock::time_point deadline) {
+    const auto kRetryBudget = std::chrono::seconds(30);
+    auto budget_end = Clock::now() + kRetryBudget;
+    if (budget_end > deadline) budget_end = deadline;
+
+    int delay_ms = 200;
+    int rc = ensure_connected_locked();
+    while (rc != 0 && rc != -2) {
+        int remain = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          budget_end - Clock::now()).count());
+        if (remain <= 0) break;
+        int wait = delay_ms < remain ? delay_ms : remain;
+        GG_LOG(1, "[wire] reconnect failed (rc=%d), retrying in %dms (budget %dms left)\n",
+               rc, wait, remain);
+        std::this_thread::sleep_for(std::chrono::milliseconds(wait));
+        delay_ms *= 2;
+        if (delay_ms > 2000) delay_ms = 2000;
+        rc = ensure_connected_locked();
+    }
+    return rc;
+}
+
 // 连接建立后的握手。协议要求：未认证的连接只能发 PING/AUTH，其余命令一律 GGERR_PERM。
 // 因此这里失败必须让整次连接失败——否则上层会拿到一堆 PERM 却不知道根因是密钥不匹配。
 int AgentClient::auth_locked(Clock::time_point deadline) {
@@ -504,7 +538,7 @@ int AgentClient::call(uint16_t cmd, const json& params, json* out) {
     const Clock::time_point deadline = Clock::now() + std::chrono::milliseconds(cfg_.io_timeout_ms);
 
     if (fd_ < 0) {
-        int cr = ensure_connected_locked();
+        int cr = ensure_connected_retry(deadline);
         if (cr != 0) {
             if (cr == -2) {
                 // 鉴权被明确拒绝：重连没有意义，也不能归入 ConnectFailed（否则上层会重放）
@@ -535,7 +569,7 @@ int AgentClient::call(uint16_t cmd, const json& params, json* out) {
         GG_CLOSE_SOCK(static_cast<sock_t>(fd_));
         fd_ = -1;
         GG_LOG(1, "[wire] write failed (wr=%d), reconnect and replay once\n", wr);
-        int cr = ensure_connected_locked();
+        int cr = ensure_connected_retry(deadline);
         if (cr == 0) {
             seq = ++seq_;
             wr = write_frame(fd_, cmd, seq, payload, deadline);

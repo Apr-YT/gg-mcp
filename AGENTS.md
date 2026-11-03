@@ -801,9 +801,26 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
      结果）—— submit 超时/STOPPED 返回 -2，call_ex 拆环回落 ioctl，重连才重建。
    - **改环/动这段前先读那份报告的"遗留观察"**：R-4（handler 定长回写无视
      buf_size）是有意不修，理由在报告里。
-   - 真机验收 5 步在第 5 步要**同步改 `check_stealth.sh` 第 8 项判据**
+   -    真机验收 5 步在第 5 步要**同步改 `check_stealth.sh` 第 8 项判据**
      （fd 名 dmabuf → [eventpoll]）。当前设备上的 .ko 没有 .mmap，`--ring`
      会自动回落 ioctl——这条本身就是一条回归验证路径，别当成故障排查。
+
+44. **搜索/断线三个 P0 级修复（2026-11-03，BACKLOG 5/6/12 收口）**。
+
+   - **区间搜索结果值宽度**（BACKLOG 5）：`search_range` 不设 `exact_vt` →
+     `get_results` 恒按 dword 读值，qword 指针只显示低 32 位。已修：
+     `exact_vals_valid` 字段区分"搜索即基线"（精确）与"首 refine 建基线"
+     （区间/AoB）。**行为变化**：区间/AoB 搜索后首次 `gg_search_refine`
+     只建基线（count 不变、op 被忽略），第二次起才按 op 收缩——schema
+     描述已注明，写自动化流程时别假设第一轮就收敛。AoB 顺带修了快照
+     全 0 的旧缺陷（UNCHANGED 误判）。单测 test_search.c 用例 10/10b。
+   - **PC 端断线重连**（BACKLOG 6）：`ensure_connected_retry()` 指数退避
+     （总预算 min(30s, deadline)），auth 拒绝不重试。**「进程退出」的根因
+     未定案**——但修掉一条可证 terminate 路径：`protocol.cpp` 的
+     `resp.dump()` 原在 try 外，响应含无效 UTF-8 直接打死进程。重连的
+     运行时行为**未本地验证**，下次真机 itest 顺带跑。
+   - **`aligned` 步进**（BACKLOG 12）：早已实现，状态补记。
+   - 详见 `docs/engineering/BACKLOG.md` 对应条目的状态段。
 
 ## 约定
 
@@ -825,7 +842,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-11-03（anon_ring 审查，见第 43 条与 RING_REVIEW_20261103.md）。
+本文件最后校准：2026-11-03（第 43 条 anon_ring 审查 + 第 44 条 BACKLOG 5/6/12 收口）。
 上一条校准：2026-10-23 19:55（HEAD `8bddaf5`）：项目结构补 `ko/` 与 `build/` 说明、
 结构护栏补到 6 道、main.c 拆分收尾（683 行）、清掉已删除的 GG 核心注入链路表述、
 itest 状态更新、第 14/16 条矛盾合并。同日新增 42。

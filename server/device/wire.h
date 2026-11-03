@@ -59,6 +59,10 @@ private:
     using Clock = std::chrono::steady_clock;
 
     int ensure_connected_locked();   // 前提: mtx_ 已持有
+    /* 连接失败时带退避的重连（agentd 重启窗口内不让调用立即失败）：
+     * 指数退避 200ms 起、单次上限 2s，总预算 min(30s, deadline 剩余)。
+     * 鉴权被拒（-2）不重试 —— 重试没有意义，立即返回让上层报配置错。 */
+    int ensure_connected_retry(Clock::time_point deadline);
     int tcp_connect();               // 单次 TCP 连接（不跑 adb）
     int auth_locked(Clock::time_point deadline);   // 连接后握手（GGCMD_AUTH）
     // 返回值：0 成功；-1 IO 错误/对端关闭；-2 截止时间到期；-3 协议帧非法

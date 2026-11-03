@@ -244,14 +244,15 @@ AI 拿到 21481 条候选时，`get_results` 分页看要 214 轮。这一步先
 候选（前提是"所有候选都等于搜索目标"，精确搜索成立、区间搜索不成立），
 于是首次 refine 把基线当成 0，候选全被判成 changed。
 
-**方案**：加 `int exact_vals_valid` 字段。`search_exact` 填完 exact_vals 设 1；
-`search_range` 设 `exact_vt = vtype` 且 `exact_vals_valid = 0`（不填 exact_vals）。
-`search_refine_exact` 遇到 `!exact_vals_valid` 时先跑一轮"只读基线、不筛选"
-（返回进来的 count），下一轮才真正比较。
-
-成本：约 40 行（结构体 1 字段 + 3 处设置 + refine 一个分支）。
-**收益**：区间搜索是找指针的主力工具，结果不可信等于不能用。
-本轮绕过方式：拿到地址后用 `gg_read type="qword"` 逐条核对。
+**状态：已修（2026-11-03）**，实现按上述方案 + 回归单测（test_search.c 用例 10/10b）：
+- `gg_results_t` 新增 `exact_vals_valid`；`search_exact` 置 1（搜索即基线）
+- `search_range`/AoB 置 0：只设 `exact_vt`（get_results 按正确宽度读值），基线由
+  refine 第一轮建立（读回真实值、不筛选、count 不变）
+- `search_filter_exact` 过滤后快照即真实值，也置 1
+- AoB 顺带修了旧缺陷：原实现把快照填全 0，`REFINE_UNCHANGED` 会把"当前恰为 0"
+  误判成不变
+- MCP schema 同步更新（`gg_search_range`/`gg_search_refine` 描述注明首轮建基线）
+- 真机 itest 未跑（设备不在位），搜索行为以单测为准
 
 ### 6. PC 端 wire 断线后直接退出，不重连
 
@@ -270,7 +271,18 @@ AI 拿到 21481 条候选时，`get_results` 分页看要 214 轮。这一步先
 **修法**：断线后进入重连循环（指数退避，上限 30s），只在 auth 失败时退出。
 另外 `start_server.bat` 在 explorer 里拉起也会立即退出（前台跑正常），要一起查。
 
-成本：约 40 行。
+**状态：已修（2026-11-03）**：
+- `AgentClient::ensure_connected_retry()`：连接失败后指数退避
+  （200ms→…→单次上限 2s，总预算 min(30s, 请求截止剩余)），`call()` 的两个
+  连接点（初始连接 + write 失败重放）都走它；auth 被拒（-2）不重试
+- **「进程退出」的真实根因未定案**（现有代码里 wire 失败只返回错误码，无退出
+  路径），但发现并修掉一条可证的 terminate 路径：`protocol.cpp` 的
+  `resp.dump()` 在 try 外 —— 响应含无效 UTF-8（读内存数据转字符串）时抛
+  type_error.316 直接打死进程，与「断线重连后进程莫名结束」现象吻合
+- `start_server.bat`：启动前检查 exe/config 存在性，失败 pause 显示原因；
+  进程非零退出时窗口保持打开（此前 `start` 一闪而过看不到错误）
+- 验证：双端编译过 + 全量单测（含 test_wire/test_protocol）过；**断线重连的
+  运行时行为未本地复现验证**（需 agentd 重启场景），下次真机 itest 顺带跑
 
 ## P1 — 收益明确、成本中等
 
@@ -327,6 +339,11 @@ AI 拿到 21481 条候选时，`get_results` 分页看要 214 轮。这一步先
 **收益**：一次抓出所有指向该对象的指针，不用每换一个成员偏移就重扫全内存。
 
 ### 12. `search_range` 按元素宽度对齐步进
+
+**状态：已实现（`aligned` 参数，本条写于实现之前，状态 2026-11-03 补记）**：
+`gg_search_range` 的 `aligned` 默认 true（只扫自然对齐位置，`step = sz`），
+`aligned=false` 保留逐字节（查 packed 结构用）——开关语义与当初拟的"保留开关"
+一致，MCP schema 已暴露该参数。
 
 现状：`agentd/search.c` mode 1 分支是 `for (...; i++)` —— **每字节**都试。
 后果：一个 8 字节指针落在区间内会被命中 **8 次**（i..i+7 的未对齐窗口都满足），

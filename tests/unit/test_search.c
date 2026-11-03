@@ -279,6 +279,47 @@ int main(void) {
     }
     }
 
+    /* === 10) 区间搜索: exact_vt 生效 + refine 首轮建基线（2026-11-03 P0-5 回归）
+     * 旧缺陷: search_range 不设 exact_vt → get_results 恒按 dword 读值,
+     * qword 指针只显示低 32 位; 且 refine 会拿单一值(0)填快照, 候选全灭。 */
+    mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + 0x10000);
+    {
+        uint64_t a = TEST_MEM_BASE + 0x1000, b = TEST_MEM_BASE + 0x2000;
+        uint64_t va = 150, vb = 180;
+        memcpy(g_mem + (a - TEST_MEM_BASE), &va, 8);
+        memcpy(g_mem + (b - TEST_MEM_BASE), &vb, 8);
+        results_init(&r, 0);
+        int64_t n = search_range(NULL, 0, &r, VT_QWORD, 100, 200, 0, 1);
+        check(n == 2, "10) range: 两候选命中");
+        check(r.exact_vt == VT_QWORD, "10) range 后 exact_vt=qword (get_results 按宽度读值)");
+        check(r.exact_vals_valid == 0, "10) range 后基线未建立 (valid=0)");
+        /* 首次 refine = 建基线: 不筛选, count 不变 */
+        int64_t n1 = search_refine_exact(NULL, 0, &r, REFINE_CHANGED);
+        check(n1 == 2, "10) 首次 refine 建基线: count 不变 (op 被忽略)");
+        check(r.exact_vals_valid == 1, "10) 基线已建立 (valid=1)");
+        /* 第二次 refine 才比较: 改 a, CHANGED 只留 a, UNCHANGED 只留 b */
+        uint64_t va2 = 999;
+        memcpy(g_mem + (a - TEST_MEM_BASE), &va2, 8);
+        int64_t n2 = search_refine_exact(NULL, 0, &r, REFINE_CHANGED);
+        check(n2 == 1 && results_has(&r, a), "10) 二次 refine CHANGED: 只留变化的 a");
+        results_clear(&r);
+    }
+    /* 精确搜索路径不受建基线轮影响: 搜索即基线, 首次 refine 直接比较 */
+    mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + 0x10000);
+    {
+        uint64_t a = TEST_MEM_BASE + 0x1000;
+        uint64_t v = 150;
+        memcpy(g_mem + (a - TEST_MEM_BASE), &v, 8);
+        results_init(&r, 0);
+        search_exact(NULL, 0, &r, VT_QWORD, v, 0);
+        check(r.exact_vals_valid == 1, "10b) exact: 搜索即基线 (valid=1)");
+        uint64_t v2 = 999;
+        memcpy(g_mem + (a - TEST_MEM_BASE), &v2, 8);
+        int64_t n = search_refine_exact(NULL, 0, &r, REFINE_CHANGED);
+        check(n == 1, "10b) exact: 首次 refine 直接比较 (不走建基线轮)");
+        results_clear(&r);
+    }
+
     printf(fails ? "\n== FAILED: %d ==\n" : "\n== ALL PASS ==\n", fails);
     return fails ? 1 : 0;
 }
