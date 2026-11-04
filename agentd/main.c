@@ -387,6 +387,7 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
     case GGCMD_GHOST_SWIPE:        h_ghost_swipe(fd, seq, p); break;
     case GGCMD_RESULTS_SAVE:       h_results_save(fd, seq, p); break;
     case GGCMD_RESULTS_LOAD:       h_results_load(fd, seq, p); break;
+    case GGCMD_RESULTS_REFRESH:    h_results_refresh(fd, seq, p); break;
     case GGCMD_REGION_DUMP:        h_region_dump(fd, seq, p); break;
     case GGCMD_REGION_RESTORE:     h_region_restore(fd, seq, p); break;
     case GGCMD_DUMP_LIST:          h_dump_list(fd, seq, p); break;

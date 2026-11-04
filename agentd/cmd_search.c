@@ -363,6 +363,23 @@ void h_results_load(int fd, uint32_t seq, cJSON *p) {
     cJSON_Delete(r);
 }
 
+/* 手动刷新（重置 refine 基线）: {} → {changed, dropped, count}。
+ * 只读操作：不筛选、不写内存；缺基线场景（区间/AoB/模糊物化后）自动建基线。 */
+void h_results_refresh(int fd, uint32_t seq, cJSON *p) {
+    (void)p;
+    if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_RESULTS_REFRESH, seq, GGERR_NO_SESSION, "no session"); return; }
+    if (g_eng.results.count == 0) { send_err(fd, GGCMD_RESULTS_REFRESH, seq, GGERR_BAD_REQUEST, "result set empty"); return; }
+    size_t dropped = 0;
+    int64_t changed = results_refresh(&g_eng.drv, g_eng.session_pid, &g_eng.results, &dropped);
+    if (changed < 0) { send_err(fd, GGCMD_RESULTS_REFRESH, seq, GGERR_BAD_REQUEST, "refresh failed (bad vtype or oom)"); return; }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "changed", (double)changed);
+    cJSON_AddNumberToObject(r, "dropped", (double)dropped);
+    cJSON_AddNumberToObject(r, "count", (double)g_eng.results.count);
+    send_ok(fd, GGCMD_RESULTS_REFRESH, seq, r);
+    cJSON_Delete(r);
+}
+
 void h_result_count(int fd, uint32_t seq, cJSON *p) {
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "count", (double)g_eng.results.count);

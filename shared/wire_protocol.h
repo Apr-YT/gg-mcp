@@ -175,6 +175,13 @@ enum gg_cmd {
     /* 列出设备端已有备份：{"r":{"dumps":[{"name","orig_addr","bytes","checksum"}]}}。
      * 没有它 restore 只能盲猜 name；头部非法的坏文件被跳过（restore 的 FNV 兜底）。 */
     GGCMD_DUMP_LIST,
+    /* 手动刷新结果集（重置 refine 基线）：{"r":{"changed","dropped","count"}}。
+     * 重读所有候选现值：报告 changed（与上次快照不同的数量）、dropped
+     * （读不到被剔除的），并把 exact_vals 基线更新为现值 —— 之后的
+     * refine（increased/decreased/...）从"现在"起算。
+     * 区间/AoB/模糊物化后无基线的场景，refresh 先建基线（changed=0）。
+     * 只读操作；undo 可回退到刷新前。 */
+    GGCMD_RESULTS_REFRESH,
     GGCMD_MAX
 };
 

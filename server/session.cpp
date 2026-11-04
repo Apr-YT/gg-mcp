@@ -676,6 +676,8 @@ json tool_results_load(Session::CallCtx& c, const json& a) {
     c.params["name"] = a["name"];
     return c.send(GGCMD_RESULTS_LOAD);
 }
+// 手动刷新（重置 refine 基线）：只读操作，无参数
+json tool_results_refresh(Session::CallCtx& c, const json&) { return c.send(GGCMD_RESULTS_REFRESH); }
 
 // ---- 内存区域快照（CE "Memory dump" 对应物）----
 // 与结果集 save/load 一样落盘在设备端：大区域走 wire 回 PC 按 USB 带宽要几十秒。
@@ -1289,6 +1291,7 @@ const ToolEntry kTools[] = {
     {"gg_clear_results",    tool_clear_results,    false},
     {"gg_results_save",     tool_results_save,     false},
     {"gg_results_load",     tool_results_load,     false},
+    {"gg_results_refresh",  tool_results_refresh,  false},
     {"gg_region_dump",      tool_region_dump,      false},
     {"gg_region_restore",   tool_region_restore,   true},
     {"gg_dump_list",        tool_dump_list,        false},

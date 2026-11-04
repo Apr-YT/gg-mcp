@@ -117,6 +117,7 @@ void h_refine(int fd, uint32_t seq, cJSON *p);
 void h_result_count(int fd, uint32_t seq, cJSON *p);
 void h_results_save(int fd, uint32_t seq, cJSON *p);   /* 结果集落盘（跨会话恢复） */
 void h_results_load(int fd, uint32_t seq, cJSON *p);
+void h_results_refresh(int fd, uint32_t seq, cJSON *p); /* 手动刷新（重置 refine 基线） */
 void h_get_results(int fd, uint32_t seq, cJSON *p);
 void h_clear_results(int fd, uint32_t seq, cJSON *p);
 void h_set_results(int fd, uint32_t seq, cJSON *p);

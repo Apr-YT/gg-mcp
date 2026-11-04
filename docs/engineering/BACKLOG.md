@@ -12,6 +12,24 @@
 
 ## 已完成（近期）
 
+### `gg_results_refresh`：手动刷新 / 重置 refine 基线（2026-11-04）
+
+BACKLOG「明确不做」一节挡掉的是**自动**轮询刷新，但手动刷新工具此前一直
+缺失——get_results 虽现读现值，`exact_vals` 基线仍停在搜索/refine 时刻，
+游戏里值变了几轮后 refine 拿老基线比较。refresh（GG 同名工作流）重读全部
+候选现值：返回 changed/dropped/count，并把基线更新为现值，之后的
+increased/decreased/... 从"现在"起算。不筛选、只读、undo 可回退。
+
+- 无基线路径（区间/AoB/模糊物化后 `exact_vt<=0`）顺带补缺口：refresh 直接
+  建基线（借 `fuzzy_vt` 定类型），把"第一次 refine 只建基线不筛选"这个隐式
+  行为变成显式操作；此前模糊物化后 refine 链路实际是断的。
+- 语义决策：无基线不压 undo 栈（压了会恢复出"全零基线+valid=1"的噪声态，
+  与 refine 建基线路径同约定）；有基线压栈，刷错可回退。
+- itest 用例 14：判别点设计成"值写回 refresh 时刻值 → refine UNCHANGED
+  恰好保留"——对老基线它是 changed 会清零，只有基线真被重置才留得住。
+  （第一版用 refine CHANGED 判别，新老基线都会保留，无判别力，已废。）
+- 工具面 58 → 59。
+
 ### 内存区域快照 `gg_region_dump` / `gg_region_restore`（2026-11-04）
 
 CE "Memory dump" 对应物：改数值前备份整块区域，改坏了一键写回。

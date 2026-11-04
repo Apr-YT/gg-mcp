@@ -119,6 +119,7 @@ int main(void) {
             g3[0] = 0x1111AAAAu; g3[1] = 0x2222BBBBu; g3[2] = 0x3333CCCCu;
         }
         *(volatile uint32_t *)((char *)p + 16384) = 0x0D15EA5Eu;  /* refine 靶 */
+        *(volatile uint32_t *)((char *)p + 28672) = 0xF00DFACEu;  /* refresh 靶（用例 14） */
         /* 两级指针链：anchor(.data) → mid → target */
         *(volatile uint64_t *)((char *)p + 20480) = (uint64_t)(uintptr_t)((char *)p + 24576);
         *(volatile uint64_t *)((char *)p + 24576) = 0x7E57C0DEull;
@@ -455,6 +456,47 @@ int main(void) {
             CHECK(found, "expected 2-level chain via g_chain_anchor (offsets 0)");
             free(maps);
             free(anchors);
+        }
+        results_clear(&rs);
+    }
+
+    /* 14) results_refresh：手动刷新重置 refine 基线。
+     * 流程：搜唯一魔数 → 父进程写新值 → refresh 报 changed==1（基线更新为现值）
+     *       → refine(UNCHANGED) 恰好 1 条 —— 判别点：当前值 0xFEEDFACE
+     *         对老基线(0xF00DFACE)是"变化"，会被清零；只有基线真的被
+     *         refresh 重置成 0xFEEDFACE，UNCHANGED 才会保留它。
+     *       → gg_undo 回退到 refresh 前的状态（undo 栈在 refresh 时也压了一份）。 */
+    {
+        gg_results_t rs;
+        results_init(&rs, 100000);
+        int64_t n = search_exact(&drv, g_child, &rs, VT_DWORD, 0xF00DFACEu,
+                                 REGION_ANONYMOUS, NULL);
+        CHECK(n == 1, "refresh target found exactly once");
+        if (n == 1) {
+            uint64_t t = rs.addrs[0];
+            uint32_t nv = 0xFEEDFACEu;
+            CHECK(driver_write(&drv, g_child, t, &nv, 4) == 4, "write new value");
+            size_t dropped = 99;
+            int64_t changed = results_refresh(&drv, g_child, &rs, &dropped);
+            printf("  refresh -> changed=%lld dropped=%zu count=%zu\n",
+                   (long long)changed, dropped, rs.count);
+            CHECK(changed == 1, "refresh reports exactly 1 change");
+            CHECK(dropped == 0, "refresh drops nothing (target readable)");
+            CHECK(rs.exact_vals_valid && rs.exact_vals &&
+                  rs.exact_vals[0] == 0xFEEDFACEu,
+                  "baseline now holds refreshed value");
+
+            /* 值保持 0xFEEDFACE：只有基线被重置，UNCHANGED 才留得住它 */
+            int64_t kept = search_refine_exact(&drv, g_child, &rs, REFINE_UNCHANGED);
+            printf("  refine UNCHANGED after refresh -> %lld\n", (long long)kept);
+            CHECK(kept == 1, "refine compares against REFRESHED baseline");
+
+            int64_t undo = search_refine_undo_exact(&rs);
+            printf("  undo -> count=%lld vals[0]=0x%llx\n",
+                   (long long)undo, rs.exact_vals ? (unsigned long long)rs.exact_vals[0] : 0ull);
+            CHECK(undo == 1 && rs.exact_vals &&
+                  rs.exact_vals[0] == 0xFEEDFACEu,
+                  "undo restores post-refresh pre-refine state");
         }
         results_clear(&rs);
     }

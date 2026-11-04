@@ -209,6 +209,14 @@ static const std::vector<ToolDef>& build() {
              "increased_by/decreased_by 等 op 可继续用",
              json{{"name", prop("string", "保存名")}},
              json{"name"}),
+        tool("gg_results_refresh",
+             "手动刷新结果集现值并重置 refine 基线：重读全部候选的当前值，"
+             "返回 changed（与上次快照不同的条数）/ dropped（读不到被剔除的）/ count。"
+             "之后的 refine（increased/decreased 等）从刷新时刻重新起算 —— "
+             "搜索后游戏里值已变了几轮时，先 refresh 再 refine 才不会拿老基线比较。"
+             "区间/AoB/模糊物化后没有基线的场景，refresh 直接建基线（changed=0）。"
+             "只读操作，不筛选，可 gg_undo 回退",
+             json::object(), json::array()),
         tool("gg_region_dump",
              "内存区域快照备份（CE Memory dump）：把 [addr, addr+len) 整块读到设备"
              " /data/adb/GG-Ghost/dumps/<name>.bin（带原址/长度/FNV 校验和头部）。"

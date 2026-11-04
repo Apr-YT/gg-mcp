@@ -1217,6 +1217,96 @@ int64_t search_refine_undo_exact(gg_results_t *r) {
     return (int64_t)r->count;
 }
 
+/* ---------- 手动刷新（重置 refine 基线）----------
+ *
+ * 动机：exact_vals 停留在"搜索/refine 时刻"的快照，游戏里值已经变了几轮后，
+ * refine 比较的是老基线；GG 工作流里对应"refresh"——重新读一遍现值，
+ * 之后的 increased/decreased 从"现在"起算。与 refine 的区别：不筛选，
+ * 只报告 changed（有基线时）/dropped，所有还读得到的候选都保留。
+ *
+ * 建基线路径同时是缺口修补：区间/AoB/模糊物化后的结果集没有 exact_vt 基线，
+ * 此前只能靠"第一次 refine 只建基线不筛选"这个隐式行为 —— refresh 把它
+ * 变成显式操作（响应里 changed=0 一眼可见）。 */
+int64_t results_refresh(gg_driver_t *d, pid_t pid, gg_results_t *r,
+                        size_t *out_dropped) {
+    if (out_dropped) *out_dropped = 0;
+    if (!r->addrs || r->count == 0) return 0;
+    if (r->fuzzy_active) results_materialize(r);
+    if (r->exact_vt <= 0) {
+        /* 模糊物化后 exact_vt 未定：借 fuzzy_vt 建基线，refine 链路接上 */
+        if (r->fuzzy_vt > 0 && r->fuzzy_vt <= VT_DOUBLE) r->exact_vt = r->fuzzy_vt;
+        else return -1;
+    }
+    if (r->exact_vt > VT_DOUBLE) return -1;
+    int sz = vt_size(r->exact_vt);
+    if (sz <= 0) return -1;
+
+    int have_baseline = (r->exact_vals_valid && r->exact_vals);
+    uint64_t *vals = r->exact_vals;      /* 有基线：原地更新（n <= i 恒成立） */
+    if (!have_baseline) {
+        vals = malloc(r->count * sizeof(uint64_t));
+        if (!vals) return -1;
+    }
+
+    uint8_t *buf = malloc(GG_SEARCH_CHUNK);
+    if (!buf) { if (!have_baseline) free(vals); return -1; }
+
+    /* 刷新前的快照进 undo 栈：刷错基线可回退（与 refine 同约定）。
+     * 无基线路径（本函数就是在建基线，没有旧快照可回退）不压栈 ——
+     * 与 refine 建基线路径的约定一致；压了反而会恢复出"全零基线+valid"，
+     * 让后续 refine 拿 0 做比较产生噪声。 */
+    if (have_baseline) exact_undo_push(r);
+
+    int64_t changed = 0;
+    size_t dropped = 0;
+    size_t n = 0;    /* 原地压缩：只剔除读不到的候选（与 refine 同语义） */
+    for (size_t i = 0; i < r->count; ) {
+        size_t seg_n = 0;
+        uint64_t cur = r->addrs[i];
+        while (i + seg_n < r->count && r->addrs[i + seg_n] == cur &&
+               (seg_n + 1) * (size_t)sz <= GG_SEARCH_CHUNK) {
+            seg_n++;
+            cur += (uint64_t)sz;
+        }
+        ssize_t got = driver_read(d, pid, r->addrs[i], buf, seg_n * (size_t)sz);
+        if (got == (ssize_t)(seg_n * (size_t)sz)) {
+            for (size_t j = 0; j < seg_n; j++) {
+                uint64_t v = read_bits(buf + j * (size_t)sz, r->exact_vt);
+                if (have_baseline && v != vals[i + j]) changed++;
+                r->addrs[n] = r->addrs[i + j];
+                vals[n] = v;
+                n++;
+            }
+        } else {
+            /* 段读失败：逐地址回退（保持 refine 的容错语义） */
+            for (size_t j = 0; j < seg_n; j++) {
+                uint8_t one[8] = {0};
+                if (driver_read(d, pid, r->addrs[i + j], one, (size_t)sz) != sz) {
+                    dropped++;
+                    continue;
+                }
+                uint64_t v = read_bits(one, r->exact_vt);
+                if (have_baseline && v != vals[i + j]) changed++;
+                r->addrs[n] = r->addrs[i + j];
+                vals[n] = v;
+                n++;
+            }
+        }
+        i += seg_n;
+    }
+    if (!have_baseline) {
+        free(r->exact_vals);
+        r->exact_vals = vals;
+    }
+    r->count = n;
+    r->exact_vals_valid = 1;
+    if (out_dropped) *out_dropped = dropped;
+    free(buf);
+    log_msg("refresh: %zu candidates, %lld changed, %zu dropped",
+            r->count, (long long)changed, dropped);
+    return changed;
+}
+
 int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
     return search_refine_exact_by(d, pid, r, op, 0.0);
 }

@@ -905,6 +905,22 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    - **测试框架坑**：peer 线程的第二次 accept 在客户端不重试时永远阻塞，
      join 前必须 stop_listen（shutdown+close 打断阻塞中的 accept）。
 
+49. **`gg_results_refresh`：手动刷新 / 重置 refine 基线（2026-11-04，真机未验）**
+
+   「明确不做」挡的是**自动**轮询刷新（设备 IO / 干扰目标进程）；
+   **手动**刷新是 GG 同名工作流，此前缺工具——get_results 现读现值，
+   但 `exact_vals` 基线停在搜索/refine 时刻，值变几轮后 refine 拿老基线比较。
+
+   - 语义：重读全部候选 → 返回 changed/dropped/count，基线更新为现值，
+     之后 refine 从"现在"起算。不筛选、只读、读不到的剔除（同 refine）。
+   - 无基线路径（区间/AoB/模糊物化后）refresh 直接建基线（借 fuzzy_vt），
+     **不压 undo**——压了会恢复出"全零基线 + valid=1"的噪声态
+     （与 refine 建基线路径同约定）；有基线才压，刷错可回退。
+     这顺带修通了一个缺口：模糊物化后 exact_vt 未定，refine 链路实际断的。
+   - itest 用例 14 的判别点：值写回 refresh 时刻值 → refine UNCHANGED
+     恰好保留。第一版用 refine CHANGED 判别是错的——新老基线都会保留，
+     无判别力。写这类测试先问一句：**如果实现没生效，这个断言会失败吗？**
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
@@ -925,7 +941,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-11-04（第 47 条 region dump/restore + 第 48 条 wire AUTH 断连语义修复；同日早些：第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。
+本文件最后校准：2026-11-04（第 49 条 gg_results_refresh；同日：第 47 条 region dump/restore + 第 48 条 wire AUTH 断连语义修复；更早：第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。
 上一条校准：2026-11-03（第 43 条 anon_ring 审查 + 第 44 条 BACKLOG 5/6/12 收口）。
 上一条校准：2026-10-23 19:55（HEAD `8bddaf5`）：项目结构补 `ko/` 与 `build/` 说明、
 结构护栏补到 6 道、main.c 拆分收尾（683 行）、清掉已删除的 GG 核心注入链路表述、

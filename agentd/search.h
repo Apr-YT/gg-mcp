@@ -170,6 +170,16 @@ int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op);
 /* by 版本：REFINE_INCREASED_BY/DECREASED_BY 时 by 为增量（必须 > 0） */
 int64_t search_refine_exact_by(gg_driver_t *d, pid_t pid, gg_results_t *r, int op, double by);
 
+/* 手动刷新（重置 refine 基线）：重读所有候选现值，报告 changed（返回值），
+ * *out_dropped 回填读不到被剔除的条数（可为 NULL）。
+ * - 有基线：exact_vals 更新为现值 → 之后的 refine 从"现在"起算；
+ *   不筛选，可读到的候选全保留（与 refine 的本质区别）。
+ * - 无基线（区间/AoB/模糊物化后）：只建基线（changed=0）。
+ * 刷新前状态进 undo 栈，可回退。模糊未物化会先物化。只读操作。
+ * 返回 changed 数；-1 = 无效值类型/OOM。 */
+int64_t results_refresh(gg_driver_t *d, pid_t pid, gg_results_t *r,
+                        size_t *out_dropped);
+
 /* 结果集内过滤：只保留当前值落在 [vmin, vmax] 的条目（原地压缩，可用 undo 回退）。
  * has_min/has_max 为 0 表示该端不限；exclude_nan 只对 float/double 生效；
  * nonzero 排掉值为 0 的条目。读不到的条目会被剔除。
