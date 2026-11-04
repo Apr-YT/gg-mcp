@@ -546,7 +546,87 @@ int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
     return (int64_t)total;
 }
 
-/* ---------- AoB 特征码搜索 ---------- */
+/* ---------- 组合搜索（group search）----------
+ *
+ * "v1;v2;v3::span"：n 个值（同一类型）顺序无关地出现在 span 字节窗口内，
+ * 对应真实世界里"血量/护盾/弹药在对象里并排摆放"。这是 GG 的招牌功能，
+ * 也是 AI 用多次区间搜索近似不出来的（三次搜索各自几万候选，
+ * 无法表达"它们挨着"这个约束）。
+ *
+ * 语义与实现要点：
+ * - 锚点 = v1：结果集存的是 **v1 的地址**，refine/undo 全部按 v1 工作
+ *   （GG 工作流：值变了 → refine 收缩；锚点语义让这条链路直接可用）。
+ * - 窗口验证：对每个锚点候选 addr，读 [addr-span, addr+span+sz)，
+ *   其余值各自找一个与锚点同对齐（x ≡ span mod sz）且未被占用的位置。
+ *   "与锚点同对齐"是因为同一结构的字段按类型宽度对齐排放，
+ *   顺带把窗口内检查次数压到 2*span/sz+1 个而不是逐字节。
+ * - 重复值（"5;5;3::20"）靠位置占用保证对应不同槽位，不许一个位置
+ *   同时认领两个值。
+ * - exact_vals 是 addrs 的并行数组，压缩时必须同步。 */
+int64_t search_group(gg_driver_t *d, pid_t pid, gg_results_t *r,
+                     const uint64_t *vals, size_t nvals, int vtype,
+                     uint64_t span, int region_type) {
+    int sz = vt_size(vtype);
+    if (sz <= 0 || !vals || nvals < 2 || nvals > GG_GROUP_MAX) return -1;
+    if (span < (uint64_t)sz || span > GG_GROUP_SPAN_MAX) return -1;
+
+    /* 锚点搜索复用 search_exact（含结果集元数据） */
+    int64_t total = search_exact(d, pid, r, vtype, vals[0], region_type);
+    if (total <= 0) return total;
+
+    uint8_t pats[GG_GROUP_MAX][8];
+    for (size_t i = 0; i < nvals; i++) encode_value(vtype, vals[i], pats[i]);
+
+    /* 窗口 = 锚点前后各 span 字节。2*span+sz <= 8KB+8B，栈外 malloc 一次复用。 */
+    size_t win = (size_t)span * 2 + (size_t)sz;
+    uint8_t *wbuf = malloc(win);
+    if (!wbuf) return -1;   /* 不能把未验证的锚点当组合命中返回 */
+
+    size_t kept = 0;
+    for (size_t i = 0; i < r->count; i++) {
+        uint64_t addr = r->addrs[i];
+        if (addr < span) continue;                  /* 窗口起点下溢，跳过 */
+        ssize_t got = driver_read(d, pid, addr - span, wbuf, win);
+        if (got < (ssize_t)win) continue;           /* 窗口跨不可读页 */
+
+        /* 位置占用表（窗口内偏移）。锚点在偏移 span 处，认领 vals[0]。 */
+        size_t used[GG_GROUP_MAX];
+        size_t nused = 0;
+        used[nused++] = (size_t)span;
+        int ok = 1;
+        for (size_t j = 1; j < nvals && ok; j++) {
+            int found = 0;
+            /* 与锚点同对齐：x = span + k*sz, k ∈ [-span/sz, span/sz] */
+            for (int64_t k = -(int64_t)(span / (uint64_t)sz);
+                 k <= (int64_t)(span / (uint64_t)sz); k++) {
+                int64_t x = (int64_t)span + k * sz;
+                if (x < 0 || x + sz > (int64_t)win) continue;
+                int occupied = 0;
+                for (size_t u = 0; u < nused; u++)
+                    if (used[u] == (size_t)x) { occupied = 1; break; }
+                if (occupied) continue;
+                if (!memcmp(wbuf + x, pats[j], (size_t)sz)) {
+                    used[nused++] = (size_t)x;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) ok = 0;
+        }
+        if (ok) {
+            /* 原地压缩，exact_vals 是并行数组必须同步 */
+            r->addrs[kept] = addr;
+            if (r->exact_vals) r->exact_vals[kept] = r->exact_vals[i];
+            kept++;
+        }
+    }
+    r->count = kept;
+    free(wbuf);
+    log_msg("group: %zu/%lld anchors kept (span=%llu, nvals=%zu)",
+            kept, (long long)total,
+            (unsigned long long)span, nvals);
+    return (int64_t)kept;
+}
 
 /* 解析 hex pattern: 支持 "48 65 4C 4C" / "48654C4C"（空格/逗号可选）。返回字节数; -1 解析失败。 */
 static inline int hexval(int c) {

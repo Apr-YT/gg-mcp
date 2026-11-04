@@ -49,11 +49,60 @@ void h_search(int fd, uint32_t seq, cJSON *p) {
     int region = parse_region(p, REGION_ANONYMOUS);
     if (type < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "invalid " VT_HINT); return; }
     if (region < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "invalid " REGION_HINT); return; }
-    char vbuf[64];
+    char vbuf[512];   /* 组合搜索 "v1;...;v8::span" 最长 8 个 qword hex，64 不够 */
     const char *vs = j_scalar_str(cJSON_GetObjectItem(p, "value"), vbuf, sizeof(vbuf));
     int64_t found = 0;
 
-    if (type == VT_BYTES) {
+    /* 组合搜索 "v1;v2;v3::span"：value 含 ';' 时走 group（语义见 search.c）。
+     * 解析在这里做：错误（语法/类型/span）能给出准确 BAD_REQUEST，
+     * 而不是吞成 search_group 的 -1。 */
+    if (type != VT_BYTES && vs && strchr(vs, ';')) {
+        uint64_t vals[GG_GROUP_MAX];
+        size_t nvals = 0;
+        uint64_t span = 256;          /* 缺省窗口：UI 面板字段通常很紧 */
+        char gbuf[512];
+        if (strlen(vs) >= sizeof(gbuf)) {
+            send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "group pattern too long");
+            return;
+        }
+        strcpy(gbuf, vs);
+        /* 拆 span："...::512" */
+        char *dcolon = strstr(gbuf, "::");
+        if (dcolon) {
+            *dcolon = '\0';
+            char *end = NULL;
+            span = strtoull(dcolon + 2, &end, 0);
+            if (!end || *end || span == 0 || span > GG_GROUP_SPAN_MAX) {
+                send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST,
+                         "bad span after '::' (1..4096)");
+                return;
+            }
+        }
+        char *save = NULL;   /* strtok_r：多连接并发跑 h_search，strtok 全局态会互踩 */
+        for (char *tok = strtok_r(gbuf, ";", &save); tok; tok = strtok_r(NULL, ";", &save)) {
+            if (nvals >= GG_GROUP_MAX) {
+                send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST,
+                         "too many group values (max 8)");
+                return;
+            }
+            int ok = 0;
+            vals[nvals] = parse_value_str(type, tok, &ok);
+            if (!ok) {
+                send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST,
+                         "bad group value");
+                return;
+            }
+            nvals++;
+        }
+        if (nvals < 2) {
+            send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST,
+                     "group search needs at least 2 values (v1;v2;...)");
+            return;
+        }
+        found = search_group(&g_eng.drv, g_eng.session_pid, &g_eng.results,
+                             vals, nvals, type, span, region);
+        if (found < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_INTERNAL, "group search failed"); return; }
+    } else if (type == VT_BYTES) {
         uint8_t pat[512], mask[512];
         int plen;
         /* encoding：字符串搜索模式。value 是原始文本（玩家名/道具名），

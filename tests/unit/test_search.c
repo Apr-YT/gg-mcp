@@ -414,6 +414,73 @@ int main(void) {
         results_clear(&r);
     }
 
+    /* === 12) 组合搜索（group search）：顺序无关 + 位置占用 + span 边界 === */
+    mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + 0x10000);
+    {
+        uint64_t base = TEST_MEM_BASE + 0x1000;
+        /* 布局: [+0x1000]=100 [+0x1004]=200 [+0x1008]=300 [+0x100C]=100
+         *        [+0x2000]=100 (孤立锚点，组不齐，必须被剔除) */
+        mem_write_u32(base,        100u);
+        mem_write_u32(base + 0x4,  200u);
+        mem_write_u32(base + 0x8,  300u);
+        mem_write_u32(base + 0xC,  100u);
+        mem_write_u32(base + 0x1000, 100u);
+
+        uint64_t vals[8];
+        results_init(&r, 0);
+
+        /* 顺序无关：锚点 200，窗口里 100/300 在锚点两侧 */
+        vals[0] = 200; vals[1] = 100; vals[2] = 300;
+        int64_t n = search_group(NULL, 0, &r, vals, 3, VT_DWORD, 16, 0);
+        check(n == 1 && results_has(&r, base + 0x4),
+              "12) 顺序无关: 锚点 200 命中, 窗口含两侧值");
+        /* refine 链路可用：结果集元数据继承锚点搜索 */
+        check(r.exact_vt == VT_DWORD && r.exact_vals_valid == 1,
+              "12) 锚点元数据: refine 可直接收缩");
+        results_clear(&r);
+
+        /* 重复值占用: "100;100::8" 命中（+0x1000 与 +0x100C 距 12 > 8，但
+         * 窗口是锚点两侧各 span —— +0x100C 距锚点 12 ≤ span? span=8 不命中，
+         * span=16 命中）。这条验证重复值必须占不同位置。
+         * 注意多锚点互相命中：span=16 时 +0x1000 与 +0x100C 互为对方的
+         * 第二个 100，两个锚点都命中；+0x2000 孤立，必须被剔除。 */
+        vals[0] = 100; vals[1] = 100;
+        results_init(&r, 0);
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 8, 0);
+        check(n == 0, "12) 重复值 span=8: 两个 100 距 12 > 8 不命中");
+        results_clear(&r);
+        results_init(&r, 0);
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 16, 0);
+        check(n == 2 && results_has(&r, base) && results_has(&r, base + 0xC) &&
+              !results_has(&r, base + 0x1000),
+              "12) 重复值 span=16: 两个 100 互认命中, 孤立锚点剔除");
+        results_clear(&r);
+
+        /* span 边界: vals={100,300}。+0x100C 锚点看 +0x1008 的 300 距 4 →
+         * span=4 命中；base 锚点看 +0x1008 距 8 → span=8 命中。 */
+        vals[0] = 100; vals[1] = 300;
+        results_init(&r, 0);
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 4, 0);
+        check(n == 1 && results_has(&r, base + 0xC) && !results_has(&r, base),
+              "12) span=4: 只有距 4 的锚点命中");
+        results_clear(&r);
+        results_init(&r, 0);
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 8, 0);
+        check(n == 2 && results_has(&r, base) && results_has(&r, base + 0xC),
+              "12) span=8: 两个锚点都在边界内命中");
+        results_clear(&r);
+
+        /* 参数防御: nvals<2 / span=0 / 超上限 */
+        results_init(&r, 0);
+        n = search_group(NULL, 0, &r, vals, 1, VT_DWORD, 16, 0);
+        check(n == -1, "12) nvals<2 拒绝");
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 0, 0);
+        check(n == -1, "12) span=0 拒绝");
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 99999, 0);
+        check(n == -1, "12) span 超上限拒绝");
+        results_clear(&r);
+    }
+
     printf(fails ? "\n== FAILED: %d ==\n" : "\n== ALL PASS ==\n", fails);
     return fails ? 1 : 0;
 }

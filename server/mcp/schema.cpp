@@ -62,7 +62,10 @@ static const std::vector<ToolDef>& build() {
              "type=bytes 时 value 为 hex 字节序列（AoB 特征码，如 \"48 65 4C 4C\"）。"
              "字符串搜索：传 encoding（utf-8/utf-16）+ type=bytes，value 为原始文本"
              "（玩家名/道具名），设备端转字节扫描 —— 搜完整词默认带终止符，"
-             "substring=true 搜子串",
+             "substring=true 搜子串。"
+             "组合搜索：value=\"v1;v2;v3::span\"（如 \"100;80;30::32\"），找一组"
+             "顺序无关地挤在 span 字节内的值（血量/护盾/弹药并排摆放的招牌场景）；"
+             "结果集存第一个值的地址，refine 照常收缩。span 缺省 256、上限 4096",
              json{
                  {"value", prop("string", "要搜索的值（如 \"100\"、\"0x64\"、\"3.14\"；type=bytes 时为 hex 序列如 \"48 65 4C 4C\"）")},
                  {"type", prop("string", "值类型", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\",\"bytes\"]")},

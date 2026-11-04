@@ -14,6 +14,8 @@ extern "C" {
 
 #define GG_RESULT_CAP_DEFAULT    100000u   /* 结果上限（可配） */
 #define GG_FUZZY_MAX_BYTES       (256ull << 20)  /* 模糊快照内存上限 256MB */
+#define GG_GROUP_MAX             8               /* 组合搜索最多 8 个值 */
+#define GG_GROUP_SPAN_MAX        4096            /* 组合搜索窗口上限（字节） */
 #define GG_SEARCH_CHUNK          (256u << 10)    /* 搜索分块 256KB */
 /* 模糊 refine 可回退步数。每级占「元素数/8」字节（256MB 区 = 8.4MB/级），
  * 所以不设太大；3 步足够覆盖"搜错了退回去换 op 再试"。
@@ -99,6 +101,11 @@ void results_clear(gg_results_t *r);
  * 返回找到数量；-1 出错。region_type ∈ gg_region。 */
 int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
                      int vtype, uint64_t value, int region_type);
+/* 组合搜索 "v1;v2;v3::span"：n 个值顺序无关地出现在 span 字节窗口内，
+ * 结果集存锚点 v1 的地址。见 search.c 函数头注释。 */
+int64_t search_group(gg_driver_t *d, pid_t pid, gg_results_t *r,
+                     const uint64_t *vals, size_t nvals, int vtype,
+                     uint64_t span, int region_type);
 
 /* 区间搜索：min <= value <= max（float/double 按 double 解释）。 */
 /* aligned: 1=只扫自然对齐位置（默认，避免 8 倍冗余命中），0=逐字节。 */
