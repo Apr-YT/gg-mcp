@@ -1791,6 +1791,7 @@ size_t pointer_scan(gg_driver_t *d, pid_t pid, const uint64_t *targets, size_t n
                 if (hit) {
                     out[hits].container = addr + i;
                     out[hits].target = t;
+                    out[hits].value = v;
                     out[hits].ptype = vtype;
                     hits++;
                     if (hits >= cap) break;
@@ -1805,4 +1806,109 @@ size_t pointer_scan(gg_driver_t *d, pid_t pid, const uint64_t *targets, size_t n
     free(sorted);
     free(regs);
     return hits;
+}
+
+/* ---------- 多级指针链 ---------- */
+
+/* 每级候选上限。pointer_scan 的 cap 太大会让"每级都爆满"，后续级的
+ * 目标集合失真（几万个地址一起当 target，lookback 会把整片堆吸进来）；
+ * 太小又会截断真链。2000 条 × 6 级 ≈ 400KB，可接受。 */
+#define GG_CHAIN_LEVEL_CAP 2000
+
+typedef struct {
+    gg_pointer_hit_t *hits;      /* 已按 container 升序（bsearch 反查用） */
+    uint64_t         *containers;/* 去重后的 container 列表（下一级的目标集） */
+    size_t            n;         /* hits 条数（bsearch 的长度，不能用去重后的数） */
+    size_t            n_cont;
+} chain_level_t;
+
+static int cmp_hit_container(const void *a, const void *b) {
+    uint64_t x = ((const gg_pointer_hit_t *)a)->container;
+    uint64_t y = ((const gg_pointer_hit_t *)b)->container;
+    return (x > y) - (x < y);
+}
+
+static int in_anchors(uint64_t a, const gg_map_region_t *an, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (a >= an[i].start && a < an[i].end) return 1;
+    return 0;
+}
+
+size_t pointer_chain_scan(gg_driver_t *d, pid_t pid, uint64_t target,
+                          int vtype, int max_depth, uint64_t lookback,
+                          const gg_map_region_t *anchors, size_t nanchors,
+                          gg_pointer_chain_t *out, size_t cap) {
+    if (vtype != VT_DWORD && vtype != VT_QWORD) return 0;
+    if (target == 0 || cap == 0) return 0;
+    if (max_depth < 1) max_depth = 1;
+    if (max_depth > GG_CHAIN_MAX_DEPTH) max_depth = GG_CHAIN_MAX_DEPTH;
+
+    chain_level_t lv[GG_CHAIN_MAX_DEPTH];
+    memset(lv, 0, sizeof(lv));
+    size_t nchain = 0;
+    uint64_t solo = target;      /* 第 1 级只有单目标 */
+
+    for (int L = 0; L < max_depth && nchain < cap; L++) {
+        gg_pointer_hit_t *hits = malloc(GG_CHAIN_LEVEL_CAP * sizeof(*hits));
+        if (!hits) break;
+        const uint64_t *tg = (L == 0) ? &solo : lv[L - 1].containers;
+        size_t nt = (L == 0) ? 1 : lv[L - 1].n_cont;
+        size_t n = pointer_scan(d, pid, tg, nt, vtype, lookback, 1,
+                                hits, GG_CHAIN_LEVEL_CAP);
+        if (n == 0) { free(hits); break; }
+        lv[L].hits = hits;
+        lv[L].n = n;
+        qsort(hits, n, sizeof(*hits), cmp_hit_container);
+
+        /* 本级命中的 container 即下一级要回溯的目标；同时按升序去重
+         * （frame 里同一 container 只会有一条命中，去重是防御性的） */
+        lv[L].containers = malloc(n * sizeof(uint64_t));
+        if (!lv[L].containers) break;
+        size_t cn = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (cn == 0 || lv[L].containers[cn - 1] != hits[i].container)
+                lv[L].containers[cn++] = hits[i].container;
+        }
+        lv[L].n_cont = cn;
+
+        /* 落在锚点段内的命中 = 一条完整链的浅端。沿 target 反查回原始目标 */
+        for (size_t i = 0; i < n && nchain < cap; i++) {
+            if (nanchors > 0 && !in_anchors(hits[i].container, anchors, nanchors))
+                continue;
+            gg_pointer_chain_t ch;
+            memset(&ch, 0, sizeof(ch));
+            ch.depth = (size_t)L + 1;
+            ch.nodes[0].addr  = hits[i].container;
+            ch.nodes[0].value = hits[i].value;
+
+            /* 从浅往深走：本级 hit 的 target 指向上一级的 container */
+            uint64_t want = hits[i].target;
+            int ok = 1;
+            for (int k = L - 1; k >= 0; k--) {
+                gg_pointer_hit_t key;
+                memset(&key, 0, sizeof(key));
+                key.container = want;
+                gg_pointer_hit_t *f = bsearch(&key, lv[k].hits, lv[k].n,
+                                              sizeof(*f), cmp_hit_container);
+                if (!f) { ok = 0; break; }       /* 断链：该级被 cap 截断了 */
+                size_t pos = (size_t)(L - k);
+                ch.nodes[pos].addr  = f->container;
+                ch.nodes[pos].value = f->value;
+                ch.nodes[pos - 1].offset =
+                    (int64_t)(ch.nodes[pos].addr - ch.nodes[pos - 1].value);
+                want = f->target;
+            }
+            if (!ok) continue;
+            /* 最深层：它读到的值（或区间命中的 target）离目标多远 */
+            ch.nodes[ch.depth - 1].offset =
+                (int64_t)(target - ch.nodes[ch.depth - 1].value);
+            out[nchain++] = ch;
+        }
+    }
+
+    for (int i = 0; i < GG_CHAIN_MAX_DEPTH; i++) {
+        free(lv[i].hits);
+        free(lv[i].containers);
+    }
+    return nchain;
 }

@@ -162,6 +162,7 @@ enum gg_cmd {
      * fuzzy 位图/快照（可达 256MB）不落盘 —— 物化成地址后保存。 */
     GGCMD_RESULTS_SAVE,
     GGCMD_RESULTS_LOAD,
+    GGCMD_POINTER_PATH,    /* 多级指针链反向搜索：目标 → 模块锚点（CE pointer scan） */
     GGCMD_MAX
 };
 

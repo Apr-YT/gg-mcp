@@ -822,6 +822,31 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    - **`aligned` 步进**（BACKLOG 12）：早已实现，状态补记。
    - 详见 `docs/engineering/BACKLOG.md` 对应条目的状态段。
 
+45. **`gg_pointer_path`：多级指针链反向搜索（2026-11-04，真机未验）**
+
+   补齐指针工作流的最后一环。现有两个工具各管一半：`gg_pointer_scan` 只找
+   **一级**（谁指向它），`gg_pointer_chain` 是**反方向**（按你给的位置逐级
+   解引用，用于验证已知链）。缺的是"给目标，自动搜出整条到模块的路"——
+   就是 CE 的 pointer scan。
+
+   - `pointer_chain_scan`（search.c）：逐级回溯，每级一次 `pointer_scan`；
+     命中 container 落在锚点段即产出一条链，沿 `hit.target` 反查回目标。
+   - **锚点 = 路径非空的映射段**（文件映射的 .so/dex/apk 地址同版本稳定）；
+     匿名段/[heap]/[stack] 不能当链终点，否则重启即失效。
+   - 默认 `lookback=0x1000`：链上每级基本都是"对象首址 + 成员偏移"，
+     精确匹配必然断链。`lookback=0` 是给"纯数组指针链"用的。
+   - 输出给 `expr`（`[[0x7f..+0x18]+0x24]` 这种 CE 写法）+ `module` +
+     `module_offset`，便于换存档/重开游戏后重算。
+
+   **已知限制（别当 bug 报）**：
+   - 实现是逐级回溯，**depth 级 = depth 次全内存扫描**（微信量级单级约 10s）。
+     没有 ptrmap 一次性建图——桌面 CE 那样做在移动端要吃 1GB+ 内存。
+     depth 上限 6 是性能上限，不是能力上限。
+   - 每级候选硬上限 2000（`GG_CHAIN_LEVEL_CAP`）。撑满时该级可能被截断，
+     表现为"某些链找不到"，会返回 `warning` 字段——此时缩小 `module` 或降 lookback。
+   - lookback 会产生噪声链（值恰好落在某目标附近的整数），深度越大越多。
+     用 `module` 过滤 + 人工核 `expr` 重读一次值确认。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
@@ -842,7 +867,9 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-11-03（第 43 条 anon_ring 审查 + 第 44 条 BACKLOG 5/6/12 收口）。
+本文件最后校准：2026-11-04（新增第 45 条 `gg_pointer_path` 多级指针链反向搜索，
+工具数 54→55）。
+上一条校准：2026-11-03（第 43 条 anon_ring 审查 + 第 44 条 BACKLOG 5/6/12 收口）。
 上一条校准：2026-10-23 19:55（HEAD `8bddaf5`）：项目结构补 `ko/` 与 `build/` 说明、
 结构护栏补到 6 道、main.c 拆分收尾（683 行）、清掉已删除的 GG 核心注入链路表述、
 itest 状态更新、第 14/16 条矛盾合并。同日新增 42。

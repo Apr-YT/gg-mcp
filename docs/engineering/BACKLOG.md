@@ -12,6 +12,15 @@
 
 ## 已完成（近期）
 
+### 多级指针链反向搜索 `gg_pointer_path`（2026-11-04）
+
+指针工作流补齐最后一环：`gg_pointer_scan` 只找一级、`gg_pointer_chain` 是反方向
+（验证已知链），缺"给目标自动搜出到模块的整条链"。`pointer_chain_scan` 逐级回溯
+≤6 级，锚点限文件映射段（路径非空），输出 CE 风格 `expr` + 模块内偏移。
+单测用例 15（11 断言）。**真机未验证**；已知限制见
+[POINTER_PATH_20261104.md](POINTER_PATH_20261104.md)（逐级扫描慢、每级 2000 上限、
+lookback 噪声）。
+
 ### 字符串搜索 encoding 参数（2026-11-03）
 
 `gg_search` 传 `encoding`（utf-8/utf-16）+ `type=bytes`：value 为原始文本

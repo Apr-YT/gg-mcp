@@ -36,6 +36,10 @@ static void mem_write_u32(uint64_t addr, uint32_t v) {
     uint64_t rel = addr - TEST_MEM_BASE;
     memcpy(g_mem + rel, &v, 4);
 }
+static void mem_write_u64(uint64_t addr, uint64_t v) {
+    uint64_t rel = addr - TEST_MEM_BASE;
+    memcpy(g_mem + rel, &v, 8);
+}
 /* 标记相对偏移 off(须页对齐) 所在页为不可读 */
 static void fault_page_at(uint64_t off) { g_fault[off >> 12] = 1; }
 
@@ -575,6 +579,78 @@ int main(void) {
         check(gg_safe_result_name("a/b") == 0, "14) 斜杠拒绝");
         check(gg_safe_result_name("") == 0, "14) 空名拒绝");
         check(gg_safe_result_name("has space") == 0, "14) 空格拒绝");
+    }
+
+    {
+        /* === 15) 多级指针链反向搜索（gg_pointer_path） ===
+         *
+         * 造一条三级链：
+         *   [M+0x0100] = M+0x2200      ← 锚点（在 libtest.so 段内）
+         *   [M+0x2200] = M+0x2300      ← obj1
+         *   [M+0x2318] = M+0x3000      ← obj2 + 0x18
+         *   [M+0x3024] = 999           ← 目标字段（obj3 + 0x24）
+         *
+         * 期望 nodes[0]=M+0x0100(浅) → nodes[1]=M+0x2200 → nodes[2]=M+0x2318，
+         * offsets: 0 / 0x18 / 0x24。 */
+        mem_reset(); g_nregions = 0;
+        region_add(TEST_MEM_BASE, TEST_MEM_BASE + TEST_MEM_SZ);
+        mem_write_u64(TEST_MEM_BASE + 0x0100, TEST_MEM_BASE + 0x2200);
+        mem_write_u64(TEST_MEM_BASE + 0x2200, TEST_MEM_BASE + 0x2300);
+        mem_write_u64(TEST_MEM_BASE + 0x2318, TEST_MEM_BASE + 0x3000);
+        mem_write_u32(TEST_MEM_BASE + 0x3024, 999);
+
+        gg_map_region_t anchor;
+        memset(&anchor, 0, sizeof(anchor));
+        anchor.start = TEST_MEM_BASE;
+        anchor.end   = TEST_MEM_BASE + 0x1000;
+        snprintf(anchor.perms, sizeof(anchor.perms), "rw-p");
+        snprintf(anchor.path, sizeof(anchor.path), "libtest.so");
+
+        gg_pointer_chain_t ch[32];
+        size_t nc = pointer_chain_scan(NULL, 0, TEST_MEM_BASE + 0x3024,
+                                       VT_QWORD, 4, 0x400, &anchor, 1, ch, 32);
+        int found3 = 0;
+        for (size_t i = 0; i < nc; i++) {
+            if (ch[i].depth != 3) continue;
+            if (ch[i].nodes[0].addr != TEST_MEM_BASE + 0x0100) continue;
+            if (ch[i].nodes[1].addr != TEST_MEM_BASE + 0x2200) continue;
+            if (ch[i].nodes[2].addr != TEST_MEM_BASE + 0x2318) continue;
+            found3 = 1;
+            check(ch[i].nodes[0].offset == 0,     "15) 链 offset[0] = 0（obj1 首址）");
+            check(ch[i].nodes[1].offset == 0x18,  "15) 链 offset[1] = 0x18");
+            check(ch[i].nodes[2].offset == 0x24,  "15) 链 offset[2] = 0x24（字段偏移）");
+            check(ch[i].nodes[2].value == TEST_MEM_BASE + 0x3000, "15) 最深层 value = obj3 首址");
+            break;
+        }
+        check(found3, "15) 三级链命中（锚点 → obj1 → obj2 → 字段）");
+
+        /* 锚点段不含 M+0x0100：链应被过滤掉（同一条链，锚点条件不满足） */
+        anchor.start = TEST_MEM_BASE + 0x4000;
+        anchor.end   = TEST_MEM_BASE + 0x5000;
+        nc = pointer_chain_scan(NULL, 0, TEST_MEM_BASE + 0x3024,
+                                VT_QWORD, 4, 0x400, &anchor, 1, ch, 32);
+        check(nc == 0, "15b) 锚点段不覆盖链首 → 0 条");
+
+        /* 不给锚点（nanchors=0）时不过滤：至少能出一条（最深、仅 1 级也可） */
+        nc = pointer_chain_scan(NULL, 0, TEST_MEM_BASE + 0x3024,
+                                VT_QWORD, 4, 0x400, NULL, 0, ch, 32);
+        int has_any = 0;
+        for (size_t i = 0; i < nc; i++) if (ch[i].nodes[0].addr == TEST_MEM_BASE + 0x2318) has_any = 1;
+        check(nc > 0 && has_any, "15c) 无锚点过滤时输出链（含最深一级 M+0x2318）");
+
+        /* lookback=0（精确）：每级都是偏移指向，链应当断在第一级 */
+        nc = pointer_chain_scan(NULL, 0, TEST_MEM_BASE + 0x3024,
+                                VT_QWORD, 4, 0, &anchor, 1, ch, 32);
+        check(nc == 0, "15d) lookback=0 精确模式：偏移链断掉 → 0 条");
+
+        /* 参数防御：dw 之外的宽度、depth=0、target=0 都返回 0 */
+        check(pointer_chain_scan(NULL, 0, TEST_MEM_BASE + 0x3024, VT_BYTE, 3, 0x400, NULL, 0, ch, 32) == 0,
+              "15e) 非 dword/qword 宽度拒绝");
+        check(pointer_chain_scan(NULL, 0, 0, VT_QWORD, 3, 0x400, NULL, 0, ch, 32) == 0,
+              "15f) target=0 拒绝");
+        nc = pointer_chain_scan(NULL, 0, TEST_MEM_BASE + 0x3024, VT_QWORD, 1, 0x400, NULL, 0, ch, 32);
+        check(nc == 1 && ch[0].depth == 1 && ch[0].nodes[0].addr == TEST_MEM_BASE + 0x2318,
+              "15g) depth=1 只回溯一级");
     }
 
     printf(fails ? "\n== FAILED: %d ==\n" : "\n== ALL PASS ==\n", fails);

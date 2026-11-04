@@ -336,6 +336,148 @@ void h_pointer_scan(int fd, uint32_t seq, cJSON *p) {
     cJSON_Delete(r);
 }
 
+/* 多级指针链：从 addr 逐级回溯到模块映射段。
+ *
+ * 为什么单级 pointer_scan 不够：它只回答"谁指向这个地址"。而游戏里的
+ * 字段在堆对象里，堆地址每次启动都变 —— 只有从模块（基址稳定）出发、
+ * 每级都是固定偏移的那条链才有复用价值。这就是 CE 的 pointer scan。
+ *
+ * 锚点取"路径非空的映射段"：文件映射段（.so / dex / apk）的地址在
+ * 同一版本上每次启动都一样；匿名段、[heap]、[stack] 都不稳定，不能当链终点。 */
+void h_pointer_path(int fd, uint32_t seq, cJSON *p) {
+    if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_POINTER_PATH, seq, GGERR_NO_SESSION, "no session"); return; }
+
+    uint64_t target = 0;
+    cJSON *ja = cJSON_GetObjectItem(p, "addr");
+    if (!ja || !j_addr_u64(ja, &target) || target == 0) {
+        send_err(fd, GGCMD_POINTER_PATH, seq, GGERR_BAD_REQUEST,
+                 "addr required (hex string like 0x7f...)");
+        return;
+    }
+    int type = parse_vt(p, VT_QWORD);
+    if (type != VT_DWORD && type != VT_QWORD) {
+        send_err(fd, GGCMD_POINTER_PATH, seq, GGERR_BAD_REQUEST, "type must be dword or qword");
+        return;
+    }
+    /* depth 上限 GG_CHAIN_MAX_DEPTH：每级一次全内存扫描，6 级已是真机能忍的极限 */
+    int depth = 3;
+    cJSON *jd = cJSON_GetObjectItem(p, "depth");
+    if (cJSON_IsNumber(jd)) depth = jd->valueint;
+    if (depth < 1) depth = 1;
+    if (depth > GG_CHAIN_MAX_DEPTH) depth = GG_CHAIN_MAX_DEPTH;
+
+    /* 默认 lookback 0x1000：链上每级几乎都是"对象首址 + 成员偏移"，
+     * 精确匹配必然断链。上限 0x10000 —— 再大整片堆都被吸进来，每级候选
+     * 直接爆 2000 上限，结果全是噪声。 */
+    uint64_t lookback = 0x1000;
+    cJSON *jl = cJSON_GetObjectItem(p, "lookback");
+    if (cJSON_IsNumber(jl)) {
+        if (jl->valuedouble <= 0) lookback = 0;
+        else lookback = (uint64_t)jl->valuedouble;
+        if (lookback > 0x10000) lookback = 0x10000;
+    }
+
+    size_t cap = 200;
+    cJSON *jc = cJSON_GetObjectItem(p, "cap");
+    if (cJSON_IsNumber(jc) && jc->valuedouble > 0) cap = (size_t)jc->valuedouble;
+    if (cap > 2000) cap = 2000;
+
+    const char *modfilt = NULL;
+    cJSON *jm = cJSON_GetObjectItem(p, "module");
+    if (cJSON_IsString(jm) && jm->valuestring[0]) modfilt = jm->valuestring;
+
+    size_t nmaps = 0;
+    gg_map_region_t *maps = process_maps(g_eng.session_pid, &nmaps);
+    if (!maps) { send_err(fd, GGCMD_POINTER_PATH, seq, GGERR_INTERNAL, "maps unavailable"); return; }
+
+    gg_map_region_t *anchors = malloc((nmaps ? nmaps : 1) * sizeof(*anchors));
+    if (!anchors) { free(maps); send_err(fd, GGCMD_POINTER_PATH, seq, GGERR_INTERNAL, "oom"); return; }
+    size_t na = 0;
+    for (size_t i = 0; i < nmaps; i++) {
+        if (!maps[i].path[0]) continue;                       /* 匿名段不是锚点 */
+        if (modfilt && !strstr(maps[i].path, modfilt)) continue;
+        anchors[na++] = maps[i];
+    }
+    if (na == 0) {
+        free(anchors); free(maps);
+        send_err(fd, GGCMD_POINTER_PATH, seq, GGERR_BAD_REQUEST,
+                 modfilt ? "module not found in maps (check the name)" : "no file-backed mappings");
+        return;
+    }
+
+    gg_pointer_chain_t *chains = malloc(cap * sizeof(*chains));
+    if (!chains) { free(anchors); free(maps); send_err(fd, GGCMD_POINTER_PATH, seq, GGERR_INTERNAL, "oom"); return; }
+
+    size_t n = pointer_chain_scan(&g_eng.drv, g_eng.session_pid, target, type,
+                                  depth, lookback, anchors, na, chains, cap);
+    free(anchors);
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(r, "chains");
+    char b[32];
+    for (size_t i = 0; i < n; i++) {
+        const gg_pointer_chain_t *ch = &chains[i];
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "depth", (double)ch->depth);
+
+        /* 锚点落在哪个模块 —— 决定这条链在重启后是否还成立。
+         * module_offset 是"锚点相对模块段起点"的偏移，同版本重开不变。 */
+        const char *mod = "";
+        uint64_t modstart = 0;
+        for (size_t k = 0; k < nmaps; k++) {
+            if (maps[k].path[0] && ch->nodes[0].addr >= maps[k].start &&
+                ch->nodes[0].addr < maps[k].end) {
+                mod = maps[k].path;
+                modstart = maps[k].start;
+                break;
+            }
+        }
+        cJSON_AddStringToObject(o, "module", mod);
+        snprintf(b, sizeof(b), "0x%llx", (unsigned long long)ch->nodes[0].addr);
+        cJSON_AddStringToObject(o, "anchor", b);
+        snprintf(b, sizeof(b), "0x%llx", (unsigned long long)(ch->nodes[0].addr - modstart));
+        cJSON_AddStringToObject(o, "module_offset", b);
+
+        /* 路径表达式（CE 风格，可直接拿去重算）：
+         *   [[v0+o0]+o1]+o2  —— v0 是锚点处读到的值，ok 是各级偏移 */
+        char expr[512], tbuf[600];
+        snprintf(expr, sizeof(expr), "0x%llx", (unsigned long long)ch->nodes[0].value);
+        for (size_t k = 1; k < ch->depth; k++) {
+            snprintf(tbuf, sizeof(tbuf), "[%s%+lld]", expr, (long long)ch->nodes[k - 1].offset);
+            snprintf(expr, sizeof(expr), "%s", tbuf);
+        }
+        snprintf(tbuf, sizeof(tbuf), "%s%+lld", expr, (long long)ch->nodes[ch->depth - 1].offset);
+        cJSON_AddStringToObject(o, "expr", tbuf);
+
+        cJSON *nodes = cJSON_AddArrayToObject(o, "nodes");
+        for (size_t k = 0; k < ch->depth; k++) {
+            cJSON *nd = cJSON_CreateObject();
+            char a[32], v[32], of[32];
+            snprintf(a, sizeof(a), "0x%llx", (unsigned long long)ch->nodes[k].addr);
+            snprintf(v, sizeof(v), "0x%llx", (unsigned long long)ch->nodes[k].value);
+            snprintf(of, sizeof(of), "%+lld", (long long)ch->nodes[k].offset);
+            cJSON_AddStringToObject(nd, "addr", a);
+            cJSON_AddStringToObject(nd, "value", v);
+            cJSON_AddStringToObject(nd, "offset", of);
+            cJSON_AddItemToArray(nodes, nd);
+        }
+        cJSON_AddItemToArray(arr, o);
+    }
+    cJSON_AddNumberToObject(r, "count", (double)n);
+    cJSON_AddNumberToObject(r, "max_depth", depth);
+    snprintf(b, sizeof(b), "0x%llx", (unsigned long long)lookback);
+    cJSON_AddStringToObject(r, "lookback", b);
+    cJSON_AddNumberToObject(r, "anchors", (double)na);
+    if (n == cap)
+        cJSON_AddStringToObject(r, "warning",
+            "结果被 cap 截断：链可能更多。缩小 module 范围或降低 lookback 再看");
+
+    free(chains);
+    free(maps);
+    send_ok(fd, GGCMD_POINTER_PATH, seq, r);
+    cJSON_Delete(r);
+}
+
 /* watch_hit_json: 把一次硬件断点命中转成 JSON
  * 之前同时被 event_watch_hit（事件广播）和 h_watch poll 调用；
  * 事件系统删除后只剩 poll 一条消费路径，移到 watch 域更合理。 */

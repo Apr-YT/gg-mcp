@@ -357,6 +357,7 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
     case GGCMD_MODULE_BASE:        h_module_base(fd, seq, p); break;
     case GGCMD_CALC_OFFSET:        h_calc_offset(fd, seq, p); break;
     case GGCMD_POINTER_SCAN:       h_pointer_scan(fd, seq, p); break;
+    case GGCMD_POINTER_PATH:       h_pointer_path(fd, seq, p); break;
     case GGCMD_PAUSE:              h_pause_resume(fd, seq, p, 1); break;
     case GGCMD_RESUME:             h_pause_resume(fd, seq, p, 0); break;
     case GGCMD_KERNEL_STATUS:      h_kernel_status(fd, seq, p); break;

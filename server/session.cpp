@@ -978,6 +978,40 @@ json tool_pointer_chain(Session::CallCtx& c, const json& a) {
     c.params["max_depth"] = md;
     return c.send(GGCMD_POINTER_CHAIN);
 }
+json tool_pointer_path(Session::CallCtx& c, const json& a) {
+    if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
+    if (!put_addr_param(a, c.params))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or hex string");
+    if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
+    if (a.contains("depth")) {
+        const json& jd = a["depth"];
+        if (!jd.is_number_integer() || jd.get<long long>() < 1 || jd.get<long long>() > 6)
+            return c.fail(GGERR_BAD_REQUEST, "depth must be an integer 1..6");
+        c.params["depth"] = jd;
+    }
+    if (a.contains("lookback")) {
+        const json& jl = a["lookback"];
+        if (!jl.is_number() || jl.get<double>() < 0 || jl.get<double>() > 0x10000)
+            return c.fail(GGERR_BAD_REQUEST,
+                          "lookback must be 0..0x10000 (default 0x1000)");
+        c.params["lookback"] = jl;
+    }
+    if (a.contains("cap")) {
+        const json& jc = a["cap"];
+        if (!jc.is_number_integer() || jc.get<long long>() < 1 || jc.get<long long>() > 2000)
+            return c.fail(GGERR_BAD_REQUEST, "cap must be an integer 1..2000");
+        c.params["cap"] = jc;
+    }
+    /* module 只是过滤锚点段（strstr 匹配），不校验存在性 —— 存在性由 agentd
+     * 判，那里能拿到真实 maps，能给出"哪些模块在映射里"的准确错误。 */
+    if (a.contains("module")) {
+        const json& jm = a["module"];
+        if (!jm.is_string() || jm.get<std::string>().empty())
+            return c.fail(GGERR_BAD_REQUEST, "module must be a non-empty string");
+        c.params["module"] = jm;
+    }
+    return c.send(GGCMD_POINTER_PATH);
+}
 json tool_resolve_symbol(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
     if (!put_addr_param(a, c.params))
@@ -1232,6 +1266,7 @@ const ToolEntry kTools[] = {
     {"gg_aob_resolve",      tool_aob_resolve,      false},
     {"gg_pointer_scan",     tool_pointer_scan,     false},
     {"gg_pointer_chain",    tool_pointer_chain,    false},
+    {"gg_pointer_path",     tool_pointer_path,     false},
     {"gg_resolve_symbol",   tool_resolve_symbol,   false},
 
     {"gg_pause",            tool_pause,            true},

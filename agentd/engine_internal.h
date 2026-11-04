@@ -217,6 +217,7 @@ void h_watch(int fd, uint32_t seq, cJSON *p);
 void h_module_base(int fd, uint32_t seq, cJSON *p);
 void h_calc_offset(int fd, uint32_t seq, cJSON *p);
 void h_pointer_scan(int fd, uint32_t seq, cJSON *p);
+void h_pointer_path(int fd, uint32_t seq, cJSON *p);
 
 /* watch_hit_json: 把一次断点命中转成 JSON（watch poll 直接用） */
 cJSON *watch_hit_json(const gg_watch_hit_t *h);

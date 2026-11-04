@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <sys/types.h>
 #include "driver.h"
+#include "process.h"          /* gg_map_region_t（指针链的锚点段） */
 #include "../shared/wire_protocol.h"
 
 #ifdef __cplusplus
@@ -209,8 +210,54 @@ size_t results_set_values(gg_driver_t *d, pid_t pid, gg_results_t *r,
 typedef struct gg_pointer_hit {
     uint64_t container;   /* 指针所在地址 */
     uint64_t target;      /* 指针值命中时对应的目标地址（区间模式下是最接近的 A） */
+    uint64_t value;       /* container 处读到的原始指针值（区间模式下 target != value） */
     int      ptype;       /* VT_DWORD / VT_QWORD */
 } gg_pointer_hit_t;
+
+/* ---------- 多级指针链 ----------
+ *
+ * 单级 pointer_scan 只回答"谁指向这个地址"。游戏里的真需求是多级链：
+ *
+ *     模块基址 + 0x10 → 对象地址 → +0x24 → 目标字段
+ *
+ * 堆地址每次进程重启都变，只有从模块出来的那条链（基址稳定 + 固定偏移）
+ * 才可复用。CE 的 pointer scan / GG 的"指针链"都是这个。
+ *
+ * 编址约定：nodes[0] 最浅（离模块最近），nodes[depth-1] 最贴近目标。
+ *   nodes[0].addr    = 模块内的那个指针位置（锚点）
+ *   nodes[0].value   = 下一级对象地址
+ *   nodes[0].offset  = nodes[1].addr - nodes[0].value
+ *   ……
+ *   nodes[depth-1].offset = target_addr - nodes[depth-1].value
+ * 按 CE 写法读出来是：[[[nodes[0].value + nodes[0].offset] + nodes[1].offset] ...]
+ *
+ * 实现是逐级回溯（每级一次全内存扫描），不是 ptrmap 一次性建图：
+ * 内存换时间。6 级 = 6 次扫描，真机微信量级约 6×12s，慢但正确。
+ * 见 docs/engineering/POINTER_CHAIN_20261104.md 的"已知限制"。
+ */
+#define GG_CHAIN_MAX_DEPTH 6
+
+typedef struct gg_chain_node {
+    uint64_t addr;     /* 指针所在地址（本级指针位置） */
+    uint64_t value;    /* 该处读到的指针值 */
+    int64_t  offset;   /* 下一级地址 - value（可负：lookback 命中偏移） */
+} gg_chain_node_t;
+
+typedef struct gg_pointer_chain {
+    size_t          depth;                        /* 链长度（级数） */
+    gg_chain_node_t nodes[GG_CHAIN_MAX_DEPTH];
+} gg_pointer_chain_t;
+
+/* target: 目标地址（通常是结果集里收敛下来的字段地址）
+ * max_depth: 回溯级数上限 1..GG_CHAIN_MAX_DEPTH
+ * lookback: 每级容差（同 pointer_scan 语义），0 = 精确
+ * anchors/nanchors: 允许作为链终点的地址段（通常是"路径非空"的模块段）。
+ *   nanchors==0 时不过滤，输出所有链。
+ * 返回写入 out 的链条数（可能被 cap 截断）。 */
+size_t pointer_chain_scan(gg_driver_t *d, pid_t pid, uint64_t target,
+                          int vtype, int max_depth, uint64_t lookback,
+                          const gg_map_region_t *anchors, size_t nanchors,
+                          gg_pointer_chain_t *out, size_t cap);
 size_t pointer_scan(gg_driver_t *d, pid_t pid, const uint64_t *targets, size_t ntargets,
                     int vtype, uint64_t lookback, int aligned,
                     gg_pointer_hit_t *out, size_t cap);
