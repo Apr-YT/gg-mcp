@@ -28,6 +28,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <uchar.h>
 #include <unistd.h>
 #include <stdarg.h>
 
@@ -55,6 +56,12 @@ static pid_t g_child = -1;
 
 static volatile int g_start = 0;
 static void on_sigusr1(int s) { (void)s; g_start = 1; }
+
+/* 用例 12/13 的靶子：必须落在 itest 模块的文件映射段（.data），
+ * 匿名 mmap 里的值测不了 module 过滤与锚点判定。
+ * volatile 防被优化掉（父进程只取地址/做搜索目标，从不直接读写）。 */
+static volatile uint64_t g_chain_anchor = 0;
+static volatile uint32_t g_mod_marker = 0x5AFE0001u;
 
 static void cleanup(void) {
     if (g_child > 0) {
@@ -98,6 +105,24 @@ int main(void) {
         if (p == MAP_FAILED) _exit(2);
         volatile uint32_t *v = (volatile uint32_t *)((char *)p + 4096);
         *v = 0x12345678u;
+        /* 用例 9-13 的靶子数据。父进程 fork 后 200ms 才开始搜，这里早已写完。
+         * 注意fork 时父进程内存里绝不能出现这些值，否则"唯一命中"断言会被
+         * 父进程侧副本打破 —— 所有魔数只在下面的父进程用例里以字面量出现，
+         * 而 fork 在它们之前。 */
+        memcpy((char *)p + 8192, "gg-findme-ascii", 16);          /* 含 NUL */
+        {
+            const char16_t ws[] = u"GG测试Str";                   /* 7 码元 + NUL */
+            memcpy((char *)p + 8256, ws, sizeof(ws));
+        }
+        {
+            volatile uint32_t *g3 = (volatile uint32_t *)((char *)p + 12288);
+            g3[0] = 0x1111AAAAu; g3[1] = 0x2222BBBBu; g3[2] = 0x3333CCCCu;
+        }
+        *(volatile uint32_t *)((char *)p + 16384) = 0x0D15EA5Eu;  /* refine 靶 */
+        /* 两级指针链：anchor(.data) → mid → target */
+        *(volatile uint64_t *)((char *)p + 20480) = (uint64_t)(uintptr_t)((char *)p + 24576);
+        *(volatile uint64_t *)((char *)p + 24576) = 0x7E57C0DEull;
+        g_chain_anchor = (uint64_t)(uintptr_t)((char *)p + 20480);
         while (!g_start) usleep(10000);       /* 等 SIGUSR1 */
         for (;;) {
             *v = *v + 1u;                     /* 每 50ms 自增 */
@@ -280,6 +305,158 @@ int main(void) {
             CHECK(found, "dump_list finds the entry with correct metadata");
             remove(dpath);
         }
+    }
+
+    /* 9) 字符串搜索：gg_str_to_pattern + search_aob（UTF-8 与 UTF-16LE 两路）。
+     * 断言"恰好 1 次"：这些字符串在子进程匿名段只有 mmap 里那一份
+     * （字面量本体在 itest 的 .rodata 文件映射段，ANONYMOUS 过滤掉）。 */
+    {
+        gg_results_t rs;
+        results_init(&rs, 100000);
+        uint8_t pat[64];
+        int pl = gg_str_to_pattern("gg-findme-ascii", 0, 1, pat, sizeof(pat));
+        CHECK(pl == 16, "str_to_pattern utf-8: 15 chars + NUL");
+        int64_t n = search_aob(&drv, g_child, &rs, pat, NULL, (size_t)pl,
+                               REGION_ANONYMOUS, NULL);
+        CHECK(n == 1, "utf-8 string found exactly once");
+        if (n == 1) {
+            uint8_t vb[16];
+            CHECK(driver_read(&drv, g_child, rs.addrs[0], vb, 16) == 16 &&
+                  memcmp(vb, "gg-findme-ascii", 16) == 0,
+                  "utf-8 hit address reads back the string");
+        }
+        results_clear(&rs);
+
+        results_init(&rs, 100000);
+        pl = gg_str_to_pattern("GG测试Str", 1, 1, pat, sizeof(pat));
+        CHECK(pl == 16, "str_to_pattern utf-16: 7 BMP chars + NUL = 16 bytes");
+        n = search_aob(&drv, g_child, &rs, pat, NULL, (size_t)pl,
+                       REGION_ANONYMOUS, NULL);
+        CHECK(n == 1, "utf-16 string found exactly once");
+        results_clear(&rs);
+    }
+
+    /* 10) 组合搜索：三值共现 + 顺序无关（锚点跟随 vals[0]） */
+    {
+        gg_results_t rs;
+        results_init(&rs, 100000);
+        uint64_t vals[3] = {0x1111AAAAull, 0x2222BBBBull, 0x3333CCCCull};
+        int64_t n = search_group(&drv, g_child, &rs, vals, 3, VT_DWORD, 64,
+                                 REGION_ANONYMOUS, NULL);
+        CHECK(n == 1, "group search finds the trio exactly once");
+        if (n == 1) {
+            uint8_t vb[4];
+            CHECK(driver_read(&drv, g_child, rs.addrs[0], vb, 4) == 4 &&
+                  read_bits(vb, VT_DWORD) == 0x1111AAAAull,
+                  "group anchor address holds vals[0]");
+        }
+        results_clear(&rs);
+
+        /* 顺序打乱：锚点应换到 rev[0] 所在地址（顺序无关的实证） */
+        results_init(&rs, 100000);
+        uint64_t rev[3] = {0x3333CCCCull, 0x2222BBBBull, 0x1111AAAAull};
+        n = search_group(&drv, g_child, &rs, rev, 3, VT_DWORD, 64,
+                         REGION_ANONYMOUS, NULL);
+        CHECK(n == 1, "group search is order-independent");
+        if (n == 1) {
+            uint8_t vb[4];
+            CHECK(driver_read(&drv, g_child, rs.addrs[0], vb, 4) == 4 &&
+                  read_bits(vb, VT_DWORD) == 0x3333CCCCull,
+                  "reversed order anchors at rev[0]");
+        }
+        results_clear(&rs);
+    }
+
+    /* 11) refine 增量比较：Δ 由父进程 driver_write 精确控制（不受自增时序影响）。
+     * by=25 恰好保留；紧接 by=24 必须清零 —— 增量不是"大致变大"而是精确匹配。 */
+    {
+        gg_results_t rs;
+        results_init(&rs, 100000);
+        int64_t n = search_exact(&drv, g_child, &rs, VT_DWORD, 0x0D15EA5Eull,
+                                 REGION_ANONYMOUS, NULL);
+        CHECK(n == 1, "refine target found exactly once");
+        if (n == 1) {
+            uint64_t a11 = rs.addrs[0];
+            uint8_t wb[8];
+            encode_value_local(VT_DWORD, 0x0D15EA5Eull + 25, wb);
+            CHECK(driver_write(&drv, g_child, a11, wb, 4) == 4,
+                  "bump target value by 25");
+            int64_t rem = search_refine_exact_by(&drv, g_child, &rs,
+                                                 REFINE_INCREASED_BY, 25);
+            CHECK(rem == 1, "increased_by 25 keeps exactly the bumped one");
+            rem = search_refine_exact_by(&drv, g_child, &rs,
+                                         REFINE_INCREASED_BY, 24);
+            CHECK(rem == 0, "increased_by 24 (wrong delta) clears all");
+        }
+        results_clear(&rs);
+    }
+
+    /* 12) module 限定：g_mod_marker 在 itest 的 .data（文件映射段，path 含 "itest"）。
+     * 正向：module="itest" 命中；反向：不存在模块 → 严格 0；对照：模块过滤只会收窄。 */
+    {
+        CHECK(g_mod_marker == 0x5AFE0001u, "mod marker alive in .data");
+        gg_results_t rs;
+        results_init(&rs, 100000);
+        int64_t n_all = search_exact(&drv, g_child, &rs, VT_DWORD, 0x5AFE0001ull,
+                                     REGION_ALL, NULL);
+        results_clear(&rs);
+        results_init(&rs, 100000);
+        int64_t n_mod = search_exact(&drv, g_child, &rs, VT_DWORD, 0x5AFE0001ull,
+                                     REGION_ALL, "itest");
+        results_clear(&rs);
+        results_init(&rs, 100000);
+        int64_t n_no = search_exact(&drv, g_child, &rs, VT_DWORD, 0x5AFE0001ull,
+                                    REGION_ALL, "no_such_module_xyz");
+        results_clear(&rs);
+        printf("  module filter: all=%lld itest=%lld none=%lld\n",
+               (long long)n_all, (long long)n_mod, (long long)n_no);
+        CHECK(n_mod >= 1, "module=itest finds the .data marker");
+        CHECK(n_mod <= n_all, "module filter narrows (never widens)");
+        CHECK(n_no == 0, "unknown module filters everything out");
+    }
+
+    /* 13) pointer_chain_scan：构造 g_chain_anchor(.data) → mid → target 两级链。
+     * fork 后父子地址布局一致，父进程的 &g_chain_anchor 即子进程内该变量地址。
+     * 期望存在一条 depth==2 的链且两段 offset 均为 0（链上指针都是精确指向）。
+     * 栈上可能残留指向 mid/target 的旧指针值 —— 它们的 container 在匿名段，
+     * 进不了锚点，只是噪声候选，不影响断言。 */
+    {
+        gg_results_t rs;
+        results_init(&rs, 100000);
+        int64_t n = search_exact(&drv, g_child, &rs, VT_QWORD, 0x7E57C0DEull,
+                                 REGION_ANONYMOUS, NULL);
+        CHECK(n == 1, "chain target value found exactly once");
+        if (n == 1) {
+            uint64_t t = rs.addrs[0];
+            size_t nmaps = 0;
+            gg_map_region_t *maps = process_maps(g_child, &nmaps);
+            CHECK(maps != NULL && nmaps > 0, "process_maps returns regions");
+            size_t na = 0;
+            gg_map_region_t *anchors = malloc(nmaps * sizeof(*anchors));
+            for (size_t i = 0; maps && i < nmaps; i++)
+                if (maps[i].path[0]) anchors[na++] = maps[i];
+            printf("  %zu of %zu regions are file-mapped anchors\n", na, nmaps);
+
+            gg_pointer_chain_t chains[16];
+            size_t nc = pointer_chain_scan(&drv, g_child, t, VT_QWORD, 3, 0,
+                                           anchors, na, chains, 16);
+            printf("  pointer_chain_scan -> %zu chains\n", nc);
+            CHECK(nc >= 1, "chain scan finds >=1 anchored chain");
+            int found = 0;
+            for (size_t i = 0; i < nc; i++) {
+                if (chains[i].depth == 2 &&
+                    chains[i].nodes[0].addr == (uint64_t)(uintptr_t)&g_chain_anchor &&
+                    chains[i].nodes[1].addr == chains[i].nodes[0].value &&
+                    chains[i].nodes[1].value == t &&
+                    chains[i].nodes[0].offset == 0 &&
+                    chains[i].nodes[1].offset == 0)
+                    found = 1;
+            }
+            CHECK(found, "expected 2-level chain via g_chain_anchor (offsets 0)");
+            free(maps);
+            free(anchors);
+        }
+        results_clear(&rs);
     }
 
     results_clear(&res);

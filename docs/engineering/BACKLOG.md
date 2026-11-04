@@ -39,6 +39,16 @@ restore 不再盲猜 name），工具面 57 → 58。顺带修 itest 两处既�
 （search_exact 上轮加 module 尾参漏同步、g_ring_enabled 缺符号——
 设备不在位所以本地从未编过它，暴露了 run_itest.ps1 无法本地编译验证的缺口）。
 
+**再补：itest 用例 9-13（引擎层其余待验批次一次补齐）**——
+9 字符串搜索（UTF-8/UTF-16LE 各断言"恰好 1 次"+读回校验）、
+10 组合搜索（三值共现 + 顺序打乱后锚点跟随 vals[0] 的顺序无关实证）、
+11 refine 增量比较（Δ=25 父进程 driver_write 精确控制：by=25 恰保留、
+by=24 严格清零）、12 module 限定（.data 全局 marker：正向命中 +
+不存在模块严格 0 + 只收窄不放宽）、13 pointer_chain_scan
+（子进程构造 .data 锚点→mmap mid→target 两级链，断言 depth=2 且
+双 offset=0 的链存在）。至此十批待真机改动中引擎层可测的全部进 itest，
+设备回来 `run_itest.ps1` 一条命令补验。
+
 ### 搜索限定模块范围 `module` 参数（2026-11-04）
 
 `gg_search` / `gg_search_range` / `gg_search_unknown_init` 加可选 `module`
