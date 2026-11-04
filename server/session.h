@@ -69,6 +69,15 @@ public:
             params["region"] = v;
             return true;
         }
+        // module（可选）：搜索限定在某模块内。只做类型/非空校验，不校验
+        // 存在性 —— agentd 拿得到真实 maps，"module not found" 那里报得准。
+        bool put_module(const json& m) {
+            if (m.is_null()) return true;            // 未传 = 不过滤
+            if (!m.is_string() || m.get<std::string>().empty())
+                return false;
+            params["module"] = m;
+            return true;
+        }
         bool put_op(const json& o) {
             int v = norm_op(o);
             if (v < 0) return false;

@@ -52,7 +52,7 @@ int main(void) {
     results_init(&r, 100000);
     gg_driver_t drv;
     memset(&drv, 0, sizeof(drv));
-    int64_t n = search_exact(&drv, 1, &r, VT_DWORD, target, REGION_ANONYMOUS);
+    int64_t n = search_exact(&drv, 1, &r, VT_DWORD, target, REGION_ANONYMOUS, NULL);
     printf("found=%lld count=%zu (期望 4)\n", (long long)n, r.count);
     int hit[4] = {0, 0, 0, 0};
     uint64_t want[4] = {0x10100, 0x10200, 0x20050, 0x30ABC};

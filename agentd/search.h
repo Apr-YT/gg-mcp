@@ -98,20 +98,31 @@ typedef struct gg_results {
 void results_init(gg_results_t *r, size_t cap);
 void results_clear(gg_results_t *r);
 
+/* 按 module 子串过滤 region：保留 path 含 module 的段（文件映射）。
+ * 原地压缩（只挪 struct，不 realloc），返回过滤后条数。
+ * module 为 NULL/空串时原样返回 n。path 为空的匿名段一律剔除。 */
+size_t regions_filter_module(gg_map_region_t *regs, size_t n, const char *module);
+
+/* module 参数语义（所有 search_* 共用）：NULL/空 = 不过滤（全 region_type 范围）；
+ * 非空 = 只搜 maps 里 path 含该子串的段（如 "libil2cpp.so"）。
+ * 典型用途：特征码/静态数据搜索限定在目标 so 内 —— 整片堆一起扫噪声巨大。 */
+
 /* 精确搜索：value 为按类型解释的数值（float/double 用位模式）。
  * 返回找到数量；-1 出错。region_type ∈ gg_region。 */
 int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
-                     int vtype, uint64_t value, int region_type);
+                     int vtype, uint64_t value, int region_type,
+                     const char *module);
 /* 组合搜索 "v1;v2;v3::span"：n 个值顺序无关地出现在 span 字节窗口内，
  * 结果集存锚点 v1 的地址。见 search.c 函数头注释。 */
 int64_t search_group(gg_driver_t *d, pid_t pid, gg_results_t *r,
                      const uint64_t *vals, size_t nvals, int vtype,
-                     uint64_t span, int region_type);
+                     uint64_t span, int region_type, const char *module);
 
 /* 区间搜索：min <= value <= max（float/double 按 double 解释）。 */
 /* aligned: 1=只扫自然对齐位置（默认，避免 8 倍冗余命中），0=逐字节。 */
 int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
-                     int vtype, double vmin, double vmax, int region_type, int aligned);
+                     int vtype, double vmin, double vmax, int region_type, int aligned,
+                     const char *module);
 
 /* AoB 特征码搜索：pat[plen] 字节序列滑动匹配，命中起始地址。 */
 /* AoB 特征码解析：支持三种写法
@@ -133,11 +144,11 @@ int parse_hex_pattern(const char *s, uint8_t *out, size_t max);
  * 非 NULL 则逐字节按位比较，支持通配。 */
 int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
                    const uint8_t *pat, const uint8_t *mask,
-                   size_t plen, int region_type);
+                   size_t plen, int region_type, const char *module);
 
 /* 模糊初始化：全置候选 + 快照。返回扫描元素数；-1 出错。 */
 int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
-                            int vtype, int region_type);
+                            int vtype, int region_type, const char *module);
 
 /* 模糊细化：按 op 收缩候选。返回剩余候选数；-1 出错。 */
 int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op);

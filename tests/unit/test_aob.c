@@ -84,7 +84,7 @@ int main(void) {
     results_init(&r, 100000);
     gg_driver_t drv;
     memset(&drv, 0, sizeof(drv));
-    int64_t n = search_aob(&drv, 1, &r, pat, NULL, plen, REGION_ANONYMOUS);
+    int64_t n = search_aob(&drv, 1, &r, pat, NULL, plen, REGION_ANONYMOUS, NULL);
     CHECK(n == 3, "3 个特征全命中 (块内+跨块x2)");
     int has_in = 0, has_cross = 0, has_cross2 = 0;
     for (size_t i = 0; i < r.count; i++) {
@@ -103,7 +103,7 @@ int main(void) {
     fault_page_at(0x10000);                             /* 页 0x10000 不可读 */
     region_add(TEST_MEM_BASE, TEST_MEM_BASE + TEST_MEM_SZ);
     results_init(&r, 100000);
-    n = search_aob(&drv, 1, &r, pat, NULL, plen, REGION_ANONYMOUS);
+    n = search_aob(&drv, 1, &r, pat, NULL, plen, REGION_ANONYMOUS, NULL);
     CHECK(n == 0, "特征跨故障页不命中 (断裂语义)");
     results_clear(&r);
 
@@ -114,7 +114,7 @@ int main(void) {
     memcpy(g_mem + (p3 - TEST_MEM_BASE), pat2, 3);
     region_add(TEST_MEM_BASE, TEST_MEM_BASE + TEST_MEM_SZ);
     results_init(&r, 100000);
-    n = search_aob(&drv, 1, &r, pat2, NULL, 3, REGION_ANONYMOUS);
+    n = search_aob(&drv, 1, &r, pat2, NULL, 3, REGION_ANONYMOUS, NULL);
     CHECK(n == 1 && r.count == 1 && r.addrs[0] == p3, "短 pattern 跨块命中");
     results_clear(&r);
 
@@ -148,7 +148,7 @@ int main(void) {
         memcpy(g_mem + (p5 - TEST_MEM_BASE), fake, sizeof(fake));
         region_add(TEST_MEM_BASE, TEST_MEM_BASE + TEST_MEM_SZ);
         results_init(&r, 100000);
-        n = search_aob(&drv, 1, &r, wp, wm, 8, REGION_ANONYMOUS);
+        n = search_aob(&drv, 1, &r, wp, wm, 8, REGION_ANONYMOUS, NULL);
         CHECK(n == 1 && r.count == 1 && r.addrs[0] == p4,
               "通配匹配: 命中真实值、跳过只差通配位的干扰");
         results_clear(&r);

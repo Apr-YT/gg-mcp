@@ -847,6 +847,24 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    - lookback 会产生噪声链（值恰好落在某目标附近的整数），深度越大越多。
      用 `module` 过滤 + 人工核 `expr` 重读一次值确认。
 
+46. **搜索 module 参数：限定模块范围（2026-11-04，真机未验）**
+
+   `gg_search` / `gg_search_range` / `gg_search_unknown_init` 新增可选
+   `module`（子串匹配 maps 路径，如 `"libil2cpp.so"`）。给了就只搜该模块
+   的映射段——特征码/静态数据搜索的刚需，此前整片堆一起扫噪声巨大
+   （GG 原版的「内存范围=SO 文件」）。
+
+   - 过滤是 `regions_filter_module` 纯函数（search.c，path 子串匹配、
+     原地压缩），引擎 5 个函数统一在 `process_search_regions` 之后套。
+   - **module 过滤叠加在 region_type 之后**：两者可同传（先按
+     anonymous/writable/all 取段，再按模块名筛）。匿名段 path 为空，
+     任何 module 都匹配不上。
+   - `gg_aob_resolve` 内部的 search_aob 调用**没接 module**（签名适配
+     传 NULL，行为不变）——它有自己「先 writable 后 all」的两段逻辑，要加
+     得单独设计，别顺手改。
+   - 签名变更是破坏性的：引擎 5 个 search_* 都加了 `const char *module`
+     尾参，外部如有 fork 的调用点要同步。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
@@ -867,8 +885,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-11-04（新增第 45 条 `gg_pointer_path` 多级指针链反向搜索，
-工具数 54→55）。
+本文件最后校准：2026-11-04（第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。
 上一条校准：2026-11-03（第 43 条 anon_ring 审查 + 第 44 条 BACKLOG 5/6/12 收口）。
 上一条校准：2026-10-23 19:55（HEAD `8bddaf5`）：项目结构补 `ko/` 与 `build/` 说明、
 结构护栏补到 6 道、main.c 拆分收尾（683 行）、清掉已删除的 GG 核心注入链路表述、

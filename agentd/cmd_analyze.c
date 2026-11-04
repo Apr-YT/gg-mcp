@@ -624,12 +624,12 @@ void h_aob_resolve(int fd, uint32_t seq, cJSON *p) {
     if (plen <= 0) { send_err(fd, GGCMD_AOB_RESOLVE, seq, GGERR_BAD_REQUEST, "bad pattern"); return; }
 
     gg_results_t *r = &g_eng.results;
-    int64_t found = search_aob(&g_eng.drv, g_eng.session_pid, r, pat, mask, (size_t)plen, REGION_WRITABLE);
+    int64_t found = search_aob(&g_eng.drv, g_eng.session_pid, r, pat, mask, (size_t)plen, REGION_WRITABLE, NULL);
     if (found < 0) { send_err(fd, GGCMD_AOB_RESOLVE, seq, GGERR_INTERNAL, "aob search failed"); return; }
     /* 签名通常在代码段（r-x），可写区扫不到 —— 这时必须扫 REGION_ALL。
      * 注意不能用 REGION_ANONYMOUS：那只是匿名映射（堆/栈），不含 .so 的代码段。 */
     if (found == 0) {
-        found = search_aob(&g_eng.drv, g_eng.session_pid, r, pat, mask, (size_t)plen, REGION_ALL);
+        found = search_aob(&g_eng.drv, g_eng.session_pid, r, pat, mask, (size_t)plen, REGION_ALL, NULL);
         if (found < 0) found = 0;
     }
 

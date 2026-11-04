@@ -120,7 +120,7 @@ int main(void) {
             mem_write_u32(a, 0xDEADBEEFu); expect++;
         }
         results_init(&r, 0);
-        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xDEADBEEFu, 0);
+        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xDEADBEEFu, 0, NULL);
         check(n == expect, "1) exact: all readable hits found");
         results_clear(&r);
     }
@@ -134,7 +134,7 @@ int main(void) {
         mem_write_u32(before, 0xDEADBEEFu);
         mem_write_u32(after,  0xDEADBEEFu);
         results_init(&r, 0);
-        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xDEADBEEFu, 0);
+        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xDEADBEEFu, 0, NULL);
         check(n == 2, "2) C2: hits BEFORE and AFTER fault page both found (no 256KB skip)");
         check(results_has(&r, after), "2) C2: address AFTER fault page present in results");
         results_clear(&r);
@@ -149,7 +149,7 @@ int main(void) {
         mem_write_u32(lo, 0x12345678u);
         mem_write_u32(hi, 0x12345678u);
         results_init(&r, 0);
-        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0x12345678u, 0);
+        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0x12345678u, 0, NULL);
         check(n == 2, "3) short-read: hits on BOTH sides of fault page found");
         check(results_has(&r, lo) && results_has(&r, hi), "3) short-read: both side addresses present");
         results_clear(&r);
@@ -164,7 +164,7 @@ int main(void) {
         mem_write_u32(a_lo, 0xCAFEBABEu);
         mem_write_u32(a_hi, 0xCAFEBABEu);
         results_init(&r, 0);
-        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xCAFEBABEu, 0);
+        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xCAFEBABEu, 0, NULL);
         check(n == 2, "4) continuous-fault: both ends found, no infinite loop");
         results_clear(&r);
     }
@@ -175,7 +175,7 @@ int main(void) {
         mem_write_u32(TEST_MEM_BASE + 0x1000, 100u);
         mem_write_u32(TEST_MEM_BASE + 0x2000, 200u);
         results_init(&r, 0);
-        int64_t elems = search_unknown_init(NULL, 0, &r, VT_DWORD, 0);
+        int64_t elems = search_unknown_init(NULL, 0, &r, VT_DWORD, 0, NULL);
         check(elems > 0, "5) fuzzy: unknown_init produced candidates");
         mem_write_u32(TEST_MEM_BASE + 0x1000, 150u);     /* 0x1000 增大, 0x2000 不变 */
         int64_t kept = search_refine(NULL, 0, &r, REFINE_INCREASED);
@@ -235,7 +235,7 @@ int main(void) {
     {
         for (int p = 0; p < (int)(TEST_MEM_SZ / 4096); p++) g_fault[p] = 1;  /* 全 8MB 不可读 */
         results_init(&r, 0);
-        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xCAFEBABEu, 0);
+        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xCAFEBABEu, 0, NULL);
         check(n == 0, "7) reserve 全不可读: 无结果");
         /* X4 大步曾尝试 <300 次; 撤销后恒逐页 = 2048 次, C2 语义完整 */
         check(g_read_calls == (unsigned long)(TEST_MEM_SZ / 4096),
@@ -252,7 +252,7 @@ int main(void) {
         uint64_t hit = TEST_MEM_BASE + (uint64_t)(total_pages - 200) * 4096;  /* 末端可读区 */
         mem_write_u32(hit, 0xCAFEBABEu);
         results_init(&r, 0);
-        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xCAFEBABEu, 0);
+        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xCAFEBABEu, 0, NULL);
         check(n == 1 && results_has(&r, hit), "8) 逐页穿越: 故障区后末端可读命中");
         printf("    [info] 7MB-fault read_calls = %lu (逐页=1792)\n", g_read_calls);
         results_clear(&r);
@@ -267,7 +267,7 @@ int main(void) {
         mem_write_u32(a_lo, 0xCAFEBABEu);
         mem_write_u32(a_hi, 0xCAFEBABEu);
         results_init(&r, 0);
-        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xCAFEBABEu, 0);
+        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 0xCAFEBABEu, 0, NULL);
         check(n == 2, "4b) 8MB 下小故障区: 两端仍找到");
         results_clear(&r);
     }
@@ -281,7 +281,7 @@ int main(void) {
         uint64_t hit = TEST_MEM_BASE + GG_SEARCH_CHUNK - 4;   /* 8 字节里 4 字节跨块 */
         memcpy(g_mem + (hit - TEST_MEM_BASE), &v64, 8);
         results_init(&r, 0);
-        int64_t n = search_exact(NULL, 0, &r, VT_QWORD, v64, 0);
+        int64_t n = search_exact(NULL, 0, &r, VT_QWORD, v64, 0, NULL);
         check(n == 1, "9z) 跨块 exact: QWORD 骑在 256KB 边界仍命中");
         check(results_has(&r, hit), "9z) 跨块 exact: 命中地址正确");
         results_clear(&r);
@@ -293,7 +293,7 @@ int main(void) {
         memcpy(g_mem + (hit - TEST_MEM_BASE), &v32, 4);
         results_init(&r, 0);
         int64_t n = search_range(NULL, 0, &r, VT_DWORD,
-                                 (double)0xCAFEBABEu, (double)0xCAFEBABEu, 0, 0);
+                                 (double)0xCAFEBABEu, (double)0xCAFEBABEu, 0, 0, NULL);
                                  /* 最后一个 0 = aligned：本用例故意把 dword 放在
                                   * 非对齐位置（CHUNK-2，2 字节跨块），所以必须
                                   * 用逐字节模式才能命中。对齐模式下这种值本来就
@@ -307,7 +307,7 @@ int main(void) {
     region_add(TEST_MEM_BASE, TEST_MEM_BASE + (300ull << 20));   /* 300MB region */
     {
         results_init(&r, 0);
-        int64_t elems = search_unknown_init(NULL, 0, &r, VT_DWORD, 0);
+        int64_t elems = search_unknown_init(NULL, 0, &r, VT_DWORD, 0, NULL);
         check(elems == (int64_t)(GG_FUZZY_MAX_BYTES / 4),
               "9) fuzzy 快照截断到 256MB (67M 元素, 300MB region 只取前 256MB)");
         check(r.fuzzy_elem_count == (size_t)(GG_FUZZY_MAX_BYTES / 4), "9) fuzzy_elem_count 正确");
@@ -326,7 +326,7 @@ int main(void) {
         mem_reset(); g_nregions = 0;
         region_add(TEST_MEM_BASE, TEST_MEM_BASE + 0x10000);
         results_init(&r, 0);
-        int64_t elems = search_unknown_init(NULL, 0, &r, VT_DWORD, 0);
+        int64_t elems = search_unknown_init(NULL, 0, &r, VT_DWORD, 0, NULL);
         check(elems > 0 && r.fuzzy_skipped_bytes == 0 && r.fuzzy_skipped_from == 0,
               "9b) 小 region: 无截断报告");
         results_clear(&r);
@@ -342,7 +342,7 @@ int main(void) {
         memcpy(g_mem + (a - TEST_MEM_BASE), &va, 8);
         memcpy(g_mem + (b - TEST_MEM_BASE), &vb, 8);
         results_init(&r, 0);
-        int64_t n = search_range(NULL, 0, &r, VT_QWORD, 100, 200, 0, 1);
+        int64_t n = search_range(NULL, 0, &r, VT_QWORD, 100, 200, 0, 1, NULL);
         check(n == 2, "10) range: 两候选命中");
         check(r.exact_vt == VT_QWORD, "10) range 后 exact_vt=qword (get_results 按宽度读值)");
         check(r.exact_vals_valid == 0, "10) range 后基线未建立 (valid=0)");
@@ -364,7 +364,7 @@ int main(void) {
         uint64_t v = 150;
         memcpy(g_mem + (a - TEST_MEM_BASE), &v, 8);
         results_init(&r, 0);
-        search_exact(NULL, 0, &r, VT_QWORD, v, 0);
+        search_exact(NULL, 0, &r, VT_QWORD, v, 0, NULL);
         check(r.exact_vals_valid == 1, "10b) exact: 搜索即基线 (valid=1)");
         uint64_t v2 = 999;
         memcpy(g_mem + (a - TEST_MEM_BASE), &v2, 8);
@@ -413,7 +413,7 @@ int main(void) {
         check(plen == 4, "11b) 转码出 4 字节 pattern");
         memset(mask, 0xFF, (size_t)plen);
         results_init(&r, 0);
-        int64_t nh = search_aob(NULL, 0, &r, pat, mask, (size_t)plen, 0);
+        int64_t nh = search_aob(NULL, 0, &r, pat, mask, (size_t)plen, 0, NULL);
         check(nh == 1 && results_has(&r, where), "11b) UTF-16LE 中文搜索命中正确地址");
         results_clear(&r);
     }
@@ -435,7 +435,7 @@ int main(void) {
 
         /* 顺序无关：锚点 200，窗口里 100/300 在锚点两侧 */
         vals[0] = 200; vals[1] = 100; vals[2] = 300;
-        int64_t n = search_group(NULL, 0, &r, vals, 3, VT_DWORD, 16, 0);
+        int64_t n = search_group(NULL, 0, &r, vals, 3, VT_DWORD, 16, 0, NULL);
         check(n == 1 && results_has(&r, base + 0x4),
               "12) 顺序无关: 锚点 200 命中, 窗口含两侧值");
         /* refine 链路可用：结果集元数据继承锚点搜索 */
@@ -450,11 +450,11 @@ int main(void) {
          * 第二个 100，两个锚点都命中；+0x2000 孤立，必须被剔除。 */
         vals[0] = 100; vals[1] = 100;
         results_init(&r, 0);
-        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 8, 0);
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 8, 0, NULL);
         check(n == 0, "12) 重复值 span=8: 两个 100 距 12 > 8 不命中");
         results_clear(&r);
         results_init(&r, 0);
-        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 16, 0);
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 16, 0, NULL);
         check(n == 2 && results_has(&r, base) && results_has(&r, base + 0xC) &&
               !results_has(&r, base + 0x1000),
               "12) 重复值 span=16: 两个 100 互认命中, 孤立锚点剔除");
@@ -464,23 +464,23 @@ int main(void) {
          * span=4 命中；base 锚点看 +0x1008 距 8 → span=8 命中。 */
         vals[0] = 100; vals[1] = 300;
         results_init(&r, 0);
-        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 4, 0);
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 4, 0, NULL);
         check(n == 1 && results_has(&r, base + 0xC) && !results_has(&r, base),
               "12) span=4: 只有距 4 的锚点命中");
         results_clear(&r);
         results_init(&r, 0);
-        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 8, 0);
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 8, 0, NULL);
         check(n == 2 && results_has(&r, base) && results_has(&r, base + 0xC),
               "12) span=8: 两个锚点都在边界内命中");
         results_clear(&r);
 
         /* 参数防御: nvals<2 / span=0 / 超上限 */
         results_init(&r, 0);
-        n = search_group(NULL, 0, &r, vals, 1, VT_DWORD, 16, 0);
+        n = search_group(NULL, 0, &r, vals, 1, VT_DWORD, 16, 0, NULL);
         check(n == -1, "12) nvals<2 拒绝");
-        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 0, 0);
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 0, 0, NULL);
         check(n == -1, "12) span=0 拒绝");
-        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 99999, 0);
+        n = search_group(NULL, 0, &r, vals, 2, VT_DWORD, 99999, 0, NULL);
         check(n == -1, "12) span 超上限拒绝");
         results_clear(&r);
     }
@@ -493,7 +493,7 @@ int main(void) {
         mem_write_u32(a, 100u); mem_write_u32(b, 200u); mem_write_u32(c, 100u);
         /* 精确搜索 100 → 两候选；扣血后 a→75 (Δ-25), c→80 (Δ-20) */
         results_init(&r, 0);
-        search_exact(NULL, 0, &r, VT_DWORD, 100, 0);
+        search_exact(NULL, 0, &r, VT_DWORD, 100, 0, NULL);
         mem_write_u32(a, 75u); mem_write_u32(c, 80u);
         int64_t n = search_refine_exact_by(NULL, 0, &r, REFINE_DECREASED_BY, 25.0);
         check(n == 1 && results_has(&r, a),
@@ -503,7 +503,7 @@ int main(void) {
         /* 增量方向: b 增 50 */
         mem_write_u32(a, 100u); mem_write_u32(b, 200u);
         results_init(&r, 0);
-        search_exact(NULL, 0, &r, VT_DWORD, 200, 0);
+        search_exact(NULL, 0, &r, VT_DWORD, 200, 0, NULL);
         mem_write_u32(b, 250u);
         n = search_refine_exact_by(NULL, 0, &r, REFINE_INCREASED_BY, 50.0);
         check(n == 1 && results_has(&r, b), "13) increased_by=50: 命中增 50 的 b");
@@ -516,7 +516,7 @@ int main(void) {
         {
             uint64_t fv;
             memcpy(&fv, &f0, 4);
-            search_exact(NULL, 0, &r, VT_FLOAT, fv, 0);
+            search_exact(NULL, 0, &r, VT_FLOAT, fv, 0, NULL);
         }
         memcpy(g_mem + (a - TEST_MEM_BASE), &f1, 4);
         n = search_refine_exact_by(NULL, 0, &r, REFINE_DECREASED_BY, 10.0);
@@ -531,7 +531,7 @@ int main(void) {
         uint64_t a = TEST_MEM_BASE + 0x1000, b = TEST_MEM_BASE + 0x2000;
         mem_write_u32(a, 100u); mem_write_u32(b, 100u);
         results_init(&r, 0);
-        search_unknown_init(NULL, 0, &r, VT_DWORD, 0);
+        search_unknown_init(NULL, 0, &r, VT_DWORD, 0, NULL);
         mem_write_u32(a, 75u); mem_write_u32(b, 70u);
         int64_t kept = search_refine_by(NULL, 0, &r, REFINE_DECREASED_BY, 25.0);
         check(kept == 1, "13) 模糊 decreased_by=25: 只留 a（b 的 -30 剔除）");
@@ -544,7 +544,7 @@ int main(void) {
         uint64_t a = TEST_MEM_BASE + 0x1000;
         mem_write_u32(a, 0xCAFEBABEu);
         results_init(&r, 0);
-        search_exact(NULL, 0, &r, VT_DWORD, 0xCAFEBABEu, 0);
+        search_exact(NULL, 0, &r, VT_DWORD, 0xCAFEBABEu, 0, NULL);
         r.exact_vals[0] = 0x12345678ull;   /* 模拟"最近一轮值"≠搜索值 */
         char *json = results_serialize(&r, VT_DWORD);
         check(json != NULL, "14) serialize 非空");
@@ -651,6 +651,59 @@ int main(void) {
         nc = pointer_chain_scan(NULL, 0, TEST_MEM_BASE + 0x3024, VT_QWORD, 1, 0x400, NULL, 0, ch, 32);
         check(nc == 1 && ch[0].depth == 1 && ch[0].nodes[0].addr == TEST_MEM_BASE + 0x2318,
               "15g) depth=1 只回溯一级");
+    }
+
+    {
+        /* === 16) 搜索限定模块范围（module 参数） === */
+        mem_reset(); g_nregions = 0;
+        /* 两段 libtest.so + 一段匿名 + 一段别的 so，值都放 999 */
+        region_add(TEST_MEM_BASE,              TEST_MEM_BASE + 0x1000);   /* libtest #1 */
+        region_add(TEST_MEM_BASE + 0x1000,     TEST_MEM_BASE + 0x2000);   /* 匿名 */
+        region_add(TEST_MEM_BASE + 0x2000,     TEST_MEM_BASE + 0x3000);   /* libtest #2 */
+        region_add(TEST_MEM_BASE + 0x3000,     TEST_MEM_BASE + 0x4000);   /* libother.so */
+        snprintf(g_regions[0].path, GG_MOD_NAME_MAX, "/apex/libtest.so");
+        snprintf(g_regions[2].path, GG_MOD_NAME_MAX, "/apex/libtest.so");
+        snprintf(g_regions[3].path, GG_MOD_NAME_MAX, "/data/libother.so");
+        mem_write_u32(TEST_MEM_BASE + 0x0100, 999);
+        mem_write_u32(TEST_MEM_BASE + 0x1100, 999);
+        mem_write_u32(TEST_MEM_BASE + 0x2100, 999);
+        mem_write_u32(TEST_MEM_BASE + 0x3100, 999);
+
+        /* 纯函数：过滤 */
+        gg_map_region_t tmp[4];
+        memcpy(tmp, g_regions, sizeof(tmp));
+        size_t k = regions_filter_module(tmp, 4, "libtest");
+        check(k == 2 && !strcmp(tmp[0].path, "/apex/libtest.so") &&
+              !strcmp(tmp[1].path, "/apex/libtest.so"),
+              "16) 过滤保留 2 段 libtest（子串匹配）");
+        memcpy(tmp, g_regions, sizeof(tmp));
+        check(regions_filter_module(tmp, 4, NULL) == 4 &&
+              regions_filter_module(tmp, 4, "") == 4,
+              "16b) NULL/空串不过滤");
+        memcpy(tmp, g_regions, sizeof(tmp));
+        check(regions_filter_module(tmp, 4, "nope.so") == 0,
+              "16c) 不存在的模块 → 0 段");
+
+        /* 端到端：exact 限定 libtest.so 只命中 2 段里的值 */
+        results_init(&r, 0);
+        int64_t n = search_exact(NULL, 0, &r, VT_DWORD, 999, REGION_ALL, "libtest.so");
+        check(n == 2, "16d) exact+module: 2 命中（匿名/别的 so 被排除）");
+        check(results_has(&r, TEST_MEM_BASE + 0x0100) &&
+              results_has(&r, TEST_MEM_BASE + 0x2100),
+              "16e) 命中地址都在 libtest 段内");
+        results_clear(&r);
+
+        /* 不传 module：4 处全命中（旧行为不变） */
+        results_init(&r, 0);
+        n = search_exact(NULL, 0, &r, VT_DWORD, 999, REGION_ALL, NULL);
+        check(n == 4, "16f) 无 module: 4 命中（向后兼容）");
+        results_clear(&r);
+
+        /* 模块过滤后 0 段：返回 0 而不是 -1（"没有该模块"≠错误） */
+        results_init(&r, 0);
+        n = search_exact(NULL, 0, &r, VT_DWORD, 999, REGION_ALL, "nope.so");
+        check(n == 0, "16g) 模块不存在 → 0 命中");
+        results_clear(&r);
     }
 
     printf(fails ? "\n== FAILED: %d ==\n" : "\n== ALL PASS ==\n", fails);

@@ -372,16 +372,22 @@ json tool_search(Session::CallCtx& c, const json& a) {
         c.params["encoding"] = e;
         if (a.contains("substring")) c.params["substring"] = a["substring"];
         if (!c.put_region(a.value("region", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid region");
+        if (!c.put_module(a.value("module", json())))
+            return c.fail(GGERR_BAD_REQUEST, "module must be a non-empty string");
         return c.send(GGCMD_SEARCH);
     }
     if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     c.params["value"] = a["value"];
     if (!c.put_region(a.value("region", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid region");
+    if (!c.put_module(a.value("module", json())))
+        return c.fail(GGERR_BAD_REQUEST, "module must be a non-empty string");
     return c.send(GGCMD_SEARCH);
 }
 json tool_search_unknown_init(Session::CallCtx& c, const json& a) {
     if (!c.put_type(a.value("type", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid type");
     if (!c.put_region(a.value("region", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid region");
+    if (!c.put_module(a.value("module", json())))
+        return c.fail(GGERR_BAD_REQUEST, "module must be a non-empty string");
     return c.send(GGCMD_SEARCH_UNKNOWN_INIT);
 }
 json tool_search_refine(Session::CallCtx& c, const json& a) {
@@ -639,6 +645,8 @@ json tool_search_range(Session::CallCtx& c, const json& a) {
     c.params["min"] = a["min"];
     c.params["max"] = a["max"];
     if (!c.put_region(a.value("region", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid region");
+    if (!c.put_module(a.value("module", json())))
+        return c.fail(GGERR_BAD_REQUEST, "module must be a non-empty string");
     return c.send(GGCMD_SEARCH_RANGE);
 }
 json tool_result_count(Session::CallCtx& c, const json& a) {

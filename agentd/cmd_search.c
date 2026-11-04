@@ -45,6 +45,12 @@ static int parse_region(const cJSON *p, int def) {
     return def;
 }
 
+/* 从 p 取可选 module 子串（path 过滤），NULL/非串 = 不过滤 */
+static const char *get_module(cJSON *p) {
+    cJSON *jm = cJSON_GetObjectItem(p, "module");
+    return (cJSON_IsString(jm) && jm->valuestring[0]) ? jm->valuestring : NULL;
+}
+
 void h_search(int fd, uint32_t seq, cJSON *p) {
     if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_NO_SESSION, "no session"); return; }
     int type = parse_vt(p, VT_DWORD);
@@ -53,6 +59,7 @@ void h_search(int fd, uint32_t seq, cJSON *p) {
     if (region < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "invalid " REGION_HINT); return; }
     char vbuf[512];   /* 组合搜索 "v1;...;v8::span" 最长 8 个 qword hex，64 不够 */
     const char *vs = j_scalar_str(cJSON_GetObjectItem(p, "value"), vbuf, sizeof(vbuf));
+    const char *module = get_module(p);
     int64_t found = 0;
 
     /* 组合搜索 "v1;v2;v3::span"：value 含 ';' 时走 group（语义见 search.c）。
@@ -102,7 +109,7 @@ void h_search(int fd, uint32_t seq, cJSON *p) {
             return;
         }
         found = search_group(&g_eng.drv, g_eng.session_pid, &g_eng.results,
-                             vals, nvals, type, span, region);
+                             vals, nvals, type, span, region, module);
         if (found < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_INTERNAL, "group search failed"); return; }
     } else if (type == VT_BYTES) {
         uint8_t pat[512], mask[512];
@@ -140,13 +147,13 @@ void h_search(int fd, uint32_t seq, cJSON *p) {
             if (plen <= 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "bad aob pattern"); return; }
         }
         found = search_aob(&g_eng.drv, g_eng.session_pid, &g_eng.results,
-                           pat, mask, (size_t)plen, region);
+                           pat, mask, (size_t)plen, region, module);
         if (found < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_INTERNAL, "aob search failed"); return; }
     } else {
         int ok = 0;
         uint64_t value = parse_value_str(type, vs, &ok);
         if (!ok) { send_err(fd, GGCMD_SEARCH, seq, GGERR_BAD_REQUEST, "bad value"); return; }
-        found = search_exact(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, value, region);
+        found = search_exact(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, value, region, module);
         if (found < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_INTERNAL, "search failed"); return; }
     }
 
@@ -173,7 +180,7 @@ void h_search_range(int fd, uint32_t seq, cJSON *p) {
         if (cJSON_IsBool(ja)) aligned = cJSON_IsTrue(ja) ? 1 : 0;
         else if (cJSON_IsNumber(ja)) aligned = ja->valueint ? 1 : 0;
     }
-    int64_t found = search_range(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, vmin, vmax, region, aligned);
+    int64_t found = search_range(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, vmin, vmax, region, aligned, get_module(p));
     if (found < 0) { send_err(fd, GGCMD_SEARCH_RANGE, seq, GGERR_INTERNAL, "range search failed"); return; }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "count", (double)found);
@@ -188,7 +195,7 @@ void h_unknown_init(int fd, uint32_t seq, cJSON *p) {
     int region = parse_region(p, REGION_ANONYMOUS);
     if (type < 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_BAD_REQUEST, "invalid " VT_HINT); return; }
     if (region < 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_BAD_REQUEST, "invalid " REGION_HINT); return; }
-    int64_t elems = search_unknown_init(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, region);
+    int64_t elems = search_unknown_init(&g_eng.drv, g_eng.session_pid, &g_eng.results, type, region, get_module(p));
     if (elems < 0) { send_err(fd, GGCMD_SEARCH_UNKNOWN_INIT, seq, GGERR_INTERNAL, "unknown-init failed"); return; }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "elements", (double)elems);

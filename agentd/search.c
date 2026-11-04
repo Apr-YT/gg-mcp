@@ -499,13 +499,25 @@ static int results_push(gg_results_t *r, uint64_t addr) {
 
 /* ---------- 精确搜索 ---------- */
 
+size_t regions_filter_module(gg_map_region_t *regs, size_t n, const char *module) {
+    if (!module || !module[0] || !regs) return n;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (regs[i].path[0] && strstr(regs[i].path, module))
+            regs[k++] = regs[i];
+    }
+    return k;
+}
+
 int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
-                     int vtype, uint64_t value, int region_type) {
+                     int vtype, uint64_t value, int region_type,
+                     const char *module) {
     int sz = vt_size(vtype);
     if (sz <= 0) return -1;
 
     size_t nreg = 0;
     gg_map_region_t *regs = process_search_regions(pid, &nreg, region_type);
+    if (module && module[0]) nreg = regions_filter_module(regs, nreg, module);
     if (!regs) return 0;
 
     size_t keep_cap = r->cap ? r->cap : GG_RESULT_CAP_DEFAULT;
@@ -566,13 +578,13 @@ int64_t search_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
  * - exact_vals 是 addrs 的并行数组，压缩时必须同步。 */
 int64_t search_group(gg_driver_t *d, pid_t pid, gg_results_t *r,
                      const uint64_t *vals, size_t nvals, int vtype,
-                     uint64_t span, int region_type) {
+                     uint64_t span, int region_type, const char *module) {
     int sz = vt_size(vtype);
     if (sz <= 0 || !vals || nvals < 2 || nvals > GG_GROUP_MAX) return -1;
     if (span < (uint64_t)sz || span > GG_GROUP_SPAN_MAX) return -1;
 
     /* 锚点搜索复用 search_exact（含结果集元数据） */
-    int64_t total = search_exact(d, pid, r, vtype, vals[0], region_type);
+    int64_t total = search_exact(d, pid, r, vtype, vals[0], region_type, module);
     if (total <= 0) return total;
 
     uint8_t pats[GG_GROUP_MAX][8];
@@ -748,7 +760,7 @@ int gg_str_to_pattern(const char *s, int utf16, int append_nul,
  * 结果条目值类型记 VT_BYTE。 */
 int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
                    const uint8_t *pat, const uint8_t *mask,
-                   size_t plen, int region_type) {
+                   size_t plen, int region_type, const char *module) {
     if (!pat || plen == 0 || plen > 512) return -1;
     int has_wild = 0;
     if (mask) {
@@ -757,6 +769,7 @@ int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
 
     size_t nreg = 0;
     gg_map_region_t *regs = process_search_regions(pid, &nreg, region_type);
+    if (module && module[0]) nreg = regions_filter_module(regs, nreg, module);
     if (!regs) return 0;
 
     size_t keep_cap = r->cap ? r->cap : GG_RESULT_CAP_DEFAULT;
@@ -801,7 +814,8 @@ int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
  * 精度：整数类型（BYTE/WORD/DWORD/QWORD）走 u64 整数比较——read_as_double
  * 对 >2^53 的 u64 会丢精度（大数值区间搜索出错误结果）。float/double 走 double。 */
 int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
-                     int vtype, double vmin, double vmax, int region_type, int aligned) {
+                     int vtype, double vmin, double vmax, int region_type, int aligned,
+                     const char *module) {
     int sz = vt_size(vtype);
     if (sz <= 0) return -1;
 
@@ -825,6 +839,7 @@ int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
 
     size_t nreg = 0;
     gg_map_region_t *regs = process_search_regions(pid, &nreg, region_type);
+    if (module && module[0]) nreg = regions_filter_module(regs, nreg, module);
     if (!regs) return 0;
 
     size_t keep_cap = r->cap ? r->cap : GG_RESULT_CAP_DEFAULT;
@@ -864,12 +879,13 @@ int64_t search_range(gg_driver_t *d, pid_t pid, gg_results_t *r,
 /* ---------- 模糊搜索 ---------- */
 
 int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
-                            int vtype, int region_type) {
+                            int vtype, int region_type, const char *module) {
     int sz = vt_size(vtype);
     if (sz <= 0) return -1;
 
     size_t nreg = 0;
     gg_map_region_t *regs = process_search_regions(pid, &nreg, region_type);
+    if (module && module[0]) nreg = regions_filter_module(regs, nreg, module);
     if (!regs) return -1;
     int pmfd = pm_open(pid);   /* <0 = pagemap 不可用，退回逐页探测 */
 

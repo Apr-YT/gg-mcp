@@ -70,6 +70,10 @@ static const std::vector<ToolDef>& build() {
                  {"value", prop("string", "要搜索的值（如 \"100\"、\"0x64\"、\"3.14\"；type=bytes 时为 hex 序列如 \"48 65 4C 4C\"）")},
                  {"type", prop("string", "值类型", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\",\"bytes\"]")},
                  {"region", prop("string", "搜索区域", "\"enum\":[\"anonymous\",\"writable\",\"all\"]")},
+                 {"module", prop("string",
+                    "限定模块范围（可选，子串匹配 maps 路径，如 \"libil2cpp.so\"）。"
+                    "给了就只搜该模块的映射段 —— 特征码/静态数据搜索必用，"
+                    "整片堆一起扫噪声巨大。注意匿名段不含任何模块名")},
                  {"encoding", prop("string", "字符串搜索编码（utf-8 / utf-16），value 为原始文本", "\"enum\":[\"utf-8\",\"utf-16\"]")},
                  {"substring", prop("boolean", "true=搜子串（不带终止符）。默认 false=完整匹配（带 NUL 终止符）")},
              },
@@ -84,6 +88,10 @@ static const std::vector<ToolDef>& build() {
              json{
                  {"type", prop("string", "元素类型（模糊粒度）", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
                  {"region", prop("string", "搜索区域", "\"enum\":[\"anonymous\",\"writable\",\"all\"]")},
+                 {"module", prop("string",
+                    "限定模块范围（可选，子串匹配 maps 路径，如 \"libil2cpp.so\"）。"
+                    "给了就只搜该模块的映射段 —— 特征码/静态数据搜索必用，"
+                    "整片堆一起扫噪声巨大。注意匿名段不含任何模块名")},
              },
              json::array()),
         tool("gg_search_refine",
@@ -163,6 +171,10 @@ static const std::vector<ToolDef>& build() {
                  {"max", prop("number", "区间最大值")},
                  {"type", prop("string", "值类型", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
                  {"region", prop("string", "搜索区域", "\"enum\":[\"anonymous\",\"writable\",\"all\"]")},
+                 {"module", prop("string",
+                    "限定模块范围（可选，子串匹配 maps 路径，如 \"libil2cpp.so\"）。"
+                    "给了就只搜该模块的映射段 —— 特征码/静态数据搜索必用，"
+                    "整片堆一起扫噪声巨大。注意匿名段不含任何模块名")},
                  {"aligned", prop("boolean", "只扫自然对齐位置（默认 true）")},
              },
              json{"min", "max"}),

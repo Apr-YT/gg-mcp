@@ -12,6 +12,14 @@
 
 ## 已完成（近期）
 
+### 搜索限定模块范围 `module` 参数（2026-11-04）
+
+`gg_search` / `gg_search_range` / `gg_search_unknown_init` 加可选 `module`
+（子串匹配 maps 路径）。给了就只搜该模块的映射段——特征码/静态数据搜索刚需。
+`regions_filter_module` 纯函数原地压缩；过滤叠加在 region_type 之后。
+`gg_aob_resolve` 的内部 search_aob 有意没接（两段扫描逻辑独立，要加需单独设计）。
+单测用例 16（过滤纯函数 3 断言 + 端到端 4 断言）。真机未验证。
+
 ### 多级指针链反向搜索 `gg_pointer_path`（2026-11-04）
 
 指针工作流补齐最后一环：`gg_pointer_scan` 只找一级、`gg_pointer_chain` 是反方向
