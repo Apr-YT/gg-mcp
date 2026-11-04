@@ -130,6 +130,8 @@ void h_read(int fd, uint32_t seq, cJSON *p);
 void h_read_bytes(int fd, uint16_t cmd, uint32_t seq, cJSON *p);  /* READ_BYTES 与 HEX_DUMP 共用 */
 void h_write(int fd, uint32_t seq, cJSON *p);
 void h_freeze(int fd, uint32_t seq, cJSON *p);
+void h_freeze_save(int fd, uint32_t seq, cJSON *p);  /* 冻结表落盘（跨会话恢复） */
+void h_freeze_load(int fd, uint32_t seq, cJSON *p);
 void h_unfreeze(int fd, uint32_t seq, cJSON *p);
 void h_freeze_results(int fd, uint32_t seq, cJSON *p);
 void h_pause_resume(int fd, uint32_t seq, cJSON *p, int pause);

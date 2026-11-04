@@ -921,6 +921,21 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
      恰好保留。第一版用 refine CHANGED 判别是错的——新老基线都会保留，
      无判别力。写这类测试先问一句：**如果实现没生效，这个断言会失败吗？**
 
+50. **`gg_freeze_save` / `gg_freeze_load`：冻结表持久化（2026-11-04，真机未验）**
+
+   冻结表活在 agentd 内存，重启即丢 —— 挂机锁血静默失效。与结果集
+   save/load 对称落盘 `/data/adb/GG-Ghost/freezes/<name>.json`。
+   纯函数在 `freeze.c`（serialize 手工拼接 + deserialize cJSON），
+   handler 只剩文件 IO；test_freeze 构建因此要链 cJSON.c。
+
+   - **全或无 + 单锁原子替换是语义核心**：deserialize 离线校验全部条目，
+     任一条非法原表不动（半载入的冻结表 = 用户以为全锁上了，实际锁了
+     一半）；替换在**同一把锁内**完成 —— 循环线程正在逐条写回，逐条
+     add 会露出半旧半新中间态。serialize 侧同理持锁拷快照再拼串。
+   - active=0 条目保留：进程退出自动停写的条目，恢复后保持停写。
+   - load 后循环线程（attach 时已启动）下一轮就写目标内存：
+     safe_mode 拒绝 + server `write_op=true` 双保险。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
@@ -941,7 +956,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-11-04（第 49 条 gg_results_refresh；同日：第 47 条 region dump/restore + 第 48 条 wire AUTH 断连语义修复；更早：第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。
+本文件最后校准：2026-11-04（第 50 条 freeze save/load + 第 49 条 gg_results_refresh；同日：第 47 条 region dump/restore + 第 48 条 wire AUTH 断连语义修复；更早：第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。
 上一条校准：2026-11-03（第 43 条 anon_ring 审查 + 第 44 条 BACKLOG 5/6/12 收口）。
 上一条校准：2026-10-23 19:55（HEAD `8bddaf5`）：项目结构补 `ko/` 与 `build/` 说明、
 结构护栏补到 6 道、main.c 拆分收尾（683 行）、清掉已删除的 GG 核心注入链路表述、

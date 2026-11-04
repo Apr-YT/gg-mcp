@@ -956,6 +956,19 @@ json tool_freeze_results(Session::CallCtx& c, const json& a) {
     }
     return c.send(GGCMD_FREEZE_RESULTS);
 }
+// 冻结表持久化：load 填表后循环线程立即开始写目标内存 → write_op=true（safe_mode 拒）
+json tool_freeze_save(Session::CallCtx& c, const json& a) {
+    if (!a.contains("name") || !a["name"].is_string() || a["name"].get<std::string>().empty())
+        return c.fail(GGERR_BAD_REQUEST, "name required");
+    c.params["name"] = a["name"];
+    return c.send(GGCMD_FREEZE_SAVE);
+}
+json tool_freeze_load(Session::CallCtx& c, const json& a) {
+    if (!a.contains("name") || !a["name"].is_string() || a["name"].get<std::string>().empty())
+        return c.fail(GGERR_BAD_REQUEST, "name required");
+    c.params["name"] = a["name"];
+    return c.send(GGCMD_FREEZE_LOAD);
+}
 
 // ---- 模块/符号 ----
 json tool_module_base(Session::CallCtx& c, const json& a) {
@@ -1305,6 +1318,8 @@ const ToolEntry kTools[] = {
     {"gg_freeze",           tool_freeze,           true},
     {"gg_unfreeze",         tool_unfreeze,         true},
     {"gg_freeze_results",   tool_freeze_results,   true},
+    {"gg_freeze_save",      tool_freeze_save,      false},
+    {"gg_freeze_load",      tool_freeze_load,      true},
 
     {"gg_module_base",      tool_module_base,      false},
     {"gg_calc_offset",      tool_calc_offset,      false},

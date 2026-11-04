@@ -131,7 +131,7 @@ if errorlevel 1 ( echo [FAIL] test_shell_security & exit /b 1 )
 rem T3 freeze registry guardrail: add (new / same-addr update / oversize / full-256 reject)
 rem / remove / clear / count pure list logic; protects the freeze-value feature.
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
-  -o "%ROOT%\build\pc\test_freeze.exe" "%ROOT%\tests\unit\test_freeze.c" "%ROOT%\agentd\freeze.c" -lpthread
+  -o "%ROOT%\build\pc\test_freeze.exe" "%ROOT%\tests\unit\test_freeze.c" "%ROOT%\agentd\freeze.c" "%ROOT%\third_party\cJSON.c" -lpthread
 if errorlevel 1 ( echo [FAIL] test_freeze build & exit /b 1 )
 echo === test_freeze ===
 "%ROOT%\build\pc\test_freeze.exe"

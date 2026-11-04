@@ -326,6 +326,18 @@ static const std::vector<ToolDef>& build() {
                  {"limit", prop("integer", "最多处理多少条（默认全部，受 256 槽位限制）")},
              },
              json::array()),
+        tool("gg_freeze_save",
+             "把当前冻结表（地址/大小/值/active 状态）存到设备"
+             " /data/adb/GG-Ghost/freezes/<name>.json。agentd 重启/断线后冻结表全丢"
+             "（挂机锁血会静默失效），保存后可用 gg_freeze_load 一键恢复",
+             json{{"name", prop("string", "保存名（不含路径，限 [A-Za-z0-9._-]{1,64}）")}},
+             json{"name"}),
+        tool("gg_freeze_load",
+             "恢复之前用 gg_freeze_save 存的冻结表（全或无：任一条目非法则原表不动）。"
+             "恢复的是锁定值与 active 状态，循环线程下一轮起继续写回。"
+             "需先 attach 目标进程 —— 冻结地址只对原目标进程有意义",
+             json{{"name", prop("string", "保存名")}},
+             json{"name"}),
 
         // ---- 分析定位 ----
         tool("gg_module_base",

@@ -12,6 +12,27 @@
 
 ## 已完成（近期）
 
+### `gg_freeze_save` / `gg_freeze_load`：冻结表持久化（2026-11-04）
+
+冻结表活在 agentd 内存，重启/崩溃即全丢 —— 挂机锁血场景下冻结静默失效
+（用户以为还锁着，血量早被打下去）。与结果集 save/load 对称：落盘
+`/data/adb/GG-Ghost/freezes/<name>.json`（addr/size/active/value），
+工具面 59 → 61。
+
+- 序列化纯函数在 `freeze.c`（serialize 手工拼接 / deserialize 用 cJSON），
+  PC 可 round-trip 单测；handler 只剩文件 IO 薄壳。
+- **全或无语义**：deserialize 先离线校验全部条目（size 1..8 / count≤256 /
+  value hex 定长），任一条非法则原表原样保留 —— 半载入的冻结表比没载入
+  更危险（用户以为全锁上了，实际锁了一半）。
+- **单锁原子替换**：循环线程可能正在逐条写回，逐条 add/remove 会露出
+  半旧半新中间态（一部分地址还在写旧值）；serialize 侧同理持锁拷快照。
+- load 填表后循环线程（attach 时已启动）下一轮就写目标内存：
+  safe_mode 拒绝 + server 表 write_op=true 双保险（同 FREEZE）。
+- active=0 条目（进程退出自动停写的）保存/恢复保留停写状态。
+- 单测用例 8：round-trip 逐字段比对 + 四种坏输入（size 越界/非 hex/
+  count 不符/非 JSON）全或无不破坏原表。
+- handler 文件 IO 待真机 itest（同 results save/load）。
+
 ### `gg_results_refresh`：手动刷新 / 重置 refine 基线（2026-11-04）
 
 BACKLOG「明确不做」一节挡掉的是**自动**轮询刷新，但手动刷新工具此前一直

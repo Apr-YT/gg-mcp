@@ -182,6 +182,14 @@ enum gg_cmd {
      * 区间/AoB/模糊物化后无基线的场景，refresh 先建基线（changed=0）。
      * 只读操作；undo 可回退到刷新前。 */
     GGCMD_RESULTS_REFRESH,
+    /* 冻结表持久化：freeze 列表活在 agentd 内存，重启/崩溃即丢 —— 挂机
+     * 锁血场景 agentd 一重启冻结全失效。save 落盘
+     * /data/adb/GG-Ghost/freezes/<name>.json（addr/size/active/value），
+     * load 全或无替换注册表（线程循环在跑，替换持同一把锁原子完成；
+     * active 状态保留，循环线程下一轮就把锁定值写回去）。
+     * load 填充后循环线程立即开始写内存：safe_mode 拒绝（同 FREEZE）。 */
+    GGCMD_FREEZE_SAVE,
+    GGCMD_FREEZE_LOAD,
     GGCMD_MAX
 };
 

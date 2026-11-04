@@ -252,6 +252,70 @@ void h_pause_resume(int fd, uint32_t seq, cJSON *p, int pause) {
     cJSON_Delete(r);
 }
 
+/* ---------------- 冻结表持久化（GGCMD_FREEZE_SAVE / GGCMD_FREEZE_LOAD） ----------------
+ * 挂机锁血场景 agentd 重启即冻结全断。落盘同 results save/load：
+ * /data/adb/GG-Ghost/freezes/<name>.json，纯函数在 freeze.c。
+ * load 填表后循环线程（attach 时已起）下一轮就写回：safe_mode 必须拒。 */
+void h_freeze_save(int fd, uint32_t seq, cJSON *p) {
+    if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_FREEZE_SAVE, seq, GGERR_NO_SESSION, "no session"); return; }
+    cJSON *jn = cJSON_GetObjectItem(p, "name");
+    if (!cJSON_IsString(jn) || !gg_safe_result_name(jn->valuestring)) {
+        send_err(fd, GGCMD_FREEZE_SAVE, seq, GGERR_BAD_REQUEST,
+                 "name required: [A-Za-z0-9._-]{1,64}");
+        return;
+    }
+    char *json = freeze_serialize(&g_eng.freeze);
+    if (!json) { send_err(fd, GGCMD_FREEZE_SAVE, seq, GGERR_BAD_REQUEST, "freeze list empty"); return; }
+
+    mkdir("/data/adb/GG-Ghost/freezes", 0700);
+    char path[128];
+    snprintf(path, sizeof(path), "/data/adb/GG-Ghost/freezes/%s.json", jn->valuestring);
+    FILE *f = fopen(path, "w");
+    if (!f) { free(json); send_err(fd, GGCMD_FREEZE_SAVE, seq, GGERR_PERM, "cannot write file"); return; }
+    size_t len = strlen(json);
+    int ok = fwrite(json, 1, len, f) == len;
+    fclose(f);
+    free(json);
+    if (!ok) { send_err(fd, GGCMD_FREEZE_SAVE, seq, GGERR_INTERNAL, "short write"); return; }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "saved", (double)freeze_count(&g_eng.freeze));
+    cJSON_AddStringToObject(r, "path", path);
+    send_ok(fd, GGCMD_FREEZE_SAVE, seq, r);
+    cJSON_Delete(r);
+}
+
+void h_freeze_load(int fd, uint32_t seq, cJSON *p) {
+    if (g_eng.safe_mode) { send_err(fd, GGCMD_FREEZE_LOAD, seq, GGERR_SAFE_MODE, "safe mode: freeze denied"); return; }
+    if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_FREEZE_LOAD, seq, GGERR_NO_SESSION, "no session"); return; }
+    cJSON *jn = cJSON_GetObjectItem(p, "name");
+    if (!cJSON_IsString(jn) || !gg_safe_result_name(jn->valuestring)) {
+        send_err(fd, GGCMD_FREEZE_LOAD, seq, GGERR_BAD_REQUEST,
+                 "name required: [A-Za-z0-9._-]{1,64}");
+        return;
+    }
+    char path[128];
+    snprintf(path, sizeof(path), "/data/adb/GG-Ghost/freezes/%s.json", jn->valuestring);
+    FILE *f = fopen(path, "r");
+    if (!f) { send_err(fd, GGCMD_FREEZE_LOAD, seq, GGERR_BAD_REQUEST, "no such saved freeze list"); return; }
+    /* 上限：256 条 × ~96B < 25KB，给 256KB 防异常文件 */
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 256 * 1024) { fclose(f); send_err(fd, GGCMD_FREEZE_LOAD, seq, GGERR_BAD_REQUEST, "bad file size"); return; }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); send_err(fd, GGCMD_FREEZE_LOAD, seq, GGERR_INTERNAL, "oom"); return; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[got] = '\0';
+    int64_t n = freeze_deserialize(&g_eng.freeze, buf);
+    free(buf);
+    if (n < 0) { send_err(fd, GGCMD_FREEZE_LOAD, seq, GGERR_BAD_REQUEST, "corrupt saved freeze list (table untouched)"); return; }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "count", (double)n);
+    send_ok(fd, GGCMD_FREEZE_LOAD, seq, r);
+    cJSON_Delete(r);
+}
+
 /* ---------------- 内存区域快照（GGCMD_REGION_DUMP / GGCMD_REGION_RESTORE） ----------------
  *
  * 与结果集 save/load（cmd_search.c）同走设备端落盘：大区域走 wire 回 PC 按 2.8MB/s

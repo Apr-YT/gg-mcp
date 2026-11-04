@@ -352,6 +352,8 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
     case GGCMD_FREEZE:             h_freeze(fd, seq, p); break;
     case GGCMD_UNFREEZE:           h_unfreeze(fd, seq, p); break;
     case GGCMD_FREEZE_RESULTS:     h_freeze_results(fd, seq, p); break;
+    case GGCMD_FREEZE_SAVE:       h_freeze_save(fd, seq, p); break;
+    case GGCMD_FREEZE_LOAD:       h_freeze_load(fd, seq, p); break;
     case GGCMD_FILTER_RESULTS:     h_filter_results(fd, seq, p); break;
     case GGCMD_SCREENSHOT_ROI:     h_screenshot_roi(fd, seq, p); break;
     case GGCMD_MODULE_BASE:        h_module_base(fd, seq, p); break;

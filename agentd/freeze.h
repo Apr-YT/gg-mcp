@@ -45,6 +45,20 @@ int  freeze_remove(gg_freeze_t *f, uint64_t addr);   /* 移除单条 */
 void freeze_clear(gg_freeze_t *f);
 size_t freeze_count(gg_freeze_t *f);
 
+/* ---- 冻结表持久化（agentd 重启后恢复冻结）----
+ *
+ * 序列化格式（value 为 size 字节的 hex，寄存器字节序即存储字节序）：
+ *   {"count":N,"entries":[{"addr":"0x..","size":n,"active":0|1,"value":"0x.."}]}
+ *
+ * serialize：手工拼接（条目结构定长，hex 无转义问题）；空表返回 NULL。
+ * deserialize：全或无 —— 任一条目非法（size 不在 1..8 / count 超
+ * GG_FREEZE_MAX / 字段缺失）则原表原样保留并返回 -1；全部合法才在
+ * **同一把锁内**替换注册表（循环线程可能正在跑，逐条 add 会露出
+ * 半旧半新的中间态）。active 保留，last_err 清零。
+ * 返回条目数；-1 = 解析/校验失败。 */
+char *freeze_serialize(const gg_freeze_t *f);
+int64_t freeze_deserialize(gg_freeze_t *f, const char *json_text);
+
 #ifdef __cplusplus
 }
 #endif
