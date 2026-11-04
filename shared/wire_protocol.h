@@ -163,6 +163,15 @@ enum gg_cmd {
     GGCMD_RESULTS_SAVE,
     GGCMD_RESULTS_LOAD,
     GGCMD_POINTER_PATH,    /* 多级指针链反向搜索：目标 → 模块锚点（CE pointer scan） */
+    /* 内存区域快照（CE "Memory dump" 对应物）：改数值前先备份整块区域，改坏了恢复。
+     * dump:  {"p":{"name","addr","len"}} → 设备端分块读 [addr,addr+len) 落盘
+     *        /data/adb/GG-Ghost/dumps/<name>.bin（32B 头部：magic+版本+原址+长度+FNV）。
+     *        **残缺备份即失败**：短读直接报错不补 0 —— 备份不完整没有恢复价值，
+     *        静默补 0 会让 restore 把"回收页的假零"写回目标进程（比没有备份危险）。
+     * restore: {"p":{"name","addr"<可选,缺省=dump 原址>}} → 校验头部后分块写回。
+     *        写操作：safe_mode 拒绝。 */
+    GGCMD_REGION_DUMP,
+    GGCMD_REGION_RESTORE,
     GGCMD_MAX
 };
 

@@ -209,6 +209,29 @@ static const std::vector<ToolDef>& build() {
              "increased_by/decreased_by 等 op 可继续用",
              json{{"name", prop("string", "保存名")}},
              json{"name"}),
+        tool("gg_region_dump",
+             "内存区域快照备份（CE Memory dump）：把 [addr, addr+len) 整块读到设备"
+             " /data/adb/GG-Ghost/dumps/<name>.bin（带原址/长度/FNV 校验和头部）。"
+             "改数值/做实验前先 dump 一份，改坏了用 gg_region_restore 一键写回。\n"
+             "残缺即失败：区间里有读不了的页（已回收）会直接报错并删除不完整备份，"
+             "不会补 0 —— 补零备份恢复时会把假数据写回目标进程。\n"
+             "上限 64MB；name 限 [A-Za-z0-9._-]{1,64}",
+             json{
+                 {"name", prop("string", "备份名（不含路径，限 [A-Za-z0-9._-]{1,64}）")},
+                 {"addr", prop("string", "起始地址（0x 十六进制）")},
+                 {"len", prop("integer", "字节数（1..67108864）")},
+             },
+             json{"name", "addr", "len"}),
+        tool("gg_region_restore",
+             "把 gg_region_dump 存的区域快照写回内存。缺省写回 dump 时的原址；"
+             "显式给 addr 可写到别处（把备份对照到另一块内存）。\n"
+             "写回前先完整校验 FNV：文件在设备上损坏（重启/写穿/手工编辑）会拒绝写回，"
+             "把坏数据灌进目标进程比不恢复更危险。写操作，safe_mode 下被拒绝",
+             json{
+                 {"name", prop("string", "备份名")},
+                 {"addr", prop("string", "写回起始地址（可选，缺省 = dump 原址）")},
+             },
+             json{"name"}),
 
         // ---- 读写修改 ----
         tool("gg_read",

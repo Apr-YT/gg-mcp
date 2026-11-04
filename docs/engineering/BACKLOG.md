@@ -12,6 +12,25 @@
 
 ## 已完成（近期）
 
+### 内存区域快照 `gg_region_dump` / `gg_region_restore`（2026-11-04）
+
+CE "Memory dump" 对应物：改数值前备份整块区域，改坏了一键写回。
+与结果集 save/load 一样落盘在设备端（`/data/adb/GG-Ghost/dumps/<name>.bin`，
+32B 头部：magic/版本/原址/长度/FNV-1a），大区域不走 wire（USB 2.8MB/s）。
+
+核心语义是**残缺即失败**：
+- dump 遇短读（页被回收）直接报错删文件，不补 0 —— 补零备份恢复时会把
+  假数据写回目标进程。没做 force 逃生口（is_force 在这台内核上 panic，AGENTS 27）；
+- restore 前先全量校验 FNV 再写回：文件落盘后损坏就拒绝，把坏数据灌进
+  目标进程比不恢复更危险。FNV 是标准 offset basis，PC 侧可用现成实现独立校验；
+- restore 缺省写回 dump 原址，显式 `addr` 可把备份写到别处；写操作，
+  server 表 `write_op=true` + agentd safe_mode 双保险；
+- 上限 64MB 双端校验；短写报错带进度（内存已是部分写回状态）。
+
+纯函数层（dump.c：头部 pack/unpack + 流式 FNV）单测 test_dump.c（14 断言，
+含标准向量 0x811c9dc5/0xe40c292c）；handler 分块读写待真机 itest。
+工具面 55 → 57。
+
 ### 搜索限定模块范围 `module` 参数（2026-11-04）
 
 `gg_search` / `gg_search_range` / `gg_search_unknown_init` 加可选 `module`

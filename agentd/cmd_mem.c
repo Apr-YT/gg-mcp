@@ -16,10 +16,12 @@
  */
 #include "engine_internal.h"
 #include "freeze.h"
+#include "dump.h"
 
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 
@@ -247,5 +249,201 @@ void h_pause_resume(int fd, uint32_t seq, cJSON *p, int pause) {
     cJSON_AddNumberToObject(r, "signal", sig);
     cJSON_AddNumberToObject(r, "rc", rc);
     send_ok(fd, pause ? GGCMD_PAUSE : GGCMD_RESUME, seq, r);
+    cJSON_Delete(r);
+}
+
+/* ---------------- 内存区域快照（GGCMD_REGION_DUMP / GGCMD_REGION_RESTORE） ----------------
+ *
+ * 与结果集 save/load（cmd_search.c）同走设备端落盘：大区域走 wire 回 PC 按 2.8MB/s
+ * 要几十秒，本地 /data 直接写。文件格式与 FNV 见 dump.h。
+ *
+ * 残缺即失败是本对命令的核心语义：
+ *   - dump 遇短读（页被回收 / is_force=0 读不了）直接报错删文件，不补 0 ——
+ *     备份不完整没有恢复价值，而"补 0 的完整长度"会让 restore 把假零写回目标进程。
+ *     注意 force 读在这台内核上会 panic（AGENTS 27），所以不做 force 逃生口；
+ *   - restore 前先完整校验 FNV，文件落盘后损坏（重启/写穿/手工编辑）就拒绝写回，
+ *     把坏数据写进目标内存比不恢复危险得多。
+ */
+
+static void region_dump_path(char *out, size_t outsz, const char *name) {
+    snprintf(out, outsz, "/data/adb/GG-Ghost/dumps/%s.bin", name);
+}
+
+void h_region_dump(int fd, uint32_t seq, cJSON *p) {
+    uint16_t cmd = GGCMD_REGION_DUMP;
+    if (g_eng.session_pid <= 0) { send_err(fd, cmd, seq, GGERR_NO_SESSION, "no session"); return; }
+    cJSON *jn = cJSON_GetObjectItem(p, "name");
+    if (!cJSON_IsString(jn) || !gg_safe_result_name(jn->valuestring)) {
+        send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "name required: [A-Za-z0-9._-]{1,64}");
+        return;
+    }
+    const cJSON *ja = cJSON_GetObjectItem(p, "addr");
+    uint64_t addr = 0;
+    if (!ja || !j_addr_u64((cJSON *)ja, &addr)) {
+        send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "addr required (hex string or number)");
+        return;
+    }
+    const cJSON *jl = cJSON_GetObjectItem(p, "len");
+    if (!jl || !cJSON_IsNumber(jl) || jl->valuedouble < 1 ||
+        jl->valuedouble > (double)GG_DUMP_MAX_BYTES) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "len must be 1..%u bytes", GG_DUMP_MAX_BYTES);
+        send_err(fd, cmd, seq, GGERR_BAD_REQUEST, msg);
+        return;
+    }
+    uint64_t len = (uint64_t)jl->valuedouble;
+
+    mkdir("/data/adb/GG-Ghost/dumps", 0700);
+    char path[128];
+    region_dump_path(path, sizeof(path), jn->valuestring);
+    /* "w+b"：头部先写占位（checksum 未知），流完数据后 fseek 回填。
+     * 不先在内存拼完整镜像 —— 64MB 上限下那要多吃一份内存。 */
+    FILE *f = fopen(path, "w+b");
+    if (!f) { send_err(fd, cmd, seq, GGERR_PERM, "cannot write file"); return; }
+    uint8_t *chunk = malloc(GG_SEARCH_CHUNK);
+    if (!chunk) { fclose(f); remove(path); send_err(fd, cmd, seq, GGERR_INTERNAL, "oom"); return; }
+
+    int io_failed = 0;
+    uint8_t hdr[GG_DUMP_HEADER_LEN];
+    gg_dump_header_pack(hdr, addr, len, 0);
+    if (fwrite(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) io_failed = 1;
+
+    uint32_t sum = GG_FNV_OFFSET_BASIS;
+    uint64_t done = 0;
+    while (!io_failed && done < len) {
+        size_t want = (len - done) > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)(len - done);
+        ssize_t got = driver_read_ex(&g_eng.drv, g_eng.session_pid, addr + done,
+                                     chunk, want, 0);
+        if (got != (ssize_t)want) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "short read at 0x%llx (%lld of %zu bytes): page not resident? "
+                     "dump aborted, incomplete backup removed; "
+                     "try a smaller range or an active mapping",
+                     (unsigned long long)(addr + done), (long long)got, want);
+            free(chunk); fclose(f); remove(path);
+            send_err(fd, cmd, seq, GGERR_INTERNAL, msg);
+            return;
+        }
+        if (fwrite(chunk, 1, want, f) != want) { io_failed = 1; break; }
+        sum = gg_fnv1a32(chunk, want, sum);
+        done += want;
+    }
+
+    if (!io_failed) {
+        gg_dump_header_pack(hdr, addr, len, sum);
+        if (fseek(f, 0, SEEK_SET) != 0 || fwrite(hdr, 1, sizeof(hdr), f) != sizeof(hdr))
+            io_failed = 1;
+    }
+    if (fclose(f) != 0) io_failed = 1;
+    free(chunk);
+    if (io_failed) {
+        remove(path);
+        send_err(fd, cmd, seq, GGERR_INTERNAL, "file write failed (disk full?)");
+        return;
+    }
+
+    {
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddNumberToObject(r, "bytes", (double)len);
+        char abuf[32];
+        snprintf(abuf, sizeof(abuf), "0x%llx", (unsigned long long)addr);
+        cJSON_AddStringToObject(r, "addr", abuf);
+        cJSON_AddStringToObject(r, "path", path);
+        cJSON_AddNumberToObject(r, "checksum", (double)sum);
+        send_ok(fd, cmd, seq, r);
+        cJSON_Delete(r);
+    }
+}
+
+void h_region_restore(int fd, uint32_t seq, cJSON *p) {
+    uint16_t cmd = GGCMD_REGION_RESTORE;
+    if (g_eng.safe_mode) { send_err(fd, cmd, seq, GGERR_SAFE_MODE, "safe mode: restore denied"); return; }
+    if (g_eng.session_pid <= 0) { send_err(fd, cmd, seq, GGERR_NO_SESSION, "no session"); return; }
+    cJSON *jn = cJSON_GetObjectItem(p, "name");
+    if (!cJSON_IsString(jn) || !gg_safe_result_name(jn->valuestring)) {
+        send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "name required: [A-Za-z0-9._-]{1,64}");
+        return;
+    }
+    char path[128];
+    region_dump_path(path, sizeof(path), jn->valuestring);
+    FILE *f = fopen(path, "rb");
+    if (!f) { send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "no such dump"); return; }
+
+    /* 第一遍：读头部 + 全量 FNV 校验。文件在设备上可能躺了几天，
+     * 写回前不校验就是把潜在的坏数据直接灌进目标进程。 */
+    uint8_t hdr[GG_DUMP_HEADER_LEN];
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) { fclose(f); send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "corrupt dump (short header)"); return; }
+    uint64_t orig_addr, len;
+    uint32_t want_sum;
+    if (gg_dump_header_unpack(hdr, sizeof(hdr), &orig_addr, &len, &want_sum) != 0) {
+        fclose(f); send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "corrupt dump (bad header)"); return;
+    }
+    uint8_t *chunk = malloc(GG_SEARCH_CHUNK);
+    if (!chunk) { fclose(f); send_err(fd, cmd, seq, GGERR_INTERNAL, "oom"); return; }
+    uint32_t sum = GG_FNV_OFFSET_BASIS;
+    uint64_t checked = 0;
+    while (checked < len) {
+        size_t want = (len - checked) > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)(len - checked);
+        if (fread(chunk, 1, want, f) != want) {
+            free(chunk); fclose(f);
+            send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "corrupt dump (truncated data)");
+            return;
+        }
+        sum = gg_fnv1a32(chunk, want, sum);
+        checked += want;
+    }
+    if (sum != want_sum) {
+        free(chunk); fclose(f);
+        send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "checksum mismatch: dump file corrupted, refusing to write back");
+        return;
+    }
+
+    /* 写回地址：缺省 = dump 原址；显式给 addr 可把备份写到别处（对照分析用） */
+    uint64_t addr = orig_addr;
+    const cJSON *ja = cJSON_GetObjectItem(p, "addr");
+    if (ja && !j_addr_u64((cJSON *)ja, &addr)) {
+        free(chunk); fclose(f);
+        send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "invalid addr");
+        return;
+    }
+
+    /* 第二遍：rewind 越过头部，分块写回。短写必须报错并带上进度 ——
+     * 此时内存已写了一半，调用方需要知道断点才能决定重试还是放弃。 */
+    if (fseek(f, GG_DUMP_HEADER_LEN, SEEK_SET) != 0) {
+        free(chunk); fclose(f);
+        send_err(fd, cmd, seq, GGERR_INTERNAL, "seek failed");
+        return;
+    }
+    uint64_t done = 0;
+    while (done < len) {
+        size_t want = (len - done) > GG_SEARCH_CHUNK ? GG_SEARCH_CHUNK : (size_t)(len - done);
+        if (fread(chunk, 1, want, f) != want) {
+            free(chunk); fclose(f);
+            send_err(fd, cmd, seq, GGERR_INTERNAL, "file changed during restore?");
+            return;
+        }
+        ssize_t w = driver_write(&g_eng.drv, g_eng.session_pid, addr + done, chunk, want);
+        if (w != (ssize_t)want) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "short write at 0x%llx after %llu bytes: memory state is now PARTIAL",
+                     (unsigned long long)(addr + done), (unsigned long long)done);
+            free(chunk); fclose(f);
+            send_err(fd, cmd, seq, GGERR_INTERNAL, msg);
+            return;
+        }
+        done += want;
+    }
+    free(chunk);
+    fclose(f);
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "bytes", (double)len);
+    char abuf[32];
+    snprintf(abuf, sizeof(abuf), "0x%llx", (unsigned long long)addr);
+    cJSON_AddStringToObject(r, "addr", abuf);
+    cJSON_AddStringToObject(r, "source", path);
+    send_ok(fd, cmd, seq, r);
     cJSON_Delete(r);
 }

@@ -137,6 +137,16 @@ echo === test_freeze ===
 "%ROOT%\build\pc\test_freeze.exe"
 if errorlevel 1 ( echo [FAIL] test_freeze & exit /b 1 )
 
+rem region dump/restore pure-function guardrail: header pack/unpack roundtrip,
+rem bad magic/version/len rejected, streamed FNV equals one-shot + known vectors.
+rem File IO + chunked driver read/write live in cmd_mem.c handlers (itest territory).
+gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
+  -o "%ROOT%\build\pc\test_dump.exe" "%ROOT%\tests\unit\test_dump.c" "%ROOT%\agentd\dump.c"
+if errorlevel 1 ( echo [FAIL] test_dump build & exit /b 1 )
+echo === test_dump ===
+"%ROOT%\build\pc\test_dump.exe"
+if errorlevel 1 ( echo [FAIL] test_dump & exit /b 1 )
+
 rem T6 watch dedup cursor guardrail: rwproc path rwproc_hit_consumed[] reports only new hits,
 rem cap-truncated remainder refilled, per-bp independent cursors; ptrace path keeps remainder (fix).
 rem Needs posix_stub (MinGW lacks sys/ptrace.h sys/uio.h sys/wait.h signal.h).

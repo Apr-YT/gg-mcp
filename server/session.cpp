@@ -677,6 +677,36 @@ json tool_results_load(Session::CallCtx& c, const json& a) {
     return c.send(GGCMD_RESULTS_LOAD);
 }
 
+// ---- 内存区域快照（CE "Memory dump" 对应物）----
+// 与结果集 save/load 一样落盘在设备端：大区域走 wire 回 PC 按 USB 带宽要几十秒。
+// dump 只读不写内存，restore 是写操作（表里 write_op=true，safe_mode 双保险拒绝）。
+json tool_region_dump(Session::CallCtx& c, const json& a) {
+    if (!a.contains("name") || !a["name"].is_string() || a["name"].get<std::string>().empty())
+        return c.fail(GGERR_BAD_REQUEST, "name required");
+    if (!a.contains("addr"))
+        return c.fail(GGERR_BAD_REQUEST, "addr required");
+    if (!put_addr_param(a, c.params))
+        return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or hex string");
+    // len 双端校验：这里先挡明显异常，agentd 用同一上限再挡一遍（wire 直连脚本绕过时兜底）
+    if (!a.contains("len") || !a["len"].is_number() ||
+        a["len"].get<double>() < 1 || a["len"].get<double>() > (64.0 * 1024 * 1024))
+        return c.fail(GGERR_BAD_REQUEST, "len must be 1..67108864 bytes");
+    c.params["name"] = a["name"];
+    c.params["len"] = a["len"];
+    return c.send(GGCMD_REGION_DUMP);
+}
+json tool_region_restore(Session::CallCtx& c, const json& a) {
+    if (!a.contains("name") || !a["name"].is_string() || a["name"].get<std::string>().empty())
+        return c.fail(GGERR_BAD_REQUEST, "name required");
+    // addr 可选：缺省写回 dump 时的原址；给了就由 agentd 解析（j_addr_u64 兼容数字/字符串）
+    if (a.contains("addr")) {
+        if (!put_addr_param(a, c.params))
+            return c.fail(GGERR_BAD_REQUEST, "addr must be a non-negative integer or hex string");
+    }
+    c.params["name"] = a["name"];
+    return c.send(GGCMD_REGION_RESTORE);
+}
+
 // ---- 内存读/写 ----
 json tool_read(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
@@ -1258,6 +1288,8 @@ const ToolEntry kTools[] = {
     {"gg_clear_results",    tool_clear_results,    false},
     {"gg_results_save",     tool_results_save,     false},
     {"gg_results_load",     tool_results_load,     false},
+    {"gg_region_dump",      tool_region_dump,      false},
+    {"gg_region_restore",   tool_region_restore,   true},
 
     {"gg_read",             tool_read,             false},
     {"gg_read_bytes",       tool_read_bytes,       false},

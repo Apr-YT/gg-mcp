@@ -865,6 +865,25 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    - 签名变更是破坏性的：引擎 5 个 search_* 都加了 `const char *module`
      尾参，外部如有 fork 的调用点要同步。
 
+47. **`gg_region_dump` / `gg_region_restore`：内存区域快照（2026-11-04，真机未验）**
+
+   CE "Memory dump" 对应物：改数值前备份整块区域，改坏了一键写回。
+   落盘 `/data/adb/GG-Ghost/dumps/<name>.bin`，32B 头部
+   （magic "GGRD"/版本/原址/长度/FNV-1a），纯函数层在 `agentd/dump.c`。
+
+   - **残缺即失败是语义核心，别"顺手优化"成补 0**：dump 遇短读报错删文件
+     （补零备份恢复时会把假零写回目标进程）；restore 前全量校验 FNV，
+     文件损坏拒绝写回（坏数据灌进目标进程比不恢复危险）。没有 force
+     逃生口 —— is_force_read 在这台内核上 panic（第 27 条）。
+   - FNV 用标准 offset basis（`GG_FNV_OFFSET_BASIS`）起步：dump 文件可被
+     PC 侧任何现成 FNV-1a 实现独立校验。改成自定义 seed 就丢掉了这个能力。
+   - restore 缺省写回 dump 原址（头部里的 orig_addr），显式 `addr` 写别处；
+     写操作：server 表 `write_op=true` + agentd safe_mode 双保险。
+   - 头部 `payload_len` 超过 `GG_DUMP_MAX_BYTES`(64MB) 在 unpack 里就判非法
+     （不依赖调用方先查）；len 双端校验。
+   - handler（cmd_mem.c）的分块驱动读写 + 文件 IO 待真机 itest；
+     纯函数层 test_dump.c 已过（含标准向量）。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
@@ -885,7 +904,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-11-04（第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。
+本文件最后校准：2026-11-04（第 47 条 region dump/restore；同日早些：第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。
 上一条校准：2026-11-03（第 43 条 anon_ring 审查 + 第 44 条 BACKLOG 5/6/12 收口）。
 上一条校准：2026-10-23 19:55（HEAD `8bddaf5`）：项目结构补 `ko/` 与 `build/` 说明、
 结构护栏补到 6 道、main.c 拆分收尾（683 行）、清掉已删除的 GG 核心注入链路表述、

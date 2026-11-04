@@ -132,6 +132,10 @@ void h_freeze(int fd, uint32_t seq, cJSON *p);
 void h_unfreeze(int fd, uint32_t seq, cJSON *p);
 void h_freeze_results(int fd, uint32_t seq, cJSON *p);
 void h_pause_resume(int fd, uint32_t seq, cJSON *p, int pause);
+/* 内存区域快照：dump 落盘备份（只读操作），restore 写回（写操作，safe_mode 拒绝）。
+ * 残缺即失败：短读/短写/FNV 不符一律报错，不产出残缺备份、不写回坏数据。 */
+void h_region_dump(int fd, uint32_t seq, cJSON *p);
+void h_region_restore(int fd, uint32_t seq, cJSON *p);
 
 /* cmd_view.c — 内存视图 / 符号解析 / 指针链
  * （这三条本来以"前置声明"形式写在 main.c 的 h_kernel_status 之后，
