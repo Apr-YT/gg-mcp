@@ -6,6 +6,7 @@
  */
 #include "search.h"
 #include "process.h"
+#include "third_party/cJSON.h"   /* results_deserialize 的 JSON 解析 */
 
 #include <math.h>
 #include <stdio.h>
@@ -1517,6 +1518,108 @@ size_t results_materialize(gg_results_t *r) {
     r->fuzzy_active = 0;
     r->fuzzy_region_count = 0;
     return n;
+}
+
+/* ---------- 结果集持久化（save/load）----------
+ *
+ * 动机：结果集活在 agentd 进程内存里，agentd 重启/崩溃/断线重连后全丢 ——
+ * 几百候选收敛到一半的长任务直接报废。落盘成 JSON，跨会话恢复。
+ *
+ * 保存语义：地址 + 「最近一轮的值」（exact_vals 就是这个；fuzzy 先物化）。
+ * 恢复语义：加载成 exact 结果集（exact_vt + exact_vals=保存值 + valid=1），
+ * refine（含 increased_by 等）从保存值继续比较，链路完整。
+ *
+ * 序列化/反序列化是纯函数（search.c 内不碰文件），文件 IO 在 cmd_search.c
+ * 的薄壳里 —— 这样 round-trip 能在 PC 上单测（tests/unit/test_search.c）。 */
+
+/* 手工拼 JSON 而不是 cJSON：10 万条结果 cJSON 逐节点构造又慢又费内存，
+ * 地址数组直接 snprintf 拼接（hex 定长，无转义问题）。 */
+char *results_serialize(const gg_results_t *r, int vtype) {
+    if (!r || r->count == 0 || !r->addrs) return NULL;
+    if (r->fuzzy_active) return NULL;          /* 调用方须先物化 */
+    size_t cap = 64 + r->count * 24;           /* "0x%llx",  足够 */
+    char *s = malloc(cap);
+    if (!s) return NULL;
+    int off = snprintf(s, cap, "{\"vtype\":%d,\"count\":%zu,\"addrs\":[", vtype, r->count);
+    for (size_t i = 0; i < r->count && off > 0 && (size_t)off < cap - 24; i++) {
+        off += snprintf(s + off, cap - (size_t)off, "%s\"0x%llx\"",
+                        i ? "," : "", (unsigned long long)r->addrs[i]);
+    }
+    off += snprintf(s + off, cap - (size_t)off, "],\"vals\":[");
+    for (size_t i = 0; i < r->count && off > 0 && (size_t)off < cap - 24; i++) {
+        uint64_t v = r->exact_vals ? r->exact_vals[i] : 0;
+        off += snprintf(s + off, cap - (size_t)off, "%s\"0x%llx\"",
+                        i ? "," : "", (unsigned long long)v);
+    }
+    snprintf(s + off, cap - (size_t)off, "]}");
+    return s;
+}
+
+/* 返回成功加载的条数；<0 = 格式错误。成功时 r 被整体重建（原内容清掉）。 */
+int64_t results_deserialize(gg_results_t *r, const char *json_text) {
+    if (!r || !json_text) return -1;
+    cJSON *j = cJSON_Parse(json_text);
+    if (!j) return -1;
+    cJSON *jvt = cJSON_GetObjectItem(j, "vtype");
+    cJSON *ja  = cJSON_GetObjectItem(j, "addrs");
+    cJSON *jv  = cJSON_GetObjectItem(j, "vals");
+    if (!cJSON_IsNumber(jvt) || !cJSON_IsArray(ja) || !cJSON_IsArray(jv)) {
+        cJSON_Delete(j); return -1;
+    }
+    int vt = (int)jvt->valuedouble;
+    if (vt < VT_BYTE || vt > VT_DOUBLE) { cJSON_Delete(j); return -1; }
+    size_t n = cJSON_GetArraySize(ja);
+    size_t nv = cJSON_GetArraySize(jv);
+    if (n == 0 || nv != n) { cJSON_Delete(j); return -1; }
+
+    results_clear(r);
+    results_init(r, n < GG_RESULT_CAP_DEFAULT ? n : GG_RESULT_CAP_DEFAULT);
+    if (r->cap < n) r->cap = n;    /* init 只给默认 cap，这里补到 n（push 会用满） */
+    r->addrs = malloc(n * sizeof(uint64_t));
+    r->exact_vals = malloc(n * sizeof(uint64_t));
+    if (!r->addrs || !r->exact_vals) { results_clear(r); cJSON_Delete(j); return -1; }
+    size_t k = 0;
+    cJSON *a = NULL;
+    cJSON_ArrayForEach(a, ja) {
+        if (!cJSON_IsString(a)) continue;
+        char *end = NULL;
+        uint64_t addr = strtoull(a->valuestring, &end, 16);
+        if (!end || *end) continue;
+        r->addrs[k++] = addr;
+    }
+    if (k != n) { results_clear(r); cJSON_Delete(j); return -1; }
+    k = 0;
+    cJSON *v = NULL;
+    cJSON_ArrayForEach(v, jv) {
+        if (!cJSON_IsString(v)) { results_clear(r); cJSON_Delete(j); return -1; }
+        char *end = NULL;
+        uint64_t val = strtoull(v->valuestring, &end, 16);
+        if (!end || *end) { results_clear(r); cJSON_Delete(j); return -1; }
+        r->exact_vals[k++] = val;
+    }
+    r->count = n;
+    r->exact_vt = vt;
+    r->exact_value = 0;
+    r->exact_vals_valid = 1;
+    cJSON_Delete(j);
+    return (int64_t)n;
+}
+
+/* save/load 的文件名校验：[A-Za-z0-9._-]{1,64}，拒路径穿越与控制字符。
+ * 返回 1 = 合法。名字直接拼进文件路径，任何 "../" 或 '/' 都不许出现。 */
+int gg_safe_result_name(const char *name) {
+    if (!name) return 0;
+    size_t n = strlen(name);
+    if (n == 0 || n > 64) return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = name[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
+            return 0;
+        /* 连续 '.' 的第一段是 ".."：开头检查（防 "../x"），中段也防（多余但廉价） */
+        if (c == '.' && i + 1 < n && name[i + 1] == '.') return 0;
+    }
+    return 1;
 }
 
 /* 批量读连续地址段：addrs[0..n) 中从 idx 起收集连续段（步长 sz，段长 ≤ GG_SEARCH_CHUNK），

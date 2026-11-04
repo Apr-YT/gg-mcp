@@ -168,6 +168,11 @@ int64_t search_filter_exact(gg_driver_t *d, pid_t pid, gg_results_t *r,
 
 /* 物化模糊候选 → addrs（<= cap 时）。返回物化数量。 */
 size_t results_materialize(gg_results_t *r);
+/* 持久化（save/load）：序列化/反序列化是纯函数（PC 可单测），
+ * 文件 IO 在 cmd_search.c。fuzzy 须先物化。 */
+char *results_serialize(const gg_results_t *r, int vtype);
+int64_t results_deserialize(gg_results_t *r, const char *json_text);
+int gg_safe_result_name(const char *name);
 
 /* 值分布摘要：把结果集的**当前值**聚合成 top-N（按出现次数降序）。
  * 用途：AI 拿到上万条候选时先看"是不是绝大多数都是同一个值"，一眼定位异常值。

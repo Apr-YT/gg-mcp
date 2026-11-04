@@ -21,6 +21,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>       /* save/load 的文件 IO */
+#include <sys/stat.h>    /* mkdir */
 
 
 static int parse_region(const cJSON *p, int def) {
@@ -291,6 +293,68 @@ void h_refine(int fd, uint32_t seq, cJSON *p) {
 }
 
 /* 反汇编目标进程内存（Capstone ARM64）: {addr, length} → {insns:[{addr,bytes,mnemonic,op_str,comment}]} */
+
+void h_results_save(int fd, uint32_t seq, cJSON *p) {
+    if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_RESULTS_SAVE, seq, GGERR_NO_SESSION, "no session"); return; }
+    cJSON *jn = cJSON_GetObjectItem(p, "name");
+    if (!cJSON_IsString(jn) || !gg_safe_result_name(jn->valuestring)) {
+        send_err(fd, GGCMD_RESULTS_SAVE, seq, GGERR_BAD_REQUEST,
+                 "name required: [A-Za-z0-9._-]{1,64}");
+        return;
+    }
+    /* fuzzy 先物化：位图+快照可达 256MB，不落盘；保存的是地址+最近值 */
+    if (g_eng.results.fuzzy_active) results_materialize(&g_eng.results);
+    int vt = g_eng.results.exact_vt > 0 ? g_eng.results.exact_vt : VT_DWORD;
+    char *json = results_serialize(&g_eng.results, vt);
+    if (!json) { send_err(fd, GGCMD_RESULTS_SAVE, seq, GGERR_BAD_REQUEST, "result set empty"); return; }
+
+    mkdir("/data/adb/GG-Ghost/results", 0700);
+    char path[128];
+    snprintf(path, sizeof(path), "/data/adb/GG-Ghost/results/%s.json", jn->valuestring);
+    FILE *f = fopen(path, "w");
+    if (!f) { free(json); send_err(fd, GGCMD_RESULTS_SAVE, seq, GGERR_PERM, "cannot write file"); return; }
+    size_t len = strlen(json);
+    int ok = fwrite(json, 1, len, f) == len;
+    fclose(f);
+    free(json);
+    if (!ok) { send_err(fd, GGCMD_RESULTS_SAVE, seq, GGERR_INTERNAL, "short write"); return; }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "saved", (double)g_eng.results.count);
+    cJSON_AddStringToObject(r, "path", path);
+    send_ok(fd, GGCMD_RESULTS_SAVE, seq, r);
+    cJSON_Delete(r);
+}
+
+void h_results_load(int fd, uint32_t seq, cJSON *p) {
+    if (g_eng.session_pid <= 0) { send_err(fd, GGCMD_RESULTS_LOAD, seq, GGERR_NO_SESSION, "no session"); return; }
+    cJSON *jn = cJSON_GetObjectItem(p, "name");
+    if (!cJSON_IsString(jn) || !gg_safe_result_name(jn->valuestring)) {
+        send_err(fd, GGCMD_RESULTS_LOAD, seq, GGERR_BAD_REQUEST,
+                 "name required: [A-Za-z0-9._-]{1,64}");
+        return;
+    }
+    char path[128];
+    snprintf(path, sizeof(path), "/data/adb/GG-Ghost/results/%s.json", jn->valuestring);
+    FILE *f = fopen(path, "r");
+    if (!f) { send_err(fd, GGCMD_RESULTS_LOAD, seq, GGERR_BAD_REQUEST, "no such saved set"); return; }
+    /* 文件大小钳制：正常上限 = 10 万条 × ~24B ≈ 2.4MB，给 8MB 上限防异常文件 */
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 8 * 1024 * 1024) { fclose(f); send_err(fd, GGCMD_RESULTS_LOAD, seq, GGERR_BAD_REQUEST, "bad file size"); return; }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); send_err(fd, GGCMD_RESULTS_LOAD, seq, GGERR_INTERNAL, "oom"); return; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[got] = '\0';
+    int64_t n = results_deserialize(&g_eng.results, buf);
+    free(buf);
+    if (n < 0) { send_err(fd, GGCMD_RESULTS_LOAD, seq, GGERR_BAD_REQUEST, "corrupt saved set"); return; }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "count", (double)n);
+    send_ok(fd, GGCMD_RESULTS_LOAD, seq, r);
+    cJSON_Delete(r);
+}
 
 void h_result_count(int fd, uint32_t seq, cJSON *p) {
     cJSON *r = cJSON_CreateObject();

@@ -655,6 +655,20 @@ json tool_get_results(Session::CallCtx& c, const json& a) {
 }
 json tool_clear_results(Session::CallCtx& c, const json&) { return c.send(GGCMD_CLEAR_RESULTS); }
 
+// 结果集持久化：name 设备端校验（路径穿越防御在 agentd，这里只挡空值）
+json tool_results_save(Session::CallCtx& c, const json& a) {
+    if (!a.contains("name") || !a["name"].is_string() || a["name"].get<std::string>().empty())
+        return c.fail(GGERR_BAD_REQUEST, "name required");
+    c.params["name"] = a["name"];
+    return c.send(GGCMD_RESULTS_SAVE);
+}
+json tool_results_load(Session::CallCtx& c, const json& a) {
+    if (!a.contains("name") || !a["name"].is_string() || a["name"].get<std::string>().empty())
+        return c.fail(GGERR_BAD_REQUEST, "name required");
+    c.params["name"] = a["name"];
+    return c.send(GGCMD_RESULTS_LOAD);
+}
+
 // ---- 内存读/写 ----
 json tool_read(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
@@ -1200,6 +1214,8 @@ const ToolEntry kTools[] = {
     {"gg_result_count",     tool_result_count,     false},
     {"gg_get_results",      tool_get_results,      false},
     {"gg_clear_results",    tool_clear_results,    false},
+    {"gg_results_save",     tool_results_save,     false},
+    {"gg_results_load",     tool_results_load,     false},
 
     {"gg_read",             tool_read,             false},
     {"gg_read_bytes",       tool_read_bytes,       false},

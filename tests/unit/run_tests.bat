@@ -60,7 +60,7 @@ rem caller's limit. Search hits are mostly contiguous addresses, so without
 rem that bound a single small-page read overruns out_addrs/out_values.
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
   -o "%ROOT%\build\pc\test_results_page.exe" "%ROOT%\tests\unit\test_results_page.c" ^
-  "%ROOT%\agentd\search.c"
+  "%ROOT%\agentd\search.c" "%ROOT%\third_party\cJSON.c"
 if errorlevel 1 ( echo [FAIL] test_results_page build & exit /b 1 )
 
 gcc -O2 -Wall -I"%ROOT%" -o "%ROOT%\build\pc\test_elfsym.exe" ^
@@ -89,7 +89,7 @@ rem 2026-10-21; test_elfsym therefore always runs against its own fixture.
 if errorlevel 1 ( echo [FAIL] test_elfsym & exit /b 1 )
 
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
-  -o "%ROOT%\build\pc\test_search.exe" "%ROOT%\tests\unit\test_search.c" "%ROOT%\agentd\search.c" -lpthread
+  -o "%ROOT%\build\pc\test_search.exe" "%ROOT%\tests\unit\test_search.c" "%ROOT%\agentd\search.c" "%ROOT%\third_party\cJSON.c" -lpthread
 if errorlevel 1 ( echo [FAIL] test_search build & exit /b 1 )
 echo === test_search ===
 "%ROOT%\build\pc\test_search.exe"
@@ -97,12 +97,12 @@ if errorlevel 1 ( echo [FAIL] test_search & exit /b 1 )
 
 rem AoB cross-block/fault-page: search_aob carry buffer
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
-  -o "%ROOT%\build\pc\test_aob.exe" "%ROOT%\tests\unit\test_aob.c" "%ROOT%\agentd\search.c" -lpthread
+  -o "%ROOT%\build\pc\test_aob.exe" "%ROOT%\tests\unit\test_aob.c" "%ROOT%\agentd\search.c" "%ROOT%\third_party\cJSON.c" -lpthread
 if errorlevel 1 ( echo [FAIL] test_aob build & exit /b 1 )
 
 rem multi-region parallel sharding: search_exact thread merge correctness
 gcc -O2 -Wall -I"%ROOT%" -I"%ROOT%\agentd" -I"%ROOT%\shared" ^
-  -o "%ROOT%\build\pc\test_parallel.exe" "%ROOT%\tests\unit\test_parallel.c" "%ROOT%\agentd\search.c" -lpthread
+  -o "%ROOT%\build\pc\test_parallel.exe" "%ROOT%\tests\unit\test_parallel.c" "%ROOT%\agentd\search.c" "%ROOT%\third_party\cJSON.c" -lpthread
 if errorlevel 1 ( echo [FAIL] test_parallel build & exit /b 1 )
 echo === test_parallel ===
 "%ROOT%\build\pc\test_parallel.exe"

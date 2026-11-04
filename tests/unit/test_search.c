@@ -534,6 +534,49 @@ int main(void) {
         results_clear(&r);
     }
 
+    /* === 14) 结果集 save/load round-trip + 文件名校验 === */
+    mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + 0x10000);
+    {
+        uint64_t a = TEST_MEM_BASE + 0x1000;
+        mem_write_u32(a, 0xCAFEBABEu);
+        results_init(&r, 0);
+        search_exact(NULL, 0, &r, VT_DWORD, 0xCAFEBABEu, 0);
+        r.exact_vals[0] = 0x12345678ull;   /* 模拟"最近一轮值"≠搜索值 */
+        char *json = results_serialize(&r, VT_DWORD);
+        check(json != NULL, "14) serialize 非空");
+        /* round-trip 到新结果集 */
+        gg_results_t r2; memset(&r2, 0, sizeof(r2));
+        int64_t n = results_deserialize(&r2, json);
+        free(json);
+        check(n == 1 && r2.count == 1, "14) deserialize 恢复 1 条");
+        check(r2.addrs[0] == a, "14) 地址一致");
+        check(r2.exact_vt == VT_DWORD && r2.exact_vals_valid == 1,
+              "14) 类型与基线标记恢复 (refine 可直接用)");
+        check(r2.exact_vals[0] == 0x12345678ull, "14) 最近一轮值一致");
+        results_clear(&r2);
+        results_clear(&r);
+
+        /* 坏输入必须拒绝（不许半边加载） */
+        gg_results_t r3; memset(&r3, 0, sizeof(r3));
+        check(results_deserialize(&r3, "{}") == -1, "14) 缺字段拒绝");
+        check(results_deserialize(&r3, "not json") == -1, "14) 非 JSON 拒绝");
+        check(results_deserialize(&r3,
+              "{\"vtype\":3,\"count\":2,\"addrs\":[\"0x1000\"],\"vals\":[\"0x1\",\"0x2\"]}")
+              == -1, "14) addrs/vals 长度不一致拒绝");
+        check(results_deserialize(&r3,
+              "{\"vtype\":99,\"count\":1,\"addrs\":[\"0x1000\"],\"vals\":[\"0x1\"]}")
+              == -1, "14) 非法 vtype 拒绝");
+        results_clear(&r3);
+
+        /* 文件名校验：路径穿越与控制字符必须挡掉 */
+        check(gg_safe_result_name("hp_stage1") == 1, "14) 正常名通过");
+        check(gg_safe_result_name("a.b-c_1") == 1, "14) 点横线下划线通过");
+        check(gg_safe_result_name("../etc/passwd") == 0, "14) ../ 路径穿越拒绝");
+        check(gg_safe_result_name("a/b") == 0, "14) 斜杠拒绝");
+        check(gg_safe_result_name("") == 0, "14) 空名拒绝");
+        check(gg_safe_result_name("has space") == 0, "14) 空格拒绝");
+    }
+
     printf(fails ? "\n== FAILED: %d ==\n" : "\n== ALL PASS ==\n", fails);
     return fails ? 1 : 0;
 }

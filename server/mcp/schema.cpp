@@ -185,6 +185,18 @@ static const std::vector<ToolDef>& build() {
         tool("gg_clear_results",
              "清空当前搜索结果（含模糊状态）",
              json::object(), json::array()),
+        tool("gg_results_save",
+             "把当前结果集（地址+最近值）存到设备 /data/adb/GG-Ghost/results/<name>.json。"
+             "agentd 重启/断线后结果集全丢，长任务保存后可用 gg_results_load 跨会话恢复；"
+             "模糊搜索会先物化成地址再存。name 限 [A-Za-z0-9._-]{1,64}",
+             json{{"name", prop("string", "保存名（不含路径，限 [A-Za-z0-9._-]{1,64}）")}},
+             json{"name"}),
+        tool("gg_results_load",
+             "从设备恢复之前用 gg_results_save 存的结果集（跨会话）。"
+             "恢复成精确结果集：类型与保存值作为 refine 基线，"
+             "increased_by/decreased_by 等 op 可继续用",
+             json{{"name", prop("string", "保存名")}},
+             json{"name"}),
 
         // ---- 读写修改 ----
         tool("gg_read",

@@ -155,6 +155,13 @@ enum gg_cmd {
      * —— 慢的从来不是截图，是编码。所以走 raw 流 + 只回传 ROI 的灰度。
      * scale 会自动上调，保证 sw*sh <= GG_SCREEN_MAX_PIXELS，避免回传撑爆单帧（1MiB）。 */
     GGCMD_SCREENSHOT_ROI,
+    /* 结果集持久化：agentd 重启/断线后结果集全丢，长任务（几百候选收敛一半）
+     * 直接报废。save 把当前结果集（地址+最近值）落盘
+     * /data/adb/GG-Ghost/results/<name>.json；load 恢复成 exact 结果集
+     * （exact_vals=保存值，refine 链路立即可用）。
+     * fuzzy 位图/快照（可达 256MB）不落盘 —— 物化成地址后保存。 */
+    GGCMD_RESULTS_SAVE,
+    GGCMD_RESULTS_LOAD,
     GGCMD_MAX
 };
 
