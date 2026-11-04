@@ -225,7 +225,7 @@ static int parse_refine_op(const cJSON *p) {
     if (!jo) return REFINE_CHANGED;
     if (cJSON_IsNumber(jo)) {
         int v = (int)jo->valuedouble;
-        if (v >= REFINE_INCREASED && v <= REFINE_CHANGED) return v;
+        if (v >= REFINE_INCREASED && v <= REFINE_DECREASED_BY) return v;
         return -1;
     }
     if (cJSON_IsString(jo)) {
@@ -234,6 +234,9 @@ static int parse_refine_op(const cJSON *p) {
         if (!strcmp(s, "decreased")) return REFINE_DECREASED;
         if (!strcmp(s, "unchanged")) return REFINE_UNCHANGED;
         if (!strcmp(s, "changed"))   return REFINE_CHANGED;
+        /* 增量比较：配合 by 参数（"扣了 25 血"场景） */
+        if (!strcmp(s, "increased_by")) return REFINE_INCREASED_BY;
+        if (!strcmp(s, "decreased_by")) return REFINE_DECREASED_BY;
         /* undo 用 0 表示（枚举从 1 开始，不冲突）：回退最近一次模糊 refine */
         if (!strcmp(s, "undo"))      return 0;
     }
@@ -245,7 +248,16 @@ void h_refine(int fd, uint32_t seq, cJSON *p) {
     int op = parse_refine_op(p);
     if (op < 0) {
         send_err(fd, GGCMD_SEARCH_REFINE, seq, GGERR_BAD_REQUEST,
-                 "invalid op (increased|decreased|unchanged|changed|undo)");
+                 "invalid op (increased|decreased|unchanged|changed|increased_by|decreased_by|undo)");
+        return;
+    }
+    /* by：增量比较的目标变化量。*_BY op 必须给（>0），其他 op 忽略。 */
+    double by = 0;
+    cJSON *jby = cJSON_GetObjectItem(p, "by");
+    if (jby && cJSON_IsNumber(jby)) by = jby->valuedouble;
+    if ((op == REFINE_INCREASED_BY || op == REFINE_DECREASED_BY) && by <= 0) {
+        send_err(fd, GGCMD_SEARCH_REFINE, seq, GGERR_BAD_REQUEST,
+                 "op=increased_by/decreased_by requires by > 0");
         return;
     }
     if (op == 0) {
@@ -266,10 +278,10 @@ void h_refine(int fd, uint32_t seq, cJSON *p) {
     }
     int64_t rem;
     if (g_eng.results.fuzzy_active) {
-        rem = search_refine(&g_eng.drv, g_eng.session_pid, &g_eng.results, op);
+        rem = search_refine_by(&g_eng.drv, g_eng.session_pid, &g_eng.results, op, by);
     } else {
         /* 精确/区间搜索结果: 按"当前值 vs 搜索时快照" refine（GG 标准流程） */
-        rem = search_refine_exact(&g_eng.drv, g_eng.session_pid, &g_eng.results, op);
+        rem = search_refine_exact_by(&g_eng.drv, g_eng.session_pid, &g_eng.results, op, by);
     }
     if (rem < 0) { send_err(fd, GGCMD_SEARCH_REFINE, seq, GGERR_INTERNAL, "refine failed (search first?)"); return; }
     cJSON *r = cJSON_CreateObject();

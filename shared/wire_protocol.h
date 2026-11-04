@@ -196,7 +196,11 @@ enum gg_refine_op {
     REFINE_INCREASED = 1,
     REFINE_DECREASED = 2,
     REFINE_UNCHANGED = 3,
-    REFINE_CHANGED = 4
+    REFINE_CHANGED = 4,
+    /* 增量比较（配 wire 参数 by）：|Δ| == by 才保留。找"扣了 25 血"这类
+     * 已知变化量的场景，比先 DECREASED 再人肉看差值省一整轮。 */
+    REFINE_INCREASED_BY = 5,
+    REFINE_DECREASED_BY = 6
 };
 
 /* 搜索区域过滤 */

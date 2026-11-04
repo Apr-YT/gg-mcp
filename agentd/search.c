@@ -1052,7 +1052,23 @@ int64_t search_refine_undo(gg_results_t *r) {
     return remain;
 }
 
+/* 增量比较（REFINE_*_BY）：|Δ| 与 by 的差落在相对容差内才保留。
+ * float→double 转换 + double 减法对非二进小数有累积误差
+ * （1.1f/0.1f 之类），精确等值会漏报；容差 1e-6 相对值覆盖 float
+ * 精度又不会把相邻整数混进来（整数域 by 至少差 1，容差 << 1）。 */
+static int refine_match_by(int op, double a, double b, double by) {
+    double d = b - a;
+    if (op == REFINE_DECREASED_BY) d = -d;
+    double diff = d - by;
+    double tol = 1e-6 * (fabs(by) + 1.0);
+    return diff >= -tol && diff <= tol;
+}
+
 int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
+    return search_refine_by(d, pid, r, op, 0.0);
+}
+
+int64_t search_refine_by(gg_driver_t *d, pid_t pid, gg_results_t *r, int op, double by) {
     if (!r->fuzzy_active || !r->fuzzy_bitmap || !r->fuzzy_snapshot || !r->fuzzy_regions) return -1;
     int sz = vt_size(r->fuzzy_vt);
     if (sz <= 0) return -1;
@@ -1118,6 +1134,8 @@ int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
                 case REFINE_DECREASED: keep = (b < a); break;
                 case REFINE_UNCHANGED: keep = (b == a); break;
                 case REFINE_CHANGED:   keep = (b != a); break;
+                case REFINE_INCREASED_BY:
+                case REFINE_DECREASED_BY: keep = refine_match_by(op, a, b, by); break;
                 default: keep = 0; break;
                 }
                 if (keep) keep_n++;
@@ -1183,6 +1201,10 @@ int64_t search_refine_undo_exact(gg_results_t *r) {
 }
 
 int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) {
+    return search_refine_exact_by(d, pid, r, op, 0.0);
+}
+
+int64_t search_refine_exact_by(gg_driver_t *d, pid_t pid, gg_results_t *r, int op, double by) {
     if (!r->addrs || r->count == 0) return 0;
     if (r->exact_vt <= 0 || r->exact_vt > VT_DOUBLE) return -1;
     int sz = vt_size(r->exact_vt);
@@ -1267,6 +1289,8 @@ int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) 
                 case REFINE_DECREASED: keep = (curv < prev); break;
                 case REFINE_UNCHANGED: keep = (curv == prev); break;
                 case REFINE_CHANGED:   keep = (curv != prev); break;
+                case REFINE_INCREASED_BY:
+                case REFINE_DECREASED_BY: keep = refine_match_by(op, prev, curv, by); break;
                 default: keep = 0; break;
                 }
                 if (keep) {
@@ -1289,6 +1313,8 @@ int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op) 
                 case REFINE_DECREASED: keep = (curv < prev); break;
                 case REFINE_UNCHANGED: keep = (curv == prev); break;
                 case REFINE_CHANGED:   keep = (curv != prev); break;
+                case REFINE_INCREASED_BY:
+                case REFINE_DECREASED_BY: keep = refine_match_by(op, prev, curv, by); break;
                 default: keep = 0; break;
                 }
                 if (keep) {

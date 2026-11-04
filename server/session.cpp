@@ -294,11 +294,13 @@ int Session::norm_op(const json& o) {
         if (s == "decreased" || s == "dec") return REFINE_DECREASED;
         if (s == "unchanged" || s == "same") return REFINE_UNCHANGED;
         if (s == "changed" || s == "diff") return REFINE_CHANGED;
+        if (s == "increased_by") return REFINE_INCREASED_BY;
+        if (s == "decreased_by") return REFINE_DECREASED_BY;
         return -1;
     }
     if (o.is_number_integer()) {
         int v = o.get<int>();
-        if (v >= REFINE_INCREASED && v <= REFINE_CHANGED) return v;
+        if (v >= REFINE_INCREASED && v <= REFINE_DECREASED_BY) return v;
         return -1;
     }
     return -1;
@@ -384,6 +386,14 @@ json tool_search_unknown_init(Session::CallCtx& c, const json& a) {
 }
 json tool_search_refine(Session::CallCtx& c, const json& a) {
     if (!c.put_op(a.value("op", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid op");
+    /* by：增量比较的目标变化量（op=increased_by/decreased_by 必传且 > 0） */
+    if (a.contains("by")) {
+        const json& b = a["by"];
+        if (!b.is_number()) return c.fail(GGERR_BAD_REQUEST, "by must be a number");
+        double by = b.get<double>();
+        if (by <= 0) return c.fail(GGERR_BAD_REQUEST, "by must be > 0");
+        c.params["by"] = by;
+    }
     return c.send(GGCMD_SEARCH_REFINE);
 }
 json tool_search_undo(Session::CallCtx& c, const json& a) {

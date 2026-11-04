@@ -91,9 +91,12 @@ static const std::vector<ToolDef>& build() {
              "精确/区间搜索共用本命令；op=undo 回退上一步（最多 3 步）。"
              "⚠ 区间/AoB 搜索后的**首次 refine 只建立基线（候选数不变，op 被忽略），第二次起才按 op 收缩**"
              "——这是设计而非 bug：区间候选值各不相同，第一轮必须先读回真实值。"
-             "精确搜索（搜已知值）搜索即基线，无此限制",
+             "精确搜索（搜已知值）搜索即基线，无此限制。"
+             "增量比较：op=increased_by/decreased_by + by=N 只留变化量恰好为 N 的候选"
+             "（\"扣了 25 血\"场景，比 decreased 再人肉看差值省一整轮）",
              json{
-                 {"op", prop("string", "细化操作", "\"enum\":[\"increased\",\"decreased\",\"unchanged\",\"changed\"]")},
+                 {"op", prop("string", "细化操作", "\"enum\":[\"increased\",\"decreased\",\"unchanged\",\"changed\",\"increased_by\",\"decreased_by\",\"undo\"]")},
+                 {"by", prop("number", "增量比较的目标变化量（op=*_by 时必传，>0）")},
              },
              json{"op"}),
         tool("gg_search_undo",

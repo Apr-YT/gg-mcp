@@ -481,6 +481,59 @@ int main(void) {
         results_clear(&r);
     }
 
+    /* === 13) refine 增量比较（increased_by / decreased_by）=== */
+    mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + 0x10000);
+    {
+        uint64_t a = TEST_MEM_BASE + 0x1000, b = TEST_MEM_BASE + 0x2000,
+                 c = TEST_MEM_BASE + 0x3000;
+        mem_write_u32(a, 100u); mem_write_u32(b, 200u); mem_write_u32(c, 100u);
+        /* 精确搜索 100 → 两候选；扣血后 a→75 (Δ-25), c→80 (Δ-20) */
+        results_init(&r, 0);
+        search_exact(NULL, 0, &r, VT_DWORD, 100, 0);
+        mem_write_u32(a, 75u); mem_write_u32(c, 80u);
+        int64_t n = search_refine_exact_by(NULL, 0, &r, REFINE_DECREASED_BY, 25.0);
+        check(n == 1 && results_has(&r, a),
+              "13) decreased_by=25: 只留 Δ 恰为 -25 的 a（c 的 -20 被剔除）");
+        results_clear(&r);
+
+        /* 增量方向: b 增 50 */
+        mem_write_u32(a, 100u); mem_write_u32(b, 200u);
+        results_init(&r, 0);
+        search_exact(NULL, 0, &r, VT_DWORD, 200, 0);
+        mem_write_u32(b, 250u);
+        n = search_refine_exact_by(NULL, 0, &r, REFINE_INCREASED_BY, 50.0);
+        check(n == 1 && results_has(&r, b), "13) increased_by=50: 命中增 50 的 b");
+        results_clear(&r);
+
+        /* float 容差: 100.1f → 90.1f, Δ=10.0 (double 域有转换误差, 容差须容忍) */
+        float f0 = 100.1f, f1 = 90.1f;
+        memcpy(g_mem + (a - TEST_MEM_BASE), &f0, 4);
+        results_init(&r, 0);
+        {
+            uint64_t fv;
+            memcpy(&fv, &f0, 4);
+            search_exact(NULL, 0, &r, VT_FLOAT, fv, 0);
+        }
+        memcpy(g_mem + (a - TEST_MEM_BASE), &f1, 4);
+        n = search_refine_exact_by(NULL, 0, &r, REFINE_DECREASED_BY, 10.0);
+        check(n == 1 && results_has(&r, a),
+              "13) float Δ=10.0 容差命中（100.1f→90.1f）");
+        results_clear(&r);
+    }
+
+    /* 模糊路径: unknown_init 基线 + decreased_by */
+    mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + 0x10000);
+    {
+        uint64_t a = TEST_MEM_BASE + 0x1000, b = TEST_MEM_BASE + 0x2000;
+        mem_write_u32(a, 100u); mem_write_u32(b, 100u);
+        results_init(&r, 0);
+        search_unknown_init(NULL, 0, &r, VT_DWORD, 0);
+        mem_write_u32(a, 75u); mem_write_u32(b, 70u);
+        int64_t kept = search_refine_by(NULL, 0, &r, REFINE_DECREASED_BY, 25.0);
+        check(kept == 1, "13) 模糊 decreased_by=25: 只留 a（b 的 -30 剔除）");
+        results_clear(&r);
+    }
+
     printf(fails ? "\n== FAILED: %d ==\n" : "\n== ALL PASS ==\n", fails);
     return fails ? 1 : 0;
 }

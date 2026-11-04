@@ -140,6 +140,8 @@ int64_t search_unknown_init(gg_driver_t *d, pid_t pid, gg_results_t *r,
 
 /* 模糊细化：按 op 收缩候选。返回剩余候选数；-1 出错。 */
 int64_t search_refine(gg_driver_t *d, pid_t pid, gg_results_t *r, int op);
+/* by 版本：REFINE_INCREASED_BY/DECREASED_BY 时 by 为增量（必须 > 0） */
+int64_t search_refine_by(gg_driver_t *d, pid_t pid, gg_results_t *r, int op, double by);
 
 /* 撤销最近一次模糊 refine（恢复候选位图）。返回恢复后的候选数；
  * -1 = 没有可回退的步骤（或当前不是模糊搜索）。 */
@@ -153,6 +155,8 @@ int64_t search_refine_undo_exact(gg_results_t *r);
  * 语义同 GG：increased=值变大 / decreased=变小 / unchanged=不变 / changed=变化。
  * 返回剩余数量；-1 无可 refine 的精确结果。 */
 int64_t search_refine_exact(gg_driver_t *d, pid_t pid, gg_results_t *r, int op);
+/* by 版本：REFINE_INCREASED_BY/DECREASED_BY 时 by 为增量（必须 > 0） */
+int64_t search_refine_exact_by(gg_driver_t *d, pid_t pid, gg_results_t *r, int op, double by);
 
 /* 结果集内过滤：只保留当前值落在 [vmin, vmax] 的条目（原地压缩，可用 undo 回退）。
  * has_min/has_max 为 0 表示该端不限；exclude_nan 只对 float/double 生效；
