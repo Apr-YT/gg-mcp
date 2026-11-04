@@ -9,6 +9,20 @@
 
 #include "dump.h"
 
+/* dump.c 的核心循环依赖 driver（itest 在设备端真链路验证）；
+ * 本测试只碰纯函数（header/FNV），这两个符号不会被调用，
+ * stub 仅为让链接通过 —— 若哪个断言误触它们，返回 -1 会立刻失败。 */
+#include "driver.h"
+ssize_t driver_read_ex(gg_driver_t *d, pid_t pid, uint64_t addr, void *buf,
+                       size_t len, int force) {
+    (void)d; (void)pid; (void)addr; (void)buf; (void)len; (void)force;
+    return -1;
+}
+ssize_t driver_write(gg_driver_t *d, pid_t pid, uint64_t addr, const void *buf, size_t len) {
+    (void)d; (void)pid; (void)addr; (void)buf; (void)len;
+    return -1;
+}
+
 static int fails = 0;
 #define CHECK(cond, msg) do { \
     if (!(cond)) { printf("  [FAIL] %s\n", msg); fails++; } \

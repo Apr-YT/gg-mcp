@@ -232,6 +232,11 @@ static const std::vector<ToolDef>& build() {
                  {"addr", prop("string", "写回起始地址（可选，缺省 = dump 原址）")},
              },
              json{"name"}),
+        tool("gg_dump_list",
+             "列出设备上已有的内存快照备份（gg_region_dump 存的所有文件）："
+             "返回每个备份的 name / 原址 orig_addr / 字节数 / FNV 校验和。"
+             "跨会话后不知道设备上有什么备份时先调这个，再 gg_region_restore",
+             json::object(), json::array()),
 
         // ---- 读写修改 ----
         tool("gg_read",

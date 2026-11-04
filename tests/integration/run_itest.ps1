@@ -25,7 +25,7 @@ if (-not (Test-Path $cc)) { throw "NDK clang 未找到: $cc" }
 & $cc -O2 -Wall -I"$Root" -o "$Root\build\native\itest" `
     "$Root\tests\integration\itest.c" `
     "$Root\agentd\driver.c" "$Root\agentd\process.c" "$Root\agentd\search.c" `
-    "$Root\agentd\freeze.c" "$Root\agentd\version.c" `
+    "$Root\agentd\freeze.c" "$Root\agentd\version.c" "$Root\agentd\dump.c" `
     "$Root\third_party\cJSON.c" -pie
 if ($LASTEXITCODE -ne 0) { throw "itest 编译失败" }
 

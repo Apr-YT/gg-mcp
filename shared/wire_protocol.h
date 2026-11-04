@@ -172,6 +172,9 @@ enum gg_cmd {
      *        写操作：safe_mode 拒绝。 */
     GGCMD_REGION_DUMP,
     GGCMD_REGION_RESTORE,
+    /* 列出设备端已有备份：{"r":{"dumps":[{"name","orig_addr","bytes","checksum"}]}}。
+     * 没有它 restore 只能盲猜 name；头部非法的坏文件被跳过（restore 的 FNV 兜底）。 */
+    GGCMD_DUMP_LIST,
     GGCMD_MAX
 };
 

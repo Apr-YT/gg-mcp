@@ -865,11 +865,12 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
    - 签名变更是破坏性的：引擎 5 个 search_* 都加了 `const char *module`
      尾参，外部如有 fork 的调用点要同步。
 
-47. **`gg_region_dump` / `gg_region_restore`：内存区域快照（2026-11-04，真机未验）**
+47. **`gg_region_dump` / `gg_region_restore` / `gg_dump_list`：内存区域快照（2026-11-04）**
 
    CE "Memory dump" 对应物：改数值前备份整块区域，改坏了一键写回。
    落盘 `/data/adb/GG-Ghost/dumps/<name>.bin`，32B 头部
-   （magic "GGRD"/版本/原址/长度/FNV-1a），纯函数层在 `agentd/dump.c`。
+   （magic "GGRD"/版本/原址/长度/FNV-1a）。`dump_list` 枚举备份+元信息
+   （restore 跨会话不再盲猜 name）。工具面 58。
 
    - **残缺即失败是语义核心，别"顺手优化"成补 0**：dump 遇短读报错删文件
      （补零备份恢复时会把假零写回目标进程）；restore 前全量校验 FNV，
@@ -881,8 +882,12 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
      写操作：server 表 `write_op=true` + agentd safe_mode 双保险。
    - 头部 `payload_len` 超过 `GG_DUMP_MAX_BYTES`(64MB) 在 unpack 里就判非法
      （不依赖调用方先查）；len 双端校验。
-   - handler（cmd_mem.c）的分块驱动读写 + 文件 IO 待真机 itest；
-     纯函数层 test_dump.c 已过（含标准向量）。
+   - **核心循环在 dump.c**（`gg_region_dump_to_file/restore_from_file/
+     gg_dump_list`，依赖 driver 但无 cJSON/引擎单例），cmd_mem.c handler 只剩
+     参数解析薄壳；itest 用例 8 直测核心循环（含 FNV 拒坏文件）。
+   - itest 本地交叉编译已过（本轮顺带修了它两处既有断点：search_exact
+     的 module 尾参漏同步、`g_ring_enabled` 缺符号）。**教训：itest.c 只在
+     真机跑，改 agentd 函数签名时必须连它一起 grep**。
 
 ## 约定
 

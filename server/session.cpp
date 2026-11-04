@@ -706,6 +706,7 @@ json tool_region_restore(Session::CallCtx& c, const json& a) {
     c.params["name"] = a["name"];
     return c.send(GGCMD_REGION_RESTORE);
 }
+json tool_dump_list(Session::CallCtx& c, const json&) { return c.send(GGCMD_DUMP_LIST); }
 
 // ---- 内存读/写 ----
 json tool_read(Session::CallCtx& c, const json& a) {
@@ -1290,6 +1291,7 @@ const ToolEntry kTools[] = {
     {"gg_results_load",     tool_results_load,     false},
     {"gg_region_dump",      tool_region_dump,      false},
     {"gg_region_restore",   tool_region_restore,   true},
+    {"gg_dump_list",        tool_dump_list,        false},
 
     {"gg_read",             tool_read,             false},
     {"gg_read_bytes",       tool_read_bytes,       false},

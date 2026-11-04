@@ -28,8 +28,16 @@ CE "Memory dump" 对应物：改数值前备份整块区域，改坏了一键写
 - 上限 64MB 双端校验；短写报错带进度（内存已是部分写回状态）。
 
 纯函数层（dump.c：头部 pack/unpack + 流式 FNV）单测 test_dump.c（14 断言，
-含标准向量 0x811c9dc5/0xe40c292c）；handler 分块读写待真机 itest。
-工具面 55 → 57。
+含标准向量 0x811c9dc5/0xe40c292c）；工具面 55 → 57。
+
+**2026-11-04 晚补强**：核心循环（分块读写+文件 IO）从 handler 下沉到
+dump.c 的 `gg_region_dump_to_file / restore_from_file / gg_dump_list`
+（依赖 driver 但无 cJSON/引擎单例）→ itest 直测。itest 用例 8 覆盖
+dump→等值漂移→restore→读回相等→再漂移（证明真写入）→ 翻文件字节被
+FNV 拒 → list 元数据正确。新增 `gg_dump_list` 工具（枚举备份+元信息，
+restore 不再盲猜 name），工具面 57 → 58。顺带修 itest 两处既有编译断点
+（search_exact 上轮加 module 尾参漏同步、g_ring_enabled 缺符号——
+设备不在位所以本地从未编过它，暴露了 run_itest.ps1 无法本地编译验证的缺口）。
 
 ### 搜索限定模块范围 `module` 参数（2026-11-04）
 

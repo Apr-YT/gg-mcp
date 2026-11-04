@@ -15,6 +15,7 @@
  * 运行: adb shell su -c '/data/local/tmp/ggmcp/itest'
  */
 #include "../../agentd/driver.h"
+#include "../../agentd/dump.h"
 #include "../../agentd/freeze.h"
 #include "../../agentd/process.h"
 #include "../../agentd/search.h"
@@ -39,6 +40,10 @@ void log_msg(const char *fmt, ...) {
     va_end(ap);
     fputc('\n', stderr);
 }
+
+/* 同上：g_ring_enabled 定义在 main.c（--ring 开关）。itest 走纯 ioctl 路径，
+ * 恒 0 即可 —— 只需要符号存在让 driver.c 链接通过。 */
+int g_ring_enabled = 0;
 
 
 static int fails = 0;
@@ -130,7 +135,7 @@ int main(void) {
     /* 3) 精确搜索（子进程尚未自增, 值应为 0x12345678） */
     gg_results_t res;
     results_init(&res, 100000);
-    int64_t n = search_exact(&drv, g_child, &res, VT_DWORD, 0x12345678u, REGION_ANONYMOUS);
+    int64_t n = search_exact(&drv, g_child, &res, VT_DWORD, 0x12345678u, REGION_ANONYMOUS, NULL);
     printf("search 0x12345678 -> %lld hits\n", (long long)n);
     CHECK(n >= 1, "exact search found the value");
     if (n < 1) return 1;
@@ -202,6 +207,78 @@ int main(void) {
                 printf("  hwbp stop -> %d\n", s2);
                 CHECK(s2 == 0, "hwbp UNINST succeeds");
             }
+        }
+    }
+
+    /* 8) region dump/restore 全链路（核心循环在 dump.c，这里直接驱动，不走 wire）
+     *
+     * 子进程此刻仍在每 50ms 自增，刚好充当"值会自己变"的对照：
+     *   dump 记录值 v1 → 等值变 → restore → 立即读回必须等于 v1
+     *   → 再等 150ms（>2 个自增周期）值必须离开 v1（证明 restore 真写了，
+     *     不是"碰巧读到相等"）。
+     * 之后翻 dump 文件一个字节 → restore 必须被 FNV 拒掉；
+     * gg_dump_list 必须能列出刚 dump 的条目。 */
+    {
+        const char *dpath = "/data/local/tmp/ggmcp/itest_dump.bin";
+        remove(dpath);
+        char derr[192];
+        uint8_t pre[8];
+        if (driver_read(&drv, g_child, addr, pre, 4) != 4) {
+            CHECK(0, "dump: pre-read failed");
+        } else {
+            uint32_t v1 = (uint32_t)read_bits(pre, VT_DWORD);
+            CHECK(gg_region_dump_to_file(&drv, g_child, addr, 4096, dpath,
+                                         derr, sizeof(derr)) == 0,
+                  "dump 4096 bytes ok");
+            usleep(200000);   /* 等 ≥4 个自增周期，值必然已离开 v1 */
+            uint8_t cur[8];
+            uint32_t v2 = 0;
+            if (driver_read(&drv, g_child, addr, cur, 4) == 4)
+                v2 = (uint32_t)read_bits(cur, VT_DWORD);
+            CHECK(v2 != v1, "dump: value drifted while waiting (sanity)");
+
+            uint64_t ra = 0, rl = 0;
+            CHECK(gg_region_restore_from_file(&drv, g_child, dpath, 0,
+                                              &ra, &rl, derr, sizeof(derr)) == 0,
+                  "restore ok");
+            CHECK(ra == addr && rl == 4096, "restore returns orig addr/len");
+            uint8_t post[8];
+            uint32_t v3 = 0;
+            if (driver_read(&drv, g_child, addr, post, 4) == 4)
+                v3 = (uint32_t)read_bits(post, VT_DWORD);
+            CHECK(v3 == v1, "restore wrote back the dumped value");
+
+            usleep(150000);   /* >2 个自增周期：值应再次离开 v1 */
+            uint32_t v4 = v3;
+            if (driver_read(&drv, g_child, addr, post, 4) == 4)
+                v4 = (uint32_t)read_bits(post, VT_DWORD);
+            CHECK(v4 != v1, "post-restore value drifts again (restore was real)");
+
+            /* 坏文件必须被拒：翻数据区一个字节，FNV 兜底 */
+            FILE *df = fopen(dpath, "r+b");
+            if (df) {
+                fseek(df, GG_DUMP_HEADER_LEN, SEEK_SET);
+                int byte = fgetc(df);
+                fseek(df, GG_DUMP_HEADER_LEN, SEEK_SET);
+                fputc(byte ^ 0x01, df);
+                fclose(df);
+                int rc = gg_region_restore_from_file(&drv, g_child, dpath, 0,
+                                                     NULL, NULL, derr, sizeof(derr));
+                CHECK(rc != 0, "corrupted dump rejected by checksum");
+            } else {
+                CHECK(0, "cannot reopen dump file for corruption test");
+            }
+
+            /* list 必须能列出该条目（name 去 .bin 后缀） */
+            gg_dump_entry_t ents[8];
+            int n = gg_dump_list("/data/local/tmp/ggmcp", ents, 8);
+            int found = 0;
+            for (int i = 0; i < n; i++)
+                if (strcmp(ents[i].name, "itest_dump") == 0 &&
+                    ents[i].orig_addr == addr && ents[i].payload_len == 4096)
+                    found = 1;
+            CHECK(found, "dump_list finds the entry with correct metadata");
+            remove(dpath);
         }
     }
 
