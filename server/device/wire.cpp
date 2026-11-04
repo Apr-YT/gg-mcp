@@ -200,7 +200,7 @@ int AgentClient::auth_locked(Clock::time_point deadline) {
         last_error = cfg_.wire_key.empty()
                          ? "agentd requires wire auth but wire_key is empty in config"
                          : "agentd rejected wire auth (wire_key mismatch)";
-        return -1;
+        return -2;   // 「被拒」：配置问题，重试无意义（见 ensure_connected_retry 注释）
     }
     try {
         json r = json::parse(resp);
@@ -232,11 +232,17 @@ int AgentClient::ensure_connected_locked() {
              * GGWF_ENC 的旧 agentd 后，残留 true 会让每条请求带上加密标志，对端解析
              * 全败，表现为所有命令 ProtocolError 直到进程重启。 */
             enc_on_ = false;
-            // 握手：必须在任何业务命令之前，否则 agentd 会以 GGERR_PERM 拒绝
-            if (auth_locked(Clock::now() + std::chrono::milliseconds(cfg_.connect_timeout_ms)) != 0) {
+            // 握手：必须在任何业务命令之前，否则 agentd 会以 GGERR_PERM 拒绝。
+            // -2 = 被明确拒绝（密钥不匹配，配置问题，不重试）；
+            // -1 = 传输失败（agentd 重启窗口内 AUTH 应答前断连的典型情形，
+            //      必须允许上层退避重试 —— 2026-11-04 修复：此前两种都归 -2，
+            //      断线被误报成 GGERR_PERM 且永不重连）。
+            int ar = auth_locked(Clock::now() + std::chrono::milliseconds(cfg_.connect_timeout_ms));
+            if (ar != 0) {
                 GG_CLOSE_SOCK(static_cast<sock_t>(fd_));
                 fd_ = -1;
-                return -2;   // -2 = 鉴权失败（区别于连接失败），last_error 已由 auth_locked 设置
+                if (ar == -2) return -2;
+                continue;   // 当作连接失败处理：走下一个 attempt / 上层退避重试
             }
             return 0;
         }

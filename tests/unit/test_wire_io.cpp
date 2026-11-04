@@ -16,6 +16,7 @@
 // 不写 rc < 0 —— 那会恒假。
 #include "../../server/device/wire.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -78,6 +79,23 @@ struct Peer {
     tsock_t accept_one() {
         tsock_t c = ::accept(lfd, nullptr, nullptr);
         return c;
+    }
+
+    /* 关闭监听 socket：让阻塞在 accept_one() 上的线程拿到 INVALID_SOCKET 退出。
+     * 用例里客户端若不重试，第二次 accept 就永远没人来 —— 不关的话 join 卡死。
+     * 先 shutdown 再 close：Windows 上单靠 closesocket 不保证打断阻塞中的 accept。 */
+    void stop_listen() {
+        if (lfd != TSOCK_INVALID) {
+            ::shutdown(lfd,
+#ifdef _WIN32
+                       SD_BOTH
+#else
+                       SHUT_RDWR
+#endif
+            );
+            TSOCK_CLOSE(lfd);
+            lfd = TSOCK_INVALID;
+        }
     }
 
     ~Peer() {
@@ -338,6 +356,161 @@ int main() {
         check(rc == GGERR_INTERNAL, "c2) bad version -> call() == GGERR_INTERNAL(12)");
         check(cli.last_outcome == gg::CallOutcome::ProtocolError,
               "c2) bad version -> last_outcome == ProtocolError");
+        if (th.joinable()) th.join();
+    }
+
+    // ---- d1) agentd 重启窗口：connect 成功但 AUTH 应答前连接断开 ----
+    //
+    // 时序：TCP 三次握手完成（旧 agentd 的 listen/accept 队列还在）→ agentd
+    // 进程死掉 → 客户端 AUTH 读失败。这不是"密钥不匹配"（配置错误），是传输
+    // 中断 —— 必须退避重试并在 agentd 回来后自动恢复，而不是报 GGERR_PERM
+    // 把"断线"伪装成"权限被拒"。
+    {
+        Peer peer;
+        check(peer.listen_loopback(), "d1) fake peer listening on 127.0.0.1");
+        gg::AgentClient cli(peer_cfg(peer.port, 3000));
+        std::thread th([&] {
+            // 第一次连接：读完 AUTH 请求就断（agentd 重启瞬间的经典时序）
+            tsock_t c1 = peer.accept_one();
+            if (c1 != TSOCK_INVALID) {
+                gg_wire_header_t req{};
+                std::string pl;
+                read_request(c1, &req, &pl);
+                TSOCK_CLOSE(c1);
+            }
+            // 第二次连接（agentd 已回来）：完整握手 + 应答业务帧
+            tsock_t c2 = peer.accept_one();
+            if (c2 != TSOCK_INVALID) {
+                if (serve_auth(c2)) {
+                    gg_wire_header_t req{};
+                    std::string pl;
+                    if (read_request(c2, &req, &pl)) {
+                        std::string body = "{\"r\":{\"pong\":1}}";
+                        gg_wire_header_t rh{};
+                        rh.magic = GGWM_MAGIC;
+                        rh.ver = GGWM_VERSION;
+                        rh.cmd = req.cmd;
+                        rh.seq = req.seq;
+                        rh.flags = GGWF_RESP;
+                        rh.payload_len = static_cast<uint32_t>(body.size());
+                        if (send_all(c2, &rh, sizeof(rh)))
+                            send_all(c2, body.data(), body.size());
+                    }
+                }
+                TSOCK_CLOSE(c2);
+            }
+        });
+        auto t0 = std::chrono::steady_clock::now();
+        json out;
+        int rc = cli.call(GGCMD_PING, json::object(), &out);
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t0).count();
+        std::printf("     [d1] rc=%d elapsed=%lldms outcome=%d\n", rc, (long long)elapsed_ms,
+                    static_cast<int>(cli.last_outcome));
+        check(rc == 0 && out.is_object() && out.value("pong", 0) == 1,
+              "d1) auth-phase disconnect -> retry succeeds after restart");
+        check(cli.last_outcome == gg::CallOutcome::Ok,
+              "d1) auth-phase disconnect -> last_outcome == Ok (not Perm)");
+        check(elapsed_ms < 2900, "d1) retries bounded by request deadline");
+        peer.stop_listen();          // 若客户端未重试，第二个 accept 无人来，别让 join 卡死
+        if (th.joinable()) th.join();
+    }
+
+    // ---- d2) AUTH 被明确拒绝（wire_key 不匹配）：不重试 ----
+    //
+    // 密钥不匹配是配置问题，重试只会把错误掩盖成 30 秒卡顿（ensure_connected_retry
+    // 的设计约束）。实证断言：错误码 GGERR_PERM、快速失败、观察窗口内没有第二次连接。
+    {
+        Peer peer;
+        check(peer.listen_loopback(), "d2) fake peer listening on 127.0.0.1");
+        gg::AgentClient cli(peer_cfg(peer.port, 3000));
+        std::atomic<int> connections{0};
+        std::thread th([&] {
+            tsock_t c1 = peer.accept_one();
+            if (c1 != TSOCK_INVALID) {
+                connections = 1;
+                gg_wire_header_t req{};
+                std::string pl;
+                if (read_request(c1, &req, &pl) && req.cmd == GGCMD_AUTH)
+                    send_response(c1, req.cmd, req.seq,
+                                  "{\"e\":{\"code\":4,\"message\":\"key mismatch\"}}",
+                                  GGWF_RESP | GGWF_ERR);
+                TSOCK_CLOSE(c1);
+            }
+            tsock_t c2 = peer.accept_one();   // 阻塞：客户端若错误地重试，这里才有人来
+            if (c2 != TSOCK_INVALID) {
+                connections = 2;
+                TSOCK_CLOSE(c2);
+            }
+        });
+        auto t0 = std::chrono::steady_clock::now();
+        json out;
+        int rc = cli.call(GGCMD_PING, json::object(), &out);
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t0).count();
+        std::printf("     [d2] rc=%d elapsed=%lldms outcome=%d conns=%d\n", rc,
+                    (long long)elapsed_ms, static_cast<int>(cli.last_outcome),
+                    connections.load());
+        check(rc == GGERR_PERM, "d2) auth rejected -> call() == GGERR_PERM(4)");
+        check(cli.last_outcome == gg::CallOutcome::RemoteError,
+              "d2) auth rejected -> last_outcome == RemoteError");
+        check(elapsed_ms < 400, "d2) auth rejected fails fast (no 200ms+ backoff)");
+        /* call() 已返回：客户端此刻空闲，若要重试只会在 200ms 退避后发生。
+         * 等 300ms 观察窗口过了再关监听 —— 提前关会把"没人来"误判成证据不足。 */
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        peer.stop_listen();
+        if (th.joinable()) th.join();
+        check(connections.load() == 1, "d2) auth rejected -> exactly 1 connection (no retry)");
+    }
+
+    // ---- d3) 帧发送中途断连（RST）：整帧没发完 → 安全重连重放一次 ----
+    //
+    // SO_LINGER{1,0} 关闭产生 RST 而非 FIN：客户端下一次 send 直接 ECONNRESET。
+    // write_frame 未完整交付 → 对端不可能执行该请求 → 重放安全（call() 注释的
+    // 安全边界），重连后同请求应被正常应答。
+    {
+        Peer peer;
+        check(peer.listen_loopback(), "d3) fake peer listening on 127.0.0.1");
+        gg::AgentClient cli(peer_cfg(peer.port, 3000));
+        std::thread th([&] {
+            tsock_t c1 = peer.accept_one();
+            if (c1 != TSOCK_INVALID) {
+                serve_auth(c1);
+                // 不读后续请求，直接 RST：客户端 write PING 时撞 ECONNRESET
+                linger l{1, 0};
+                setsockopt(c1, SOL_SOCKET, SO_LINGER,
+                           reinterpret_cast<const char*>(&l), sizeof(l));
+                TSOCK_CLOSE(c1);
+            }
+            tsock_t c2 = peer.accept_one();
+            if (c2 != TSOCK_INVALID) {
+                if (serve_auth(c2)) {
+                    gg_wire_header_t req{};
+                    std::string pl;
+                    if (read_request(c2, &req, &pl)) {
+                        std::string body = "{\"r\":{\"pong\":2}}";
+                        gg_wire_header_t rh{};
+                        rh.magic = GGWM_MAGIC;
+                        rh.ver = GGWM_VERSION;
+                        rh.cmd = req.cmd;
+                        rh.seq = req.seq;
+                        rh.flags = GGWF_RESP;
+                        rh.payload_len = static_cast<uint32_t>(body.size());
+                        if (send_all(c2, &rh, sizeof(rh)))
+                            send_all(c2, body.data(), body.size());
+                    }
+                }
+                TSOCK_CLOSE(c2);
+            }
+        });
+        json out;
+        int rc = cli.call(GGCMD_PING, json::object(), &out);
+        std::printf("     [d3] rc=%d outcome=%d\n", rc, static_cast<int>(cli.last_outcome));
+        check(rc == 0 && out.is_object() && out.value("pong", 0) == 2,
+              "d3) mid-frame reset -> reconnect & replay succeeds");
+        check(cli.last_outcome == gg::CallOutcome::Ok,
+              "d3) mid-frame reset -> last_outcome == Ok");
+        peer.stop_listen();
         if (th.joinable()) th.join();
     }
 

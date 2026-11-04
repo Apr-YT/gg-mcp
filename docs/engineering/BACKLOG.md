@@ -351,6 +351,15 @@ AI 拿到 21481 条候选时，`get_results` 分页看要 214 轮。这一步先
 - 验证：双端编译过 + 全量单测（含 test_wire/test_protocol）过；**断线重连的
   运行时行为未本地复现验证**（需 agentd 重启场景），下次真机 itest 顺带跑
 
+**2026-11-04 晚收口：运行时行为已本地复现验证（test_wire_io 用例 d1-d3）**：
+- **d1 抓出真 bug**：`auth_locked` 把「ERR 被拒」和「AUTH 期间传输断」都返回
+  -1，`ensure_connected_locked` 统一转 -2 → agentd 重启窗口内（connect 成功但
+  AUTH 应答前断连）被误报成 GGERR_PERM 且**永不重试**——恰是本条要修的场景。
+  修复：ERR 帧 return -2（被拒不重试），传输失败 -1 → continue 走下一 attempt。
+- d1（AUTH 断连→重试成功，修复后 1ms）、d2（key mismatch 被拒：GGERR_PERM +
+  快速失败 + 实证仅 1 次连接）、d3（RST 中断发送→整帧未发完→安全重放成功）
+  全绿。P0-6 至此完全关闭，不再挂"待真机"。
+
 ## P1 — 收益明确、成本中等
 
 ### 7. 搜索真正异步

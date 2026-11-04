@@ -889,6 +889,22 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
      的 module 尾参漏同步、`g_ring_enabled` 缺符号）。**教训：itest.c 只在
      真机跑，改 agentd 函数签名时必须连它一起 grep**。
 
+48. **wire 断线重连语义修复：AUTH 期间断连 ≠ 鉴权被拒（2026-11-04，已单测实证）**
+
+   P0-6（ensure_connected_retry）收口时留下的尾巴：test_wire_io 用例 d1
+   （假 peer 模拟 agentd 重启窗口：connect 成功但 AUTH 应答前断连）抓出
+   `auth_locked` 把「ERR 被拒」和「AUTH 期间传输断」混为同一返回值 →
+   断线被误报 GGERR_PERM 且永不重试。
+
+   - 修复（wire.cpp）：`auth_locked` ERR 帧分支 return -2（被拒，配置问题
+     不重试）；传输失败保持 -1；`ensure_connected_locked` 对 -1 走 continue
+     （下一 attempt / 上层退避重试），-2 才 return -2。
+   - 用例 d2 实证被拒不重试（仅 1 次连接 + 快速失败）；d3 实证 RST 中断
+     发送 → 整帧未发完 → 安全重放成功。假 peer 测试框架在
+     test_wire_io.cpp（真 socket 驱动真实收发路径，不 mock）。
+   - **测试框架坑**：peer 线程的第二次 accept 在客户端不重试时永远阻塞，
+     join 前必须 stop_listen（shutdown+close 打断阻塞中的 accept）。
+
 ## 约定
 
 - 提交信息：`<域>: <动词开头的一句话>`（域 = agentd / server / wire / scripts / docs / tests / chore）
@@ -909,7 +925,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-11-04（第 47 条 region dump/restore；同日早些：第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。
+本文件最后校准：2026-11-04（第 47 条 region dump/restore + 第 48 条 wire AUTH 断连语义修复；同日早些：第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。
 上一条校准：2026-11-03（第 43 条 anon_ring 审查 + 第 44 条 BACKLOG 5/6/12 收口）。
 上一条校准：2026-10-23 19:55（HEAD `8bddaf5`）：项目结构补 `ko/` 与 `build/` 说明、
 结构护栏补到 6 道、main.c 拆分收尾（683 行）、清掉已删除的 GG 核心注入链路表述、
