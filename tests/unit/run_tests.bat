@@ -147,6 +147,16 @@ echo === test_dump ===
 "%ROOT%\build\pc\test_dump.exe"
 if errorlevel 1 ( echo [FAIL] test_dump & exit /b 1 )
 
+rem T-async gg-ui async task queue concurrency guardrail (BACKLOG P1-7):
+rem single-worker serialization (no overlap), FIFO order, no loss/dup under
+rem multi-threaded post, shutdown drops queued but finishes running, post-after-shutdown rejected.
+g++ -std=c++17 -O2 -Wall -I"%ROOT%" ^
+  -o "%ROOT%\build\pc\test_async_runner.exe" "%ROOT%\tests\unit\test_async_runner.cpp" -lpthread
+if errorlevel 1 ( echo [FAIL] test_async_runner build & exit /b 1 )
+echo === test_async_runner ===
+"%ROOT%\build\pc\test_async_runner.exe"
+if errorlevel 1 ( echo [FAIL] test_async_runner & exit /b 1 )
+
 rem T6 watch dedup cursor guardrail: rwproc path rwproc_hit_consumed[] reports only new hits,
 rem cap-truncated remainder refilled, per-bp independent cursors; ptrace path keeps remainder (fix).
 rem Needs posix_stub (MinGW lacks sys/ptrace.h sys/uio.h sys/wait.h signal.h).

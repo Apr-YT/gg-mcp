@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,10 @@
 #include "imgui_impl_win32.h"
 
 #include "session.h"
+
+// 异步任务队列（P1-7）：阻塞的 call_tool 丢 worker 线程，UI 线程只做展示。
+// 并发语义见该头文件注释与 tests/unit/test_async_runner.cpp。
+#include "async_runner.h"
 
 // UI <-> AI 的共享工作上下文（文件通道，见该头文件的说明）
 #include "shared_ctx.h"
@@ -183,6 +188,14 @@ struct App {
 
 static App g_app;
 
+// ---- 异步任务（P1-7）----
+// 纪律：worker 线程只跑 job 的 run 段 —— 只能 call_tool 和写 job 自己的
+// outcome 字段，**绝不许碰 g_app / logf / ui_publish**（那些是 UI 线程的）。
+// apply 段由 drain_completed() 在 UI 线程执行。慢操作（搜索家族 / attach /
+// connect / 进程列表 / 模块列表 / 指针三件套）走 post_*；快操作（单地址
+// 读写/冻结、undo、翻页）保持同步 —— wire 往返 ms 级，异步只会增加状态面。
+static gg::AsyncRunner g_runner;
+
 // 定义在下方"与 AI 的联动"一节；业务函数（do_connect / attach_pid / ...）
 // 都在它之前，所以先声明。必须包在匿名 namespace 里 —— 定义在匿名 namespace
 // 内，全局作用域的声明会是另一个实体（匿名 namespace 里所有同名块属于同一个）。
@@ -274,51 +287,112 @@ static bool load_config(gg::ServerConfig* cfg) {
     return true;
 }
 
-static void refresh_procs() {
-    if (!g_app.sess) return;
-    ToolResult r = call_tool(g_app.sess, "gg_list_processes", json::object());
-    if (!r.ok) { logf("[进程] 获取失败: %s", r.err.c_str()); return; }
-    g_app.procs.clear();
-    if (r.data.contains("processes") && r.data["processes"].is_array()) {
-        for (const auto& p : r.data["processes"]) {
+/* 进程列表解析：exec（worker）与 apply（UI）共用，避免两处各写一份漂移。 */
+static void parse_procs(const json& data, std::vector<ProcEntry>* out) {
+    out->clear();
+    if (data.contains("processes") && data["processes"].is_array()) {
+        for (const auto& p : data["processes"]) {
             ProcEntry e;
             e.pid = p.value("pid", 0);
             e.comm = p.value("comm", std::string());
             e.name = p.value("name", std::string());
             if (e.name.empty()) e.name = e.comm;
-            g_app.procs.push_back(e);
+            out->push_back(e);
         }
     }
-    logf("[进程] 共 %zu 个", g_app.procs.size());
 }
 
-static void do_connect() {
-    gg::ServerConfig cfg;
-    if (!load_config(&cfg)) return;
-    if (g_app.sess) { delete g_app.sess; g_app.sess = nullptr; }
-    g_app.sess = new gg::Session(cfg);
+struct ProcsJob {
+    ToolResult tr;
+};
+static void exec_refresh_procs(gg::Session* sess, ProcsJob* j) {
+    j->tr = call_tool(sess, "gg_list_processes", json::object());
+}
+static void apply_refresh_procs(ProcsJob* j) {
+    if (!j->tr.ok) { logf("[进程] 获取失败: %s", j->tr.err.c_str()); return; }
+    parse_procs(j->tr.data, &g_app.procs);
+    logf("[进程] 共 %zu 个", g_app.procs.size());
+}
+static void refresh_procs() {
+    if (!g_app.sess) return;
+    ProcsJob j;
+    exec_refresh_procs(g_app.sess, &j);
+    apply_refresh_procs(&j);
+}
+static void post_refresh_procs() {
+    if (!g_app.sess) return;
+    auto j = std::make_shared<ProcsJob>();
+    gg::Session* sess = g_app.sess;
+    g_runner.post("刷新进程列表",
+                  [sess, j] { exec_refresh_procs(sess, j.get()); },
+                  [j] { apply_refresh_procs(j.get()); });
+}
 
-    ToolResult r = call_tool(g_app.sess, "gg_device_info", json::object());
-    if (!r.ok) {
+static void refresh_procs();
+static void post_refresh_procs();
+
+/* do_connect 拆 exec/apply：新建 Session + device_info 在 worker 跑（adb
+ * forward + wire 握手约 1~2s，设备不在时更久），swap 只在 UI 线程发生。
+ * 旧的 g_app.sess 也在 UI 线程 delete —— 按钮在 busy 时禁用，此时不会有
+ * worker 还持有旧指针。 */
+struct ConnectJob {
+    gg::Session* sess = nullptr;
+    ToolResult   tr;
+};
+static void exec_connect(const gg::ServerConfig& cfg, ConnectJob* j) {
+    j->sess = new gg::Session(cfg);
+    j->tr = call_tool(j->sess, "gg_device_info", json::object());
+}
+static void apply_connect(ConnectJob* j) {
+    if (j->sess) {
+        delete g_app.sess;
+        g_app.sess = j->sess;
+        j->sess = nullptr;
+    }
+    if (!j->tr.ok) {
         g_app.connected = false;
         g_app.status = "连接失败";
-        logf("[连接] 失败: %s", r.err.c_str());
+        logf("[连接] 失败: %s", j->tr.err.c_str());
         return;
     }
     g_app.connected = true;
-    g_app.driver_state = r.data.value("driver_state", -1);
-    g_app.status = r.data.value("driver_state_str", std::string("?"));
+    g_app.driver_state = j->tr.data.value("driver_state", -1);
+    g_app.status = j->tr.data.value("driver_state_str", std::string("?"));
     logf("[连接] 成功 driver_state=%d (%s)", g_app.driver_state, g_app.status.c_str());
-    refresh_procs();
+    post_refresh_procs();
     ui_publish("connect");
 }
+static void do_connect() {
+    gg::ServerConfig cfg;
+    if (!load_config(&cfg)) return;
+    ConnectJob j;
+    exec_connect(cfg, &j);
+    apply_connect(&j);
+    if (j.sess) delete j.sess;      // apply 没接管（没走到 swap 不存在的分支也保险）
+}
+static void post_connect() {
+    gg::ServerConfig cfg;
+    if (!load_config(&cfg)) return;
+    auto j = std::make_shared<ConnectJob>();
+    g_runner.post("连接设备",
+                  [cfg, j] { exec_connect(cfg, j.get()); },
+                  [j] {
+                      apply_connect(j.get());
+                      if (j->sess) delete j->sess;
+                  });
+}
 
-static void attach_pid(int pid) {
-    if (!g_app.sess || pid <= 0) return;
-    ToolResult r = call_tool(g_app.sess, "gg_attach", json{{"pid", pid}});
-    if (!r.ok) { logf("[attach] pid=%d 失败: %s", pid, r.err.c_str()); return; }
-    g_app.target_pid = pid;
-    g_app.target_name = r.data.value("name", std::string());
+struct AttachJob {
+    ToolResult tr;
+    int        pid = 0;
+};
+static void exec_attach(gg::Session* sess, AttachJob* j) {
+    j->tr = call_tool(sess, "gg_attach", json{{"pid", j->pid}});
+}
+static void apply_attach(AttachJob* j) {
+    if (!j->tr.ok) { logf("[attach] pid=%d 失败: %s", j->pid, j->tr.err.c_str()); return; }
+    g_app.target_pid = j->pid;
+    g_app.target_name = j->tr.data.value("name", std::string());
     g_app.hits.clear();
     g_app.hit_total = 0;
     g_app.hit_sel = -1;
@@ -328,8 +402,24 @@ static void attach_pid(int pid) {
     g_app.modules.clear();          // 模块列表属于上一个进程，必须重拉
     g_app.module_dirty = true;
     g_app.analysis_out.clear();
-    logf("[attach] pid=%d %s", pid, g_app.target_name.c_str());
+    logf("[attach] pid=%d %s", j->pid, g_app.target_name.c_str());
     ui_publish("attach");
+}
+static void attach_pid(int pid) {
+    if (!g_app.sess || pid <= 0) return;
+    AttachJob j;
+    j.pid = pid;
+    exec_attach(g_app.sess, &j);
+    apply_attach(&j);
+}
+static void post_attach(int pid) {
+    if (!g_app.sess || pid <= 0) return;
+    auto j = std::make_shared<AttachJob>();
+    j->pid = pid;
+    gg::Session* sess = g_app.sess;
+    g_runner.post("attach 进程",
+                  [sess, j] { exec_attach(sess, j.get()); },
+                  [j] { apply_attach(j.get()); });
 }
 
 static void refresh_results(int limit) {
@@ -365,72 +455,168 @@ static void refresh_results(int limit) {
          g_app.hits.size(), (long long)g_app.page_offset);
 }
 
+/* 搜索家族共享的 job：输入在 post 时快照 —— worker 跑的那 0.2s 里用户可能
+ * 正在改输入框，直接读 g_app 就是数据竞争。 */
+struct SearchJob {
+    ToolResult tr;
+    char       value[128] = "";
+    int        type_idx = 2;
+    int        region_idx = 0;
+    std::string range_lo, range_hi;      // range 用
+    std::string refine_op;               // refine 用
+};
+
+static void exec_exact_search(gg::Session* sess, SearchJob* j) {
+    j->tr = call_tool(sess, "gg_search",
+                      json{{"value", j->value},
+                           {"type", kTypeNames[j->type_idx]},
+                           {"region", kRegionNames[j->region_idx]}});
+}
+static void apply_exact_search(SearchJob* j) {
+    g_app.page_offset = 0;      // 新结果从第一页看
+    if (!j->tr.ok) { logf("[搜索] 失败: %s", j->tr.err.c_str()); return; }
+    g_app.search_mode = "exact";
+    logf("[搜索] %s=%s -> %lld 条%s", kTypeNames[j->type_idx], j->value,
+         (long long)j->tr.data.value("count", (int64_t)0),
+         j->tr.data.value("truncated", false) ? "（已截断）" : "");
+    refresh_results(g_app.page_limit);
+    ui_publish("exact_search");
+}
+// 同步入口：AI 指令 / 启动 auto-* 用（行为与异步化之前一致）
 static void do_exact_search() {
     if (!g_app.sess || g_app.target_pid == 0) { logf("[搜索] 先 attach 进程"); return; }
     uint64_t v = 0;
     if (!parse_num(g_app.value_input, &v)) { logf("[搜索] 值非法: %s", g_app.value_input); return; }
-    g_app.page_offset = 0;      // 新结果从第一页看
-    ToolResult r = call_tool(g_app.sess, "gg_search",
-                             json{{"value", g_app.value_input},
-                                  {"type", kTypeNames[g_app.type_idx]},
-                                  {"region", kRegionNames[g_app.region_idx]}});
-    if (!r.ok) { logf("[搜索] 失败: %s", r.err.c_str()); return; }
-    g_app.search_mode = "exact";
-    logf("[搜索] %s=%s -> %lld 条%s", kTypeNames[g_app.type_idx], g_app.value_input,
-         (long long)r.data.value("count", (int64_t)0),
-         r.data.value("truncated", false) ? "（已截断）" : "");
-    refresh_results(g_app.page_limit);
-    ui_publish("exact_search");
+    SearchJob j;
+    snprintf(j.value, sizeof(j.value), "%s", g_app.value_input);
+    j.type_idx = g_app.type_idx;
+    j.region_idx = g_app.region_idx;
+    exec_exact_search(g_app.sess, &j);
+    apply_exact_search(&j);
+}
+static void post_exact_search() {
+    if (!g_app.sess || g_app.target_pid == 0) { logf("[搜索] 先 attach 进程"); return; }
+    uint64_t v = 0;
+    if (!parse_num(g_app.value_input, &v)) { logf("[搜索] 值非法: %s", g_app.value_input); return; }
+    auto j = std::make_shared<SearchJob>();
+    snprintf(j->value, sizeof(j->value), "%s", g_app.value_input);
+    j->type_idx = g_app.type_idx;
+    j->region_idx = g_app.region_idx;
+    gg::Session* sess = g_app.sess;
+    g_runner.post("精确搜索",
+                  [sess, j] { exec_exact_search(sess, j.get()); },
+                  [j] { apply_exact_search(j.get()); });
 }
 
-static void do_range_search() {
-    if (!g_app.sess || g_app.target_pid == 0) { logf("[区间] 先 attach 进程"); return; }
+static void exec_range_search(gg::Session* sess, SearchJob* j) {
+    j->tr = call_tool(sess, "gg_search_range",
+                      json{{"min", j->range_lo}, {"max", j->range_hi},
+                           {"type", kTypeNames[j->type_idx]},
+                           {"region", kRegionNames[j->region_idx]}});
+}
+static void apply_range_search(SearchJob* j) {
     g_app.page_offset = 0;
-    uint64_t lo = 0, hi = 0;
-    // 值输入支持 "90-110" 形式
-    std::string s = g_app.value_input;
-    size_t dash = s.find('-');
-    if (dash == std::string::npos) { logf("[区间] 需要 \"min-max\"，例如 90-110"); return; }
-    std::string a = s.substr(0, dash), b = s.substr(dash + 1);
-    if (!parse_num(a.c_str(), &lo) || !parse_num(b.c_str(), &hi)) {
-        logf("[区间] 数值非法: %s", s.c_str());
-        return;
-    }
-    ToolResult r = call_tool(g_app.sess, "gg_search_range",
-                             json{{"min", a}, {"max", b},
-                                  {"type", kTypeNames[g_app.type_idx]},
-                                  {"region", kRegionNames[g_app.region_idx]}});
-    if (!r.ok) { logf("[区间] 失败: %s", r.err.c_str()); return; }
+    if (!j->tr.ok) { logf("[区间] 失败: %s", j->tr.err.c_str()); return; }
     g_app.search_mode = "range";
-    logf("[区间] %s-%s -> %lld 条", a.c_str(), b.c_str(),
-         (long long)r.data.value("count", (int64_t)0));
+    logf("[区间] %s-%s -> %lld 条", j->range_lo.c_str(), j->range_hi.c_str(),
+         (long long)j->tr.data.value("count", (int64_t)0));
     refresh_results(g_app.page_limit);
     ui_publish("range_search");
 }
+// 解析 "90-110" 输入；成功填 job 并返回 true
+static bool fill_range_job(SearchJob* j) {
+    std::string s = g_app.value_input;
+    size_t dash = s.find('-');
+    if (dash == std::string::npos) { logf("[区间] 需要 \"min-max\"，例如 90-110"); return false; }
+    j->range_lo = s.substr(0, dash);
+    j->range_hi = s.substr(dash + 1);
+    uint64_t lo = 0, hi = 0;
+    if (!parse_num(j->range_lo.c_str(), &lo) || !parse_num(j->range_hi.c_str(), &hi)) {
+        logf("[区间] 数值非法: %s", s.c_str());
+        return false;
+    }
+    j->type_idx = g_app.type_idx;
+    j->region_idx = g_app.region_idx;
+    return true;
+}
+static void do_range_search() {
+    if (!g_app.sess || g_app.target_pid == 0) { logf("[区间] 先 attach 进程"); return; }
+    SearchJob j;
+    if (!fill_range_job(&j)) return;
+    exec_range_search(g_app.sess, &j);
+    apply_range_search(&j);
+}
+static void post_range_search() {
+    if (!g_app.sess || g_app.target_pid == 0) { logf("[区间] 先 attach 进程"); return; }
+    auto j = std::make_shared<SearchJob>();
+    if (!fill_range_job(j.get())) return;
+    gg::Session* sess = g_app.sess;
+    g_runner.post("区间搜索",
+                  [sess, j] { exec_range_search(sess, j.get()); },
+                  [j] { apply_range_search(j.get()); });
+}
 
-static void do_unknown_init() {
-    if (!g_app.sess || g_app.target_pid == 0) { logf("[模糊] 先 attach 进程"); return; }
+static void exec_unknown_init(gg::Session* sess, SearchJob* j) {
+    j->tr = call_tool(sess, "gg_search_unknown_init",
+                      json{{"type", kTypeNames[j->type_idx]},
+                           {"region", kRegionNames[j->region_idx]}});
+}
+static void apply_unknown_init(SearchJob* j) {
     g_app.page_offset = 0;
-    ToolResult r = call_tool(g_app.sess, "gg_search_unknown_init",
-                             json{{"type", kTypeNames[g_app.type_idx]},
-                                  {"region", kRegionNames[g_app.region_idx]}});
-    if (!r.ok) { logf("[模糊] 首次扫描失败: %s", r.err.c_str()); return; }
+    if (!j->tr.ok) { logf("[模糊] 首次扫描失败: %s", j->tr.err.c_str()); return; }
     logf("[模糊] 首次扫描完成，%lld 个元素 —— 改数值后点\"再次扫描\"",
-         (long long)r.data.value("elements", (int64_t)0));
+         (long long)j->tr.data.value("elements", (int64_t)0));
     g_app.hits.clear();
     g_app.hit_total = 0;
     ui_publish("fuzzy_init");
 }
+static void do_unknown_init() {
+    if (!g_app.sess || g_app.target_pid == 0) { logf("[模糊] 先 attach 进程"); return; }
+    SearchJob j;
+    j.type_idx = g_app.type_idx;
+    j.region_idx = g_app.region_idx;
+    exec_unknown_init(g_app.sess, &j);
+    apply_unknown_init(&j);
+}
+static void post_unknown_init() {
+    if (!g_app.sess || g_app.target_pid == 0) { logf("[模糊] 先 attach 进程"); return; }
+    auto j = std::make_shared<SearchJob>();
+    j->type_idx = g_app.type_idx;
+    j->region_idx = g_app.region_idx;
+    gg::Session* sess = g_app.sess;
+    g_runner.post("模糊首次扫描",
+                  [sess, j] { exec_unknown_init(sess, j.get()); },
+                  [j] { apply_unknown_init(j.get()); });
+}
 
-static void do_refine(const char* op) {
-    if (!g_app.sess) return;
-    ToolResult r = call_tool(g_app.sess, "gg_search_refine", json{{"op", op}});
-    if (!r.ok) { logf("[再次扫描 %s] 失败: %s", op, r.err.c_str()); return; }
-    int64_t remain = r.data.value("remaining", (int64_t)0);
-    logf("[再次扫描 %s] 剩余 %lld", op, (long long)remain);
+static void exec_refine(gg::Session* sess, SearchJob* j) {
+    j->tr = call_tool(sess, "gg_search_refine", json{{"op", j->refine_op}});
+}
+static void apply_refine(SearchJob* j) {
+    if (!j->tr.ok) { logf("[再次扫描 %s] 失败: %s", j->refine_op.c_str(), j->tr.err.c_str()); return; }
+    int64_t remain = j->tr.data.value("remaining", (int64_t)0);
+    logf("[再次扫描 %s] 剩余 %lld", j->refine_op.c_str(), (long long)remain);
     ui_publish("refine");
     if (remain > 0 && remain <= 100000) refresh_results(g_app.page_limit);
     else { g_app.hits.clear(); g_app.hit_total = remain; }
+}
+static void do_refine(const char* op) {
+    if (!g_app.sess) return;
+    SearchJob j;
+    j.refine_op = op;
+    exec_refine(g_app.sess, &j);
+    apply_refine(&j);
+}
+static void post_refine(const char* op) {
+    if (!g_app.sess) return;
+    auto j = std::make_shared<SearchJob>();
+    j->refine_op = op;
+    gg::Session* sess = g_app.sess;
+    char label[64];
+    snprintf(label, sizeof(label), "再次扫描(%s)", op);
+    g_runner.post(label,
+                  [sess, j] { exec_refine(sess, j.get()); },
+                  [j] { apply_refine(j.get()); });
 }
 
 static void do_undo() {
@@ -614,13 +800,17 @@ static uint64_t json_num(const json& v) {
     return 0;
 }
 
-static void refresh_modules() {
-    if (!g_app.sess || !g_app.target_pid) { logf("[模块] 先 attach 进程"); return; }
-    ToolResult r = call_tool(g_app.sess, "gg_module_list", json::object());
-    if (!r.ok) { logf("[模块] 失败: %s", r.err.c_str()); return; }
+struct ModulesJob {
+    ToolResult tr;
+};
+static void exec_refresh_modules(gg::Session* sess, ModulesJob* j) {
+    j->tr = call_tool(sess, "gg_module_list", json::object());
+}
+static void apply_refresh_modules(ModulesJob* j) {
+    if (!j->tr.ok) { logf("[模块] 失败: %s", j->tr.err.c_str()); return; }
     g_app.modules.clear();
-    if (r.data.contains("modules") && r.data["modules"].is_array()) {
-        for (const auto& m : r.data["modules"]) {
+    if (j->tr.data.contains("modules") && j->tr.data["modules"].is_array()) {
+        for (const auto& m : j->tr.data["modules"]) {
             ModuleRow x;
             x.base = json_num(m.value("base", json()));
             x.size = json_num(m.value("size", json()));
@@ -636,6 +826,16 @@ static void refresh_modules() {
     g_app.module_sel = -1;
     logf("[模块] %zu 个", g_app.modules.size());
 }
+/* 模块列表只走异步：它的两个入口（F2 刷新按钮 / dirty 自动拉）都在绘制
+ * 路径里，同步版没有调用者。 */
+static void post_refresh_modules() {
+    if (!g_app.sess || !g_app.target_pid) { logf("[模块] 先 attach 进程"); return; }
+    auto j = std::make_shared<ModulesJob>();
+    gg::Session* sess = g_app.sess;
+    g_runner.post("模块列表",
+                  [sess, j] { exec_refresh_modules(sess, j.get()); },
+                  [j] { apply_refresh_modules(j.get()); });
+}
 
 /* 追加一行分析结果。只留最近 400 行：指针扫描一次能出几千条，
  * 全存着会一直涨，而人真正会看完的不会超过一屏。 */
@@ -646,43 +846,67 @@ static void push_analysis(const std::string& line) {
                                  g_app.analysis_out.begin() + 100);
 }
 
+/* 指针三件套共享 job：addr 快照（worker 期间用户可能在编辑地址框）。 */
+struct PtrJob {
+    ToolResult tr;
+    char       addr[64] = "";
+    int        depth = 8;
+};
+
+static void exec_resolve_symbol(gg::Session* sess, PtrJob* j) {
+    j->tr = call_tool(sess, "gg_resolve_symbol", json{{"addr", j->addr}});
+}
+static void apply_resolve_symbol(PtrJob* j) {
+    if (!j->tr.ok) { logf("[解析] 失败: %s", j->tr.err.c_str()); return; }
+    g_app.analysis_out.clear();
+    const auto& d = j->tr.data;
+    const bool mapped = d.value("mapped", false);
+    const std::string mod_raw = d.value("module", std::string());
+    const std::string mod = !mapped ? "（该地址未映射）"
+                          : (mod_raw.empty() ? "（不在任何模块内，匿名映射）" : mod_raw);
+    const std::string off = d.value("module_offset", std::string(""));
+    const std::string off_s = off.empty() ? "-" : off;
+    const std::string mb  = d.value("module_base", std::string("?"));
+    const std::string sym = d.value("symbol", std::string(""));
+    char line[512];
+    snprintf(line, sizeof(line), "%s\n  模块: %s (base %s)  偏移: %s\n  权限: %s\n  区域: %s%s%s",
+             j->addr, mod.c_str(), mb.c_str(), off_s.c_str(),
+             d.value("perms", std::string("?")).c_str(),
+             d.value("region", std::string("?")).c_str(),
+             sym.empty() ? "" : "\n  符号: ", sym.c_str());
+    push_analysis(line);
+    logf("[解析] %s -> %s%s%s", j->addr, mod.c_str(),
+         off.empty() ? "" : " +", off.c_str());
+}
 static void do_resolve_symbol() {
     if (!g_app.sess) return;
     if (!g_app.ptr_addr[0]) { logf("[解析] 先填地址"); return; }
-    ToolResult r = call_tool(g_app.sess, "gg_resolve_symbol", json{{"addr", g_app.ptr_addr}});
-    if (!r.ok) { logf("[解析] 失败: %s", r.err.c_str()); return; }
-    g_app.analysis_out.clear();
-    const bool mapped = r.data.value("mapped", false);
-    const std::string mod_raw = r.data.value("module", std::string());
-    const std::string mod = !mapped ? "（该地址未映射）"
-                          : (mod_raw.empty() ? "（不在任何模块内，匿名映射）" : mod_raw);
-    const std::string off = r.data.value("module_offset", std::string(""));
-    const std::string off_s = off.empty() ? "-" : off;
-    const std::string mb  = r.data.value("module_base", std::string("?"));
-    const std::string sym = r.data.value("symbol", std::string(""));
-    char line[512];
-    snprintf(line, sizeof(line), "%s\n  模块: %s (base %s)  偏移: %s\n  权限: %s\n  区域: %s%s%s",
-             g_app.ptr_addr, mod.c_str(), mb.c_str(), off_s.c_str(),
-             r.data.value("perms", std::string("?")).c_str(),
-             r.data.value("region", std::string("?")).c_str(),
-             sym.empty() ? "" : "\n  符号: ", sym.c_str());
-    push_analysis(line);
-    logf("[解析] %s -> %s%s%s", g_app.ptr_addr, mod.c_str(),
-         off.empty() ? "" : " +", off.c_str());
+    PtrJob j;
+    snprintf(j.addr, sizeof(j.addr), "%s", g_app.ptr_addr);
+    exec_resolve_symbol(g_app.sess, &j);
+    apply_resolve_symbol(&j);
+}
+static void post_resolve_symbol() {
+    if (!g_app.sess) return;
+    if (!g_app.ptr_addr[0]) { logf("[解析] 先填地址"); return; }
+    auto j = std::make_shared<PtrJob>();
+    snprintf(j->addr, sizeof(j->addr), "%s", g_app.ptr_addr);
+    gg::Session* sess = g_app.sess;
+    g_runner.post("解析符号",
+                  [sess, j] { exec_resolve_symbol(sess, j.get()); },
+                  [j] { apply_resolve_symbol(j.get()); });
 }
 
-static void do_pointer_chain() {
-    if (!g_app.sess) return;
-    if (!g_app.ptr_addr[0]) { logf("[指针链] 先填地址"); return; }
-    int depth = g_app.ptr_depth;
-    if (depth < 1) depth = 1;
-    if (depth > 32) depth = 32;
-    ToolResult r = call_tool(g_app.sess, "gg_pointer_chain",
-                             json{{"addr", g_app.ptr_addr}, {"max_depth", depth}});
-    if (!r.ok) { logf("[指针链] 失败: %s", r.err.c_str()); return; }
+static void exec_pointer_chain(gg::Session* sess, PtrJob* j) {
+    j->tr = call_tool(sess, "gg_pointer_chain",
+                      json{{"addr", j->addr}, {"max_depth", j->depth}});
+}
+static void apply_pointer_chain(PtrJob* j) {
+    if (!j->tr.ok) { logf("[指针链] 失败: %s", j->tr.err.c_str()); return; }
     g_app.analysis_out.clear();
-    if (r.data.contains("levels") && r.data["levels"].is_array()) {
-        for (const auto& lv : r.data["levels"]) {
+    const auto& d = j->tr.data;
+    if (d.contains("levels") && d["levels"].is_array()) {
+        for (const auto& lv : d["levels"]) {
             char line[512];
             /* mapped 说的是【解引用出来的指针指向哪里】，不是这一级的地址本身。
              * 之前写成 "(未映射) <addr>" 会让人以为起点没映射 —— 现场就误解过一次：
@@ -713,7 +937,7 @@ static void do_pointer_chain() {
      *   cycle        —— 指针自指
      *   max_depth    —— 到达深度上限，链可能还有后续
      * 只写英文原词会被当成失败，所以附一句中文。 */
-    const std::string stop = r.data.value("stopped", std::string("?"));
+    const std::string stop = d.value("stopped", std::string("?"));
     const char* stop_zh =
         stop == "unmapped"     ? "该处存的不是指针（正常结束，不是错误）" :
         stop == "null_pointer" ? "读到空指针" :
@@ -721,27 +945,49 @@ static void do_pointer_chain() {
         stop == "cycle"        ? "指针自指，已断开" :
         stop == "max_depth"    ? "到达深度上限，链可能还没走完（调大深度再试）" :
         stop == "ok"           ? "正常走完" : "未知";
-    logf("[指针链] %s 深度 %d，结束: %s（%s）", g_app.ptr_addr, depth,
+    logf("[指针链] %s 深度 %d，结束: %s（%s）", j->addr, j->depth,
          stop.c_str(), stop_zh);
+}
+static void do_pointer_chain() {
+    if (!g_app.sess) return;
+    if (!g_app.ptr_addr[0]) { logf("[指针链] 先填地址"); return; }
+    PtrJob j;
+    snprintf(j.addr, sizeof(j.addr), "%s", g_app.ptr_addr);
+    j.depth = g_app.ptr_depth;
+    if (j.depth < 1) j.depth = 1;
+    if (j.depth > 32) j.depth = 32;
+    exec_pointer_chain(g_app.sess, &j);
+    apply_pointer_chain(&j);
+}
+static void post_pointer_chain() {
+    if (!g_app.sess) return;
+    if (!g_app.ptr_addr[0]) { logf("[指针链] 先填地址"); return; }
+    auto j = std::make_shared<PtrJob>();
+    snprintf(j->addr, sizeof(j->addr), "%s", g_app.ptr_addr);
+    j->depth = g_app.ptr_depth;
+    if (j->depth < 1) j->depth = 1;
+    if (j->depth > 32) j->depth = 32;
+    gg::Session* sess = g_app.sess;
+    g_runner.post("追踪指针链",
+                  [sess, j] { exec_pointer_chain(sess, j.get()); },
+                  [j] { apply_pointer_chain(j.get()); });
 }
 
 /* 指针扫描：在可写区找"值等于当前某条结果地址"的指针。依赖搜索结果，
- * 没结果时直接提示 —— 静默返回空数组会让人以为"没有指针指向"。 */
-static void do_pointer_scan() {
-    if (!g_app.sess) return;
-    if (g_app.hit_total <= 0) {
-        logf("[指针扫描] 先搜出结果再扫（扫的是当前结果集的地址）");
-        return;
-    }
-    ToolResult r = call_tool(g_app.sess, "gg_pointer_scan",
-                             json{{"type", "qword"}, {"cap", 5000}});
-    if (!r.ok) { logf("[指针扫描] 失败: %s", r.err.c_str()); return; }
+ * 没结果时直接提示 —— 静默返回空数组会让人以为"没有指针指向"。
+ * 全内存扫描，是三件套里最慢的，异步收益最大。 */
+static void exec_pointer_scan(gg::Session* sess, PtrJob* j) {
+    j->tr = call_tool(sess, "gg_pointer_scan",
+                      json{{"type", "qword"}, {"cap", 5000}});
+}
+static void apply_pointer_scan(PtrJob* j) {
+    if (!j->tr.ok) { logf("[指针扫描] 失败: %s", j->tr.err.c_str()); return; }
     g_app.analysis_out.clear();
     /* 字段名以 agentd/main.c::h_pointer_scan 为准：
      *   {hits: [{container, target, ptype}]}
      * container = 存指针的地址，target = 它指向的目标（当前结果集里的某个地址）。
      * 之前这里猜成 pointers/results，是错的 —— 猜字段名不如看实现。 */
-    json arr = r.data.contains("hits") ? r.data["hits"] : json::array();
+    json arr = j->tr.data.contains("hits") ? j->tr.data["hits"] : json::array();
     int n = 0;
     if (arr.is_array()) {
         for (const auto& p : arr) {
@@ -763,6 +1009,28 @@ static void do_pointer_scan() {
                  arr[0].value("container", std::string("")).c_str());
     }
 }
+static void do_pointer_scan() {
+    if (!g_app.sess) return;
+    if (g_app.hit_total <= 0) {
+        logf("[指针扫描] 先搜出结果再扫（扫的是当前结果集的地址）");
+        return;
+    }
+    PtrJob j;
+    exec_pointer_scan(g_app.sess, &j);
+    apply_pointer_scan(&j);
+}
+static void post_pointer_scan() {
+    if (!g_app.sess) return;
+    if (g_app.hit_total <= 0) {
+        logf("[指针扫描] 先搜出结果再扫（扫的是当前结果集的地址）");
+        return;
+    }
+    auto j = std::make_shared<PtrJob>();
+    gg::Session* sess = g_app.sess;
+    g_runner.post("指针扫描（全内存）",
+                  [sess, j] { exec_pointer_scan(sess, j.get()); },
+                  [j] { apply_pointer_scan(j.get()); });
+}
 
 static void draw_modules_window() {
     if (!g_app.show_modules) return;
@@ -772,9 +1040,9 @@ static void draw_modules_window() {
 
     if (g_app.module_dirty && g_app.target_pid > 0 && g_app.connected) {
         g_app.module_dirty = false;
-        refresh_modules();
+        post_refresh_modules();
     }
-    if (ImGui::Button("刷新")) refresh_modules();
+    if (ImGui::Button("刷新")) post_refresh_modules();
     ImGui::SameLine();
     ImGui::SetNextItemWidth(180);
     ImGui::InputTextWithHint("##mf", "过滤（名字/路径）", g_app.module_filter,
@@ -844,12 +1112,14 @@ static void draw_pointer_window() {
     ImGui::SetNextItemWidth(90);
     ImGui::DragInt("深度", &g_app.ptr_depth, 1.0f, 1, 32);
 
-    if (ImGui::Button("解析符号")) do_resolve_symbol();
+    ImGui::BeginDisabled(g_runner.busy());
+    if (ImGui::Button("解析符号")) post_resolve_symbol();
     ImGui::SameLine();
-    if (ImGui::Button("追踪指针链")) do_pointer_chain();
+    if (ImGui::Button("追踪指针链")) post_pointer_chain();
     ImGui::SameLine();
     ImGui::BeginDisabled(g_app.hit_total <= 0);
-    if (ImGui::Button("扫描谁指向结果集")) do_pointer_scan();
+    if (ImGui::Button("扫描谁指向结果集")) post_pointer_scan();
+    ImGui::EndDisabled();
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("清空")) g_app.analysis_out.clear();
@@ -1128,9 +1398,18 @@ static void draw_top_bar() {
     ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
-    if (ImGui::Button("连接 / 重连")) do_connect();
+    ImGui::BeginDisabled(g_runner.busy());
+    if (ImGui::Button("连接 / 重连")) post_connect();
+    ImGui::EndDisabled();
     ImGui::SameLine();
-    if (g_app.connected) {
+    if (g_runner.busy()) {
+        /* busy 指示：旋转字符 + 当前任务名。imgui 没有现成 spinner，
+         * 用帧数切字符就够了 —— 重点是让人知道"有个搜索在跑，按钮灰着"。 */
+        static const char kSpin[] = "-\\|/";
+        const char s = kSpin[(int)(ImGui::GetTime() * 10) % 4];
+        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.3f, 1.0f), "%c %s ...", s,
+                           g_runner.current_label().c_str());
+    } else if (g_app.connected) {
         ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.4f, 1.0f), "● %s", g_app.status.c_str());
     } else {
         ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.35f, 1.0f), "● 未连接");
@@ -1175,7 +1454,9 @@ static void draw_top_bar() {
     ImGui::SameLine();
     if (ImGui::Button("指针")) g_app.show_pointer = true;
     ImGui::SameLine();
-    if (ImGui::Button("刷新进程列表")) refresh_procs();
+    ImGui::BeginDisabled(g_runner.busy());
+    if (ImGui::Button("刷新进程列表")) post_refresh_procs();
+    ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::TextDisabled("F1");
 }
@@ -1209,7 +1490,9 @@ static void draw_proc_panel() {
             bool sel = (g_app.proc_sel == e.pid);
             if (ImGui::Selectable(e.comm.c_str(), sel, ImGuiSelectableFlags_SpanAllColumns)) {
                 g_app.proc_sel = e.pid;
-                attach_pid(e.pid);
+                /* attach 进队列而不是禁用：搜索跑着的时候换目标，排在搜索后面
+                 * 生效（搜索跑完才 attach）。禁用的话用户点了没反应会更困惑。 */
+                post_attach(e.pid);
             }
             ImGui::PopID();
         }
@@ -1229,21 +1512,26 @@ static void draw_search_panel() {
     ImGui::SetNextItemWidth(110);
     ImGui::Combo("##region", &g_app.region_idx, kRegionNames, IM_ARRAYSIZE(kRegionNames));
     ImGui::SameLine();
-    if (ImGui::Button("精确搜索")) do_exact_search();
+    /* 搜索家族在 busy 时整体禁用（P1-7）：搜索中再点搜索会无意义排队，
+     * 而"搜索完成前界面活着"正是异步化的目的 —— 用户此时可以去翻结果页、
+     * 看日志，只是不能再发起第二个慢操作。 */
+    ImGui::BeginDisabled(g_runner.busy());
+    if (ImGui::Button("精确搜索")) post_exact_search();
     ImGui::SameLine();
-    if (ImGui::Button("区间搜索")) do_range_search();
+    if (ImGui::Button("区间搜索")) post_range_search();
 
-    if (ImGui::Button("模糊首次扫描")) do_unknown_init();
+    if (ImGui::Button("模糊首次扫描")) post_unknown_init();
     ImGui::SameLine();
     ImGui::TextDisabled("然后改数值，再点：");
     ImGui::SameLine();
-    if (ImGui::Button("变")) do_refine("changed");
+    if (ImGui::Button("变")) post_refine("changed");
     ImGui::SameLine();
-    if (ImGui::Button("不变")) do_refine("unchanged");
+    if (ImGui::Button("不变")) post_refine("unchanged");
     ImGui::SameLine();
-    if (ImGui::Button("增")) do_refine("increased");
+    if (ImGui::Button("增")) post_refine("increased");
     ImGui::SameLine();
-    if (ImGui::Button("减")) do_refine("decreased");
+    if (ImGui::Button("减")) post_refine("decreased");
+    ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("撤销")) do_undo();
     ImGui::SameLine();
@@ -1613,6 +1901,7 @@ int main(int argc, char** argv) {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+        g_runner.drain_completed();  /* worker 完成的任务在此刻应用到 g_app（UI 线程） */
         ui_tick();      /* 与 AI 的联动：心跳 / 取指令 / 跟随外部结果集变化 */
         draw_ui();
         ImGui::Render();
@@ -1623,6 +1912,10 @@ int main(int argc, char** argv) {
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         g_pSwapChain->Present(1, 0);
     }
+
+    /* 先停 worker：正在跑的任务等它跑完，没开始的丢弃（窗口马上要销毁，
+     * apply 已无意义）。必须在 imgui/D3D 清理之前 —— 任务还引用着 g_app.sess。 */
+    g_runner.shutdown();
 
     // 标记为已关闭而不是删文件：AI 那边 gg_context 仍能看到"人最后在搜什么"，
     // 只是 running=false（shared_ctx::ui_alive 会先看 closed）。

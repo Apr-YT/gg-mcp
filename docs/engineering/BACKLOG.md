@@ -403,6 +403,22 @@ AI 拿到 21481 条候选时，`get_results` 分页看要 214 轮。这一步先
 
 ### 7. 搜索真正异步
 
+**状态：已完成（2026-11-08）。** 单 worker 任务队列 + exec/apply 拆分：
+- `tools/gg-ui/async_runner.h`（纯 STL，不依赖 imgui/Session）：post 入队 →
+  worker 串行 run → UI 线程 drain_completed 执行 apply。并发语义钉死在
+  tests/unit/test_async_runner.cpp（18 断言：串行无重叠 / FIFO / 多线程
+  post 不丢不重 / shutdown 丢弃未开始但跑完当前 / 关闭后 post 拒绝）。
+- 慢操作全部走 post_*：搜索家族（精确/区间/模糊首扫/refine）、attach、
+  connect（新建 Session 在 worker，swap 只在 UI 线程）、进程列表、
+  模块列表、指针三件套（pointer_scan 全内存扫描收益最大）。
+- 快操作保持同步：单地址读写/冻结、undo、翻页（wire 往返 ms 级）。
+- **AI 指令路径（ui_run_cmd）与启动 auto-* 保持同步入口**（exec+apply
+  顺序执行）：它们要立即读结果判断成败，行为与异步化前一致。
+- busy 时搜索家族/连接/刷新按钮禁用，顶栏旋转字符 + 当前任务名指示；
+  attach 允许排队（FIFO 依次生效，幂等）。
+- 关键不变式：**worker 绝不碰 g_app/logf/ui_publish**（输入在 post 时
+  快照进 job），g_app 一切变更保持 UI 单线程语义。
+
 现状：UI 里搜索是同步调用（全量 0.19s、模糊首帧 0.32s），期间界面卡住。
 做法：操作丢进 `std::thread`，结果进队列，UI 线程只做展示；按钮置灰 + 转圈。
 成本：约 80 行（要处理"搜索中再点搜索"、"attach 打断搜索"）。

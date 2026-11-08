@@ -171,3 +171,24 @@
    - **测试框架坑**：peer 线程的第二次 accept 在客户端不重试时永远阻塞，
      join 前必须 stop_listen（shutdown+close 打断阻塞中的 accept）。
 
+51. **gg-ui 异步任务队列（P1-7，2026-11-08，GUI 行为未人工点验）**
+
+   搜索同步调用卡 UI（全量 0.19s / 模糊首帧 0.32s）。解法是
+   `tools/gg-ui/async_runner.h` 单 worker 队列 + 所有慢操作拆 exec/apply：
+
+   - **并发语义（队列头注释 + test_async_runner.cpp 18 断言钉死）**：
+     单 worker 串行 run；apply 只在 drain_completed() 的调用线程（UI）
+     执行；不可取消；shutdown 丢弃未开始、跑完当前。
+   - **铁律：worker 绝不碰 g_app / logf / ui_publish**。入参在 post 时
+     快照进 job struct（worker 跑的时候用户可能在改输入框，直接读
+     g_app 就是数据竞争）。g_app 的一切变更保持 UI 单线程语义。
+   - 慢操作走 post_*（搜索家族/attach/connect/进程列表/模块列表/指针
+     三件套）；快操作（单地址读写/冻结/undo/翻页）保持同步。
+   - **AI 指令路径（ui_run_cmd）与启动 auto-* 用同步入口**（exec+apply
+     顺序执行）：它们要立即读结果判断成败。别把 do_* 同步入口删了。
+   - connect 的 swap 只在 UI 线程：worker new Session，apply 里
+     delete 旧的再接管；busy 时连接按钮禁用，保证 swap 时没有 worker
+     持有旧指针。
+   - busy 时搜索家族按钮禁用 + 顶栏旋转字符；attach 允许排队。
+   - 本机只验证了编译（-Wall 零警告）与队列单测；**GUI 实际交互
+     （转圈/禁用/结果回填）未人工点验**，下次开 gg-ui 时顺带确认。
