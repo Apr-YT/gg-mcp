@@ -63,6 +63,25 @@ static void on_sigusr1(int s) { (void)s; g_start = 1; }
 static volatile uint64_t g_chain_anchor = 0;
 static volatile uint32_t g_mod_marker = 0x5AFE0001u;
 
+/* 用例 15（区域差异）的区间收集：diff 回调在扫描热循环里被调用，
+ * 这里只记录地址与跨度，避免在回调里做任何 IO。 */
+typedef struct {
+    uint64_t addr;
+    uint64_t span;
+} idiff_rec_t;
+static idiff_rec_t g_drecs[16];
+static int g_ndrecs;
+
+static void idiff_cb(void *ud, uint64_t addr, uint64_t span,
+                     const uint8_t *a, const uint8_t *b, size_t pre) {
+    (void)ud; (void)a; (void)b; (void)pre;
+    if (g_ndrecs < (int)(sizeof(g_drecs) / sizeof(g_drecs[0]))) {
+        g_drecs[g_ndrecs].addr = addr;
+        g_drecs[g_ndrecs].span = span;
+        g_ndrecs++;
+    }
+}
+
 static void cleanup(void) {
     if (g_child > 0) {
         kill(g_child, SIGKILL);
@@ -499,6 +518,72 @@ int main(void) {
                   "undo restores post-refresh pre-refine state");
         }
         results_clear(&rs);
+    }
+
+    /* 15) 区域差异比较（gg_region_diff）：dump → 改 4 字节 → diff vs live
+     *     精确定位到 +100 / span 4 → 两 dump 互比结论一致 → 改回原值 diff 归零。
+     * 地址选 base+32768，避开其他用例的全部靶点；先把整页写成 0x5A，
+     * 既保证页已分配（否则 dump 可能因未落页短读失败），也给了确定基线。 */
+    {
+        const char *pa = "/data/local/tmp/ggmcp/itest_diff_a.bin";
+        const char *pb = "/data/local/tmp/ggmcp/itest_diff_b.bin";
+        remove(pa); remove(pb);
+        const uint64_t daddr = (addr - 4096) + 32768;   /* addr = base+4096 */
+        const uint64_t dlen = 4096;
+        char derr[192];
+        uint8_t *page = malloc(dlen);
+        if (!page) {
+            CHECK(0, "diff: malloc failed");
+        } else {
+            memset(page, 0x5A, (size_t)dlen);
+            CHECK(driver_write(&drv, g_child, daddr, page, (size_t)dlen) == (ssize_t)dlen,
+                  "diff: seed page with 0x5A");
+            CHECK(gg_region_dump_to_file(&drv, g_child, daddr, dlen, pa,
+                                         derr, sizeof(derr)) == 0, "diff: dump A");
+            uint32_t nv = 0xDEADBEEFu;
+            CHECK(driver_write(&drv, g_child, daddr + 100, &nv, 4) == 4,
+                  "diff: modify 4 bytes at +100");
+
+            uint64_t regions = 0, dbytes = 0;
+            int trunc = 0;
+            g_ndrecs = 0;
+            int rc = gg_region_diff_live(&drv, g_child, pa, 0, 0, idiff_cb, NULL,
+                                         &regions, &dbytes, &trunc, derr, sizeof(derr));
+            CHECK(rc == 0, "diff vs live ok");
+            CHECK(regions == 1 && g_ndrecs == 1, "diff vs live: exactly 1 region");
+            CHECK(g_ndrecs == 1 && g_drecs[0].addr == daddr + 100 &&
+                  g_drecs[0].span == 4, "diff vs live pinpoints +100 span 4");
+            CHECK(dbytes == 4, "diff vs live: 4 changed bytes");
+
+            CHECK(gg_region_dump_to_file(&drv, g_child, daddr, dlen, pb,
+                                         derr, sizeof(derr)) == 0, "diff: dump B");
+            g_ndrecs = 0;
+            rc = gg_region_diff_files(pa, pb, 0, 0, idiff_cb, NULL,
+                                      &regions, &dbytes, &trunc, derr, sizeof(derr));
+            CHECK(rc == 0 && regions == 1 && g_ndrecs == 1,
+                  "diff two dumps: exactly 1 region");
+            CHECK(g_ndrecs == 1 && g_drecs[0].addr == daddr + 100 &&
+                  g_drecs[0].span == 4, "diff two dumps: same location");
+
+            /* 不同区域的两份 dump 必须被拒（长度/原址一致才可比） */
+            rc = gg_region_diff_files(pa, "/data/local/tmp/ggmcp/no_such_dump.bin",
+                                      0, 0, idiff_cb, NULL, &regions, &dbytes,
+                                      &trunc, derr, sizeof(derr));
+            CHECK(rc != 0, "diff with missing file rejected");
+
+            /* 改回原值 → diff 归零（diff 反映实际内容，不是缓存） */
+            uint32_t ov = 0x5A5A5A5Au;
+            CHECK(driver_write(&drv, g_child, daddr + 100, &ov, 4) == 4,
+                  "diff: restore original bytes");
+            g_ndrecs = 0;
+            rc = gg_region_diff_live(&drv, g_child, pa, 0, 0, idiff_cb, NULL,
+                                     &regions, &dbytes, &trunc, derr, sizeof(derr));
+            CHECK(rc == 0 && regions == 0 && dbytes == 0,
+                  "diff vs live back to zero after restoring bytes");
+
+            free(page);
+            remove(pa); remove(pb);
+        }
     }
 
     results_clear(&res);

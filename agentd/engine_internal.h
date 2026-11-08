@@ -140,6 +140,7 @@ void h_pause_resume(int fd, uint32_t seq, cJSON *p, int pause);
 void h_region_dump(int fd, uint32_t seq, cJSON *p);
 void h_region_restore(int fd, uint32_t seq, cJSON *p);
 void h_dump_list(int fd, uint32_t seq, cJSON *p);
+void h_region_diff(int fd, uint32_t seq, cJSON *p);   /* 区域差异比较（CE compare memory） */
 
 /* cmd_view.c — 内存视图 / 符号解析 / 指针链
  * （这三条本来以"前置声明"形式写在 main.c 的 h_kernel_status 之后，

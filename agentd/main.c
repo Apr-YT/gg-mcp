@@ -393,6 +393,7 @@ static void dispatch(int fd, gg_wire_header_t *h, const char *payload, int *auth
     case GGCMD_REGION_DUMP:        h_region_dump(fd, seq, p); break;
     case GGCMD_REGION_RESTORE:     h_region_restore(fd, seq, p); break;
     case GGCMD_DUMP_LIST:          h_dump_list(fd, seq, p); break;
+    case GGCMD_REGION_DIFF:        h_region_diff(fd, seq, p); break;
     /* AUTH 已在 dispatch 的握手门里提前处理并 return；这里保留 case 只为
      * 消除 -Wswitch 告警并让命令表保持完整。 */
     case GGCMD_AUTH:               h_auth(fd, seq, p, authed); break;

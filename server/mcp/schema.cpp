@@ -245,6 +245,20 @@ static const std::vector<ToolDef>& build() {
              "返回每个备份的 name / 原址 orig_addr / 字节数 / FNV 校验和。"
              "跨会话后不知道设备上有什么备份时先调这个，再 gg_region_restore",
              json::object(), json::array()),
+        tool("gg_region_diff",
+             "比较内存区域的两份内容，报差异区间（CE compare memory）。"
+             "省略 other：dump 备份 vs 目标进程当前内存 —— 看备份到现在被改成什么样、"
+             "或验证 restore 是否真写回；给 other：两个 dump 互比（要求同一区域，"
+             "原址与长度一致）。返回 {regions,diff_bytes,diffs:[{addr,span,a,b}]}，"
+             "a/b 是区间起点最多 16 字节的 hex。相邻差异间隔 ≤ gap 字节会合并成一个区间，"
+             "跨度 span 可能含中间未变字节；diff_bytes 是精确差异字节数",
+             json{
+                 {"name", prop("string", "备份名（gg_region_dump 时用的 name）")},
+                 {"other", prop("string", "另一份备份名（可选；省略 = 对比当前内存）")},
+                 {"gap", prop("integer", "差异合并阈值字节数（0..64，默认 4）")},
+                 {"limit", prop("integer", "最多报告多少个区间（1..5000，默认 500）")},
+             },
+             json{"name"}),
 
         // ---- 读写修改 ----
         tool("gg_read",

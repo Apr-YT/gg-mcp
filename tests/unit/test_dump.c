@@ -28,6 +28,43 @@ static int fails = 0;
     if (!(cond)) { printf("  [FAIL] %s\n", msg); fails++; } \
 } while (0)
 
+/* ---- 差异回调收集（gg_diff_feed 在热循环里回调，这里只做拷贝） ---- */
+#define MAXREC 64
+typedef struct {
+    uint64_t addr;
+    uint64_t span;
+    size_t   pre;
+    uint8_t  a[GG_DIFF_PREFIX];
+    uint8_t  b[GG_DIFF_PREFIX];
+} rec_t;
+static rec_t g_recs[MAXREC];
+static int g_nrecs;
+
+static void rec_cb(void *ud, uint64_t addr, uint64_t span,
+                   const uint8_t *a, const uint8_t *b, size_t pre) {
+    (void)ud;
+    if (g_nrecs >= MAXREC) return;
+    rec_t *r = &g_recs[g_nrecs++];
+    r->addr = addr;
+    r->span = span;
+    r->pre = pre;
+    memcpy(r->a, a, pre);
+    memcpy(r->b, b, pre);
+}
+
+/* 跑一趟完整扫描（begin+feed+finish），返回区间数 */
+static size_t diff_run(const uint8_t *a, const uint8_t *b, size_t len,
+                       uint64_t base, size_t gap, size_t max_regions,
+                       gg_diff_state_t *st_out) {
+    gg_diff_state_t st;
+    gg_diff_begin(&st, base, gap, max_regions);
+    g_nrecs = 0;
+    gg_diff_feed(&st, a, b, len, rec_cb, NULL);
+    gg_diff_finish(&st, rec_cb, NULL);
+    if (st_out) *st_out = st;
+    return st.regions;
+}
+
 int main(void) {
     /* ---- header pack/unpack 往返 ---- */
     {
@@ -89,6 +126,99 @@ int main(void) {
         data[42] ^= 0x01;
         CHECK(gg_fnv1a32(data, sizeof(data), GG_FNV_OFFSET_BASIS) != whole,
               "single bit flip changes sum");
+    }
+
+    /* ---- 区域差异状态机：区间划分 / gap 合并 / 跨块 / 截断 ---- */
+    {
+        uint8_t a[256], b[256];
+        gg_diff_state_t st;
+        memset(a, 0x11, sizeof(a));
+        memset(b, 0x11, sizeof(b));
+
+        /* 全同 */
+        CHECK(diff_run(a, b, sizeof(a), 0x1000, 0, 0, &st) == 0,
+              "identical buffers -> 0 regions");
+        CHECK(st.diff_bytes == 0, "identical -> diff_bytes 0");
+
+        /* 单字节差异：地址 = base + 偏移，span=1，前缀带新旧值 */
+        b[100] = 0x22;
+        CHECK(diff_run(a, b, sizeof(a), 0x1000, 0, 0, &st) == 1,
+              "single byte diff -> 1 region");
+        CHECK(g_recs[0].addr == 0x1000 + 100 && g_recs[0].span == 1,
+              "region addr/span at base+100");
+        CHECK(st.diff_bytes == 1, "single byte -> diff_bytes 1");
+        /* span=1 时前缀截到 1 字节（pre 取 min(pre_len, span)） */
+        CHECK(g_recs[0].pre == 1 && g_recs[0].a[0] == 0x11 && g_recs[0].b[0] == 0x22,
+              "prefix carries old/new byte");
+
+        /* 两段差异相隔 3 个相同字节：gap=0 分开，gap=4 合并 */
+        memset(b, 0x11, sizeof(b));
+        b[10] = 0xAA;
+        b[14] = 0xBB;
+        CHECK(diff_run(a, b, sizeof(a), 0x2000, 0, 0, &st) == 2,
+              "gap=0 -> two separate regions");
+        CHECK(st.diff_bytes == 2, "gap=0 -> diff_bytes 2");
+        CHECK(diff_run(a, b, sizeof(a), 0x2000, 4, 0, &st) == 1,
+              "gap=4 merges gaps of 3 bytes");
+        CHECK(g_recs[0].span == 5, "merged span covers from first to last diff");
+        CHECK(st.diff_bytes == 2,
+              "merged region still reports exact diff_bytes (2)");
+        /* gap 恰好等于间隔时合并，小于时分开（边界） */
+        CHECK(diff_run(a, b, sizeof(a), 0x2000, 3, 0, NULL) == 1,
+              "gap==3 merges exactly");
+        CHECK(diff_run(a, b, sizeof(a), 0x2000, 2, 0, NULL) == 2,
+              "gap==2 splits");
+
+        /* 跨块：32 字节连续差异分三次 feed，必须仍是 1 个区间 */
+        memset(b, 0x11, sizeof(b));
+        for (int i = 8; i < 40; i++) b[i] = (uint8_t)(0x50 + i);
+        gg_diff_begin(&st, 0x3000, 0, 0);
+        g_nrecs = 0;
+        gg_diff_feed(&st, a, b, 16, rec_cb, NULL);
+        gg_diff_feed(&st, a + 16, b + 16, 16, rec_cb, NULL);
+        gg_diff_feed(&st, a + 32, b + 32, 224, rec_cb, NULL);
+        gg_diff_finish(&st, rec_cb, NULL);
+        CHECK(g_nrecs == 1, "cross-chunk run stays a single region");
+        CHECK(g_recs[0].addr == 0x3000 + 8 && g_recs[0].span == 32,
+              "cross-chunk region addr/span correct");
+        CHECK(st.diff_bytes == 32, "cross-chunk diff_bytes 32");
+        /* 前缀只在段起点块内抓：起点在块 1 的 i=8，块内剩余 8 字节 */
+        CHECK(g_recs[0].pre == 8, "cross-chunk prefix limited to start chunk remainder");
+        CHECK(g_recs[0].a[0] == 0x11 && g_recs[0].b[0] == (uint8_t)(0x50 + 8),
+              "cross-chunk prefix starts at run start");
+
+        /* max_regions 截断 */
+        memset(b, 0x11, sizeof(b));
+        for (int i = 0; i < 100; i += 2) b[i] = 0x99;   /* 50 个单字节区间 */
+        CHECK(diff_run(a, b, sizeof(a), 0x4000, 0, 3, &st) == 3,
+              "max_regions stops at 3");
+        CHECK(st.truncated == 1, "max_regions sets truncated");
+        CHECK(g_nrecs == 3, "only 3 callbacks emitted");
+
+        /* 尾字节差异必须在 finish 时吐出（in_run 未关闭） */
+        memset(b, 0x11, sizeof(b));
+        b[255] = 0x77;
+        gg_diff_begin(&st, 0x6000, 0, 0);
+        g_nrecs = 0;
+        gg_diff_feed(&st, a, b, 256, rec_cb, NULL);
+        CHECK(g_nrecs == 0, "trailing diff not emitted before finish");
+        gg_diff_finish(&st, rec_cb, NULL);
+        CHECK(g_nrecs == 1 && g_recs[0].addr == 0x6000 + 255,
+              "finish flushes the trailing region");
+
+        /* 空块 feed 是 no-op（分块循环的边界，块大小正好整除时会出现） */
+        gg_diff_begin(&st, 0x5000, 0, 0);
+        g_nrecs = 0;
+        gg_diff_feed(&st, a, b, 0, rec_cb, NULL);
+        gg_diff_finish(&st, rec_cb, NULL);
+        CHECK(st.base == 0x5000 && st.regions == 0, "empty feed is a no-op");
+
+        /* 长区间前缀上限 16 */
+        memset(b, 0x11, sizeof(b));
+        memset(b + 32, 0x77, 64);   /* 64 字节连续差异 */
+        CHECK(diff_run(a, b, sizeof(a), 0x7000, 0, 0, &st) == 1, "long run -> 1 region");
+        CHECK(g_recs[0].span == 64, "long run span == 64");
+        CHECK(g_recs[0].pre == GG_DIFF_PREFIX, "long run prefix capped at 16");
     }
 
     if (fails) { printf("test_dump: %d failure(s)\n", fails); return 1; }

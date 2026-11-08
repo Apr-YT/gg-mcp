@@ -217,3 +217,227 @@ int gg_dump_list(const char *dir, gg_dump_entry_t *out, size_t cap) {
     closedir(dp);
     return (int)n;
 }
+
+/* ------------------------------------------------------------------ */
+/* 区域差异比较 */
+
+void gg_diff_begin(gg_diff_state_t *st, uint64_t base_addr, size_t gap_merge,
+                   size_t max_regions) {
+    memset(st, 0, sizeof(*st));
+    st->base = base_addr;
+    st->gap_merge = gap_merge;
+    st->max_regions = max_regions;
+}
+
+/* 关闭当前区间并回调。span = 最后一个差异字节 - 起点 + 1，
+ * 因此 span 里可能含 ≤ gap_merge 个未变字节（合并的代价，diff_bytes 才是
+ * 精确差异数）。 */
+static void emit_run(gg_diff_state_t *st, gg_diff_cb cb, void *ud) {
+    if (!st->in_run) return;
+    uint64_t span = st->run_last + 1 - st->run_start;
+    size_t pre = st->pre_len < span ? st->pre_len : (size_t)span;
+    if (cb) cb(ud, st->run_start, span, st->a_pre, st->b_pre, pre);
+    st->regions++;
+    st->in_run = 0;
+    st->gap_seen = 0;
+    if (st->max_regions && st->regions >= st->max_regions) st->truncated = 1;
+}
+
+size_t gg_diff_feed(gg_diff_state_t *st, const uint8_t *a, const uint8_t *b,
+                    size_t len, gg_diff_cb cb, void *ud) {
+    for (size_t i = 0; i < len; i++) {
+        if (a[i] == b[i]) {
+            if (!st->in_run) continue;
+            /* 连续相同字节超阈值才断段 —— 这就是 gap_merge 的全部语义 */
+            if (++st->gap_seen > st->gap_merge) emit_run(st, cb, ud);
+            if (st->truncated) break;
+            continue;
+        }
+        if (!st->in_run) {
+            st->in_run = 1;
+            st->run_start = st->base + i;
+            st->gap_seen = 0;
+            /* 前缀只在段起点抓一次。跨块的长段前缀就是起点块内剩余部分
+             * （见头文件说明）—— 段跨块后指针已失效，不能延后补。 */
+            size_t avail = len - i;
+            st->pre_len = avail < GG_DIFF_PREFIX ? avail : GG_DIFF_PREFIX;
+            memcpy(st->a_pre, a + i, st->pre_len);
+            memcpy(st->b_pre, b + i, st->pre_len);
+        }
+        st->run_last = st->base + i;
+        st->diff_bytes++;
+    }
+    st->base += len;
+    return st->regions;
+}
+
+size_t gg_diff_finish(gg_diff_state_t *st, gg_diff_cb cb, void *ud) {
+    emit_run(st, cb, ud);
+    return st->regions;
+}
+
+/* 读一个 dump 的头部并校验。成功 0。 */
+static int read_dump_header(FILE *f, const char *path, uint64_t *addr, uint64_t *len,
+                            uint32_t *sum, char *err, size_t errsz) {
+    uint8_t hdr[GG_DUMP_HEADER_LEN];
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
+        set_err(err, errsz, "%s: corrupt dump (short header)", path);
+        return -1;
+    }
+    if (gg_dump_header_unpack(hdr, sizeof(hdr), addr, len, sum) != 0) {
+        set_err(err, errsz, "%s: corrupt dump (bad header)", path);
+        return -1;
+    }
+    return 0;
+}
+
+/* 两个 dump 文件的共同收尾：校验 FNV + 关闭最后一段。
+ * 分开写是因为 files/live 两条路径的 FNV 来源不同（前者两文件，后者只有文件侧）。
+ * 返回 0 成功；FNV 不符返回 -1。truncated 时跳过校验（已提前结束扫描，
+ * 校验结果没有意义）。 */
+static int finish_checks(gg_diff_state_t *st, uint32_t sum_a, uint32_t want_a,
+                         uint32_t sum_b, uint32_t want_b, int two_files,
+                         gg_diff_cb cb, void *ud, char *err, size_t errsz) {
+    size_t regions = gg_diff_finish(st, cb, ud);
+    if (st->truncated) return 0;   /* 提前结束，FNV 未算完 */
+    if (sum_a != want_a) {
+        set_err(err, errsz, "dump A checksum mismatch: file corrupted");
+        return -1;
+    }
+    if (two_files && sum_b != want_b) {
+        set_err(err, errsz, "dump B checksum mismatch: file corrupted");
+        return -1;
+    }
+    (void)regions;
+    return 0;
+}
+
+int gg_region_diff_files(const char *path_a, const char *path_b,
+                         size_t gap_merge, size_t max_regions,
+                         gg_diff_cb cb, void *ud,
+                         uint64_t *out_regions, uint64_t *out_diff_bytes,
+                         int *out_truncated, char *err, size_t errsz) {
+    FILE *fa = fopen(path_a, "rb");
+    if (!fa) { set_err(err, errsz, "%s: cannot open", path_a); return -1; }
+    FILE *fb = fopen(path_b, "rb");
+    if (!fb) { fclose(fa); set_err(err, errsz, "%s: cannot open", path_b); return -1; }
+
+    uint64_t addr_a = 0, len_a = 0, addr_b = 0, len_b = 0;
+    uint32_t want_a = 0, want_b = 0;
+    if (read_dump_header(fa, path_a, &addr_a, &len_a, &want_a, err, errsz) != 0 ||
+        read_dump_header(fb, path_b, &addr_b, &len_b, &want_b, err, errsz) != 0) {
+        fclose(fa); fclose(fb);
+        return -1;
+    }
+    /* 原址与长度都必须一致：不同长度说明两次快照覆盖的范围都变了，
+     * 逐字节对齐比较会得出"整段都变了"的假结论。 */
+    if (addr_a != addr_b || len_a != len_b) {
+        set_err(err, errsz,
+                "not the same region: A=0x%llx+%llu B=0x%llx+%llu "
+                "(compare two dumps of the same address range)",
+                (unsigned long long)addr_a, (unsigned long long)len_a,
+                (unsigned long long)addr_b, (unsigned long long)len_b);
+        fclose(fa); fclose(fb);
+        return -1;
+    }
+
+    uint8_t *ba = malloc(GG_DUMP_CHUNK);
+    uint8_t *bb = malloc(GG_DUMP_CHUNK);
+    if (!ba || !bb) {
+        free(ba); free(bb); fclose(fa); fclose(fb);
+        set_err(err, errsz, "out of memory");
+        return -1;
+    }
+
+    gg_diff_state_t st;
+    gg_diff_begin(&st, addr_a, gap_merge, max_regions);
+    uint32_t sum_a = GG_FNV_OFFSET_BASIS, sum_b = GG_FNV_OFFSET_BASIS;
+    uint64_t done = 0;
+    int rc = 0;
+    while (done < len_a) {
+        size_t want = (len_a - done) > GG_DUMP_CHUNK ? GG_DUMP_CHUNK
+                                                     : (size_t)(len_a - done);
+        if (fread(ba, 1, want, fa) != want || fread(bb, 1, want, fb) != want) {
+            set_err(err, errsz, "truncated dump data at 0x%llx",
+                    (unsigned long long)(addr_a + done));
+            rc = -1;
+            break;
+        }
+        sum_a = gg_fnv1a32(ba, want, sum_a);
+        sum_b = gg_fnv1a32(bb, want, sum_b);
+        gg_diff_feed(&st, ba, bb, want, cb, ud);
+        if (st.truncated) break;
+        done += want;
+    }
+    if (rc == 0)
+        rc = finish_checks(&st, sum_a, want_a, sum_b, want_b, 1, cb, ud, err, errsz);
+
+    free(ba); free(bb); fclose(fa); fclose(fb);
+    if (rc != 0) return rc;
+    if (out_regions)    *out_regions = st.regions;
+    if (out_diff_bytes) *out_diff_bytes = st.diff_bytes;
+    if (out_truncated)  *out_truncated = st.truncated;
+    return 0;
+}
+
+int gg_region_diff_live(gg_driver_t *d, pid_t pid, const char *path_a,
+                        size_t gap_merge, size_t max_regions,
+                        gg_diff_cb cb, void *ud,
+                        uint64_t *out_regions, uint64_t *out_diff_bytes,
+                        int *out_truncated, char *err, size_t errsz) {
+    FILE *fa = fopen(path_a, "rb");
+    if (!fa) { set_err(err, errsz, "%s: cannot open", path_a); return -1; }
+    uint64_t addr = 0, len = 0;
+    uint32_t want_sum = 0;
+    if (read_dump_header(fa, path_a, &addr, &len, &want_sum, err, errsz) != 0) {
+        fclose(fa);
+        return -1;
+    }
+
+    uint8_t *ba = malloc(GG_DUMP_CHUNK);
+    uint8_t *bb = malloc(GG_DUMP_CHUNK);
+    if (!ba || !bb) {
+        free(ba); free(bb); fclose(fa);
+        set_err(err, errsz, "out of memory");
+        return -1;
+    }
+
+    gg_diff_state_t st;
+    gg_diff_begin(&st, addr, gap_merge, max_regions);
+    uint32_t sum_a = GG_FNV_OFFSET_BASIS;
+    uint64_t done = 0;
+    int rc = 0;
+    while (done < len) {
+        size_t want = (len - done) > GG_DUMP_CHUNK ? GG_DUMP_CHUNK
+                                                   : (size_t)(len - done);
+        if (fread(ba, 1, want, fa) != want) {
+            set_err(err, errsz, "truncated dump data at 0x%llx",
+                    (unsigned long long)(addr + done));
+            rc = -1;
+            break;
+        }
+        ssize_t got = driver_read_ex(d, pid, addr + done, bb, want, 0);
+        if (got != (ssize_t)want) {
+            /* 读不到不能当作"相同"：那会把真实的差异报成"没变" */
+            set_err(err, errsz,
+                    "short read at 0x%llx (%lld of %zu bytes): page not resident? "
+                    "diff aborted",
+                    (unsigned long long)(addr + done), (long long)got, want);
+            rc = -1;
+            break;
+        }
+        sum_a = gg_fnv1a32(ba, want, sum_a);
+        gg_diff_feed(&st, ba, bb, want, cb, ud);
+        if (st.truncated) break;
+        done += want;
+    }
+    if (rc == 0)
+        rc = finish_checks(&st, sum_a, want_sum, 0, 0, 0, cb, ud, err, errsz);
+
+    free(ba); free(bb); fclose(fa);
+    if (rc != 0) return rc;
+    if (out_regions)    *out_regions = st.regions;
+    if (out_diff_bytes) *out_diff_bytes = st.diff_bytes;
+    if (out_truncated)  *out_truncated = st.truncated;
+    return 0;
+}

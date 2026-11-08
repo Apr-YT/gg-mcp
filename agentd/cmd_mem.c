@@ -443,3 +443,106 @@ void h_dump_list(int fd, uint32_t seq, cJSON *p) {
     send_ok(fd, cmd, seq, r);
     cJSON_Delete(r);
 }
+
+/* ---------- 区域差异比较 ---------- */
+
+typedef struct diff_out {
+    cJSON *arr;
+    size_t count;
+    size_t cap;
+} diff_out_t;
+
+/* 在扫描热循环里被调用：只做 JSON 组装，不读内存、不写文件。 */
+static void diff_emit_json(void *ud, uint64_t addr, uint64_t span,
+                           const uint8_t *a_pre, const uint8_t *b_pre, size_t pre_len) {
+    diff_out_t *o = (diff_out_t *)ud;
+    if (o->count >= o->cap) return;
+    char abuf[32], hexa[GG_DIFF_PREFIX * 2 + 1], hexb[GG_DIFF_PREFIX * 2 + 1];
+    snprintf(abuf, sizeof(abuf), "0x%llx", (unsigned long long)addr);
+    for (size_t i = 0; i < pre_len; i++) {
+        snprintf(hexa + i * 2, 3, "%02x", a_pre[i]);
+        snprintf(hexb + i * 2, 3, "%02x", b_pre[i]);
+    }
+    hexa[pre_len * 2] = '\0';
+    hexb[pre_len * 2] = '\0';
+    cJSON *e = cJSON_CreateObject();
+    cJSON_AddStringToObject(e, "addr", abuf);
+    cJSON_AddNumberToObject(e, "span", (double)span);
+    cJSON_AddStringToObject(e, "a", hexa);
+    cJSON_AddStringToObject(e, "b", hexb);
+    cJSON_AddItemToArray(o->arr, e);
+    o->count++;
+}
+
+/* 取非负整数参数（缺省 def，上限 max）。返回 -1 表示参数非法。 */
+static int parse_uint_opt(cJSON *p, const char *key, size_t def, size_t max, size_t *out) {
+    *out = def;
+    const cJSON *j = cJSON_GetObjectItem(p, key);
+    if (!j) return 0;
+    if (!cJSON_IsNumber(j) || j->valuedouble < 0 || j->valuedouble > (double)max) return -1;
+    *out = (size_t)j->valuedouble;
+    return 0;
+}
+
+void h_region_diff(int fd, uint32_t seq, cJSON *p) {
+    uint16_t cmd = GGCMD_REGION_DIFF;
+    cJSON *jn = cJSON_GetObjectItem(p, "name");
+    if (!cJSON_IsString(jn) || !gg_safe_result_name(jn->valuestring)) {
+        send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "name required: [A-Za-z0-9._-]{1,64}");
+        return;
+    }
+    cJSON *jo = cJSON_GetObjectItem(p, "other");
+    int two_files = cJSON_IsString(jo) && jo->valuestring[0] != '\0';
+    if (cJSON_IsString(jo) && jo->valuestring[0] && !gg_safe_result_name(jo->valuestring)) {
+        send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "other: [A-Za-z0-9._-]{1,64}");
+        return;
+    }
+    /* 对比当前内存需要 attach；两个文件互比与进程无关（离线分析） */
+    if (!two_files && g_eng.session_pid <= 0) {
+        send_err(fd, cmd, seq, GGERR_NO_SESSION, "no session (needed to compare against live memory)");
+        return;
+    }
+    size_t gap = 0, limit = 0;
+    if (parse_uint_opt(p, "gap", 4, 64, &gap) != 0) {
+        send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "gap must be 0..64");
+        return;
+    }
+    if (parse_uint_opt(p, "limit", 500, 5000, &limit) != 0 || limit < 1) {
+        send_err(fd, cmd, seq, GGERR_BAD_REQUEST, "limit must be 1..5000");
+        return;
+    }
+
+    char pa[128], pb[128];
+    region_dump_path(pa, sizeof(pa), jn->valuestring);
+    if (two_files) region_dump_path(pb, sizeof(pb), jo->valuestring);
+
+    diff_out_t out;
+    out.arr = cJSON_CreateArray();
+    out.count = 0;
+    out.cap = limit;
+    char err[224];
+    uint64_t regions = 0, dbytes = 0;
+    int trunc = 0;
+    int rc = two_files
+        ? gg_region_diff_files(pa, pb, gap, limit, diff_emit_json, &out,
+                              &regions, &dbytes, &trunc, err, sizeof(err))
+        : gg_region_diff_live(&g_eng.drv, g_eng.session_pid, pa, gap, limit,
+                              diff_emit_json, &out, &regions, &dbytes, &trunc,
+                              err, sizeof(err));
+    if (rc != 0) {
+        cJSON_Delete(out.arr);
+        send_err(fd, cmd, seq, GGERR_BAD_REQUEST, err);
+        return;
+    }
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "name", jn->valuestring);
+    cJSON_AddStringToObject(r, "against", two_files ? jo->valuestring : "live");
+    cJSON_AddNumberToObject(r, "regions", (double)regions);
+    cJSON_AddNumberToObject(r, "diff_bytes", (double)dbytes);
+    cJSON_AddNumberToObject(r, "gap", (double)gap);
+    if (trunc) cJSON_AddBoolToObject(r, "truncated", 1);
+    cJSON_AddItemToObject(r, "diffs", out.arr);
+    send_ok(fd, cmd, seq, r);
+    cJSON_Delete(r);
+}

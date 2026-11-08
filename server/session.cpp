@@ -710,6 +710,31 @@ json tool_region_restore(Session::CallCtx& c, const json& a) {
 }
 json tool_dump_list(Session::CallCtx& c, const json&) { return c.send(GGCMD_DUMP_LIST); }
 
+// 区域差异比较：只读。不给 other 时对比 dump 与目标进程当前内存
+// （离线分析两个备份则不需要 attach —— agentd 侧按 other 是否存在分流）。
+json tool_region_diff(Session::CallCtx& c, const json& a) {
+    if (!a.contains("name") || !a["name"].is_string() || a["name"].get<std::string>().empty())
+        return c.fail(GGERR_BAD_REQUEST, "name required");
+    c.params["name"] = a["name"];
+    if (a.contains("other")) {
+        if (!a["other"].is_string() || a["other"].get<std::string>().empty())
+            return c.fail(GGERR_BAD_REQUEST, "other must be a non-empty string");
+        c.params["other"] = a["other"];
+    }
+    if (a.contains("gap")) {
+        if (!a["gap"].is_number() || a["gap"].get<double>() < 0 || a["gap"].get<double>() > 64)
+            return c.fail(GGERR_BAD_REQUEST, "gap must be 0..64");
+        c.params["gap"] = a["gap"];
+    }
+    if (a.contains("limit")) {
+        if (!a["limit"].is_number() || a["limit"].get<double>() < 1 ||
+            a["limit"].get<double>() > 5000)
+            return c.fail(GGERR_BAD_REQUEST, "limit must be 1..5000");
+        c.params["limit"] = a["limit"];
+    }
+    return c.send(GGCMD_REGION_DIFF);
+}
+
 // ---- 内存读/写 ----
 json tool_read(Session::CallCtx& c, const json& a) {
     if (!a.contains("addr")) return c.fail(GGERR_BAD_REQUEST, "addr required");
@@ -1308,6 +1333,7 @@ const ToolEntry kTools[] = {
     {"gg_region_dump",      tool_region_dump,      false},
     {"gg_region_restore",   tool_region_restore,   true},
     {"gg_dump_list",        tool_dump_list,        false},
+    {"gg_region_diff",      tool_region_diff,      false},
 
     {"gg_read",             tool_read,             false},
     {"gg_read_bytes",       tool_read_bytes,       false},

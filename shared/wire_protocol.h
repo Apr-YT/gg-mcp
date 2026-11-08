@@ -190,6 +190,12 @@ enum gg_cmd {
      * load 填充后循环线程立即开始写内存：safe_mode 拒绝（同 FREEZE）。 */
     GGCMD_FREEZE_SAVE,
     GGCMD_FREEZE_LOAD,
+    /* 区域差异比较（CE compare memory）：{"name","other"?,"gap"?,"limit"?}
+     * → {"r":{"name","against","regions","diff_bytes","truncated","diffs":[...]}}。
+     * 不给 other 时对比 dump 与目标进程**当前内存**；给 other 则对比两个
+     * dump（要求原址与长度一致）。按区间报告，相邻差异间隔 ≤ gap 字节合并。
+     * 只读操作。 */
+    GGCMD_REGION_DIFF,
     GGCMD_MAX
 };
 

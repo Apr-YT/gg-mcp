@@ -83,4 +83,75 @@ typedef struct gg_dump_entry {
  * FNV 挡住）。 */
 int gg_dump_list(const char *dir, gg_dump_entry_t *out, size_t cap);
 
+/* ---------------- 区域差异比较（gg_region_diff） ----------------
+ *
+ * CE "compare memory" 对应物。三个典型用途：
+ *   1. dump vs 当前内存 —— 备份到现在这块区域被改成什么样了（restore 前
+ *      看清改动范围，restore 后确认真的写回去了）
+ *   2. 两个 dump 对比 —— 同区域两次快照间哪些字节变了
+ *   3. 结构体变化定位 —— 只改一个字段，看差异区间落在哪个偏移
+ *
+ * 按"区间"报告而非逐字节：相邻差异间隔 ≤ gap_merge 个相同字节时合并成
+ * 一个区间（多字节数值一次写 4/8 字节，逐字节报告会把信息淹掉）。
+ * 区间 span 含中间被合并进来的未变字节，diff_bytes 才是精确差异计数。
+ */
+
+#define GG_DIFF_PREFIX 16
+
+typedef struct gg_diff_state {
+    uint64_t base;        /* 下一块首字节的绝对地址 */
+    uint64_t run_start;   /* 当前区间起点（绝对地址） */
+    uint64_t run_last;    /* 当前区间内最后一个差异字节（绝对地址） */
+    uint64_t diff_bytes;  /* 精确差异字节数（不含 gap 内未变字节） */
+    size_t   gap_merge;   /* 合并阈值：间隔 ≤ 此值的两段差异算一段 */
+    size_t   gap_seen;    /* 当前连续相同字节计数 */
+    size_t   regions;     /* 已产出区间数 */
+    size_t   max_regions; /* 0 = 不限；达到后停止扫描并置 truncated */
+    size_t   pre_len;     /* 区间前缀有效字节数 0..GG_DIFF_PREFIX */
+    int      in_run;
+    int      truncated;
+    uint8_t  a_pre[GG_DIFF_PREFIX];
+    uint8_t  b_pre[GG_DIFF_PREFIX];
+} gg_diff_state_t;
+
+/* 区间回调。addr/span 是该区间的绝对范围；a_pre/b_pre 为区间起点起
+ * 连续 pre_len 字节的内容副本（跨块的长区间前缀只覆盖起始块内剩余部分，
+ * 可能短于 GG_DIFF_PREFIX —— 前缀是为了"一眼看出改了什么"，
+ * 要完整内容用 gg_hex_dump）。
+ * 回调内不要调用 driver 或做重活：它在扫描热循环里被调用。 */
+typedef void (*gg_diff_cb)(void *ud, uint64_t addr, uint64_t span,
+                           const uint8_t *a_pre, const uint8_t *b_pre, size_t pre_len);
+
+/* 初始化。base_addr = 第一块数据对应的绝对地址（两块内存区域绝对地址不同时
+ * 传 0 即可，报告里就是偏移而非地址）。 */
+void gg_diff_begin(gg_diff_state_t *st, uint64_t base_addr, size_t gap_merge,
+                   size_t max_regions);
+
+/* 喂一块数据（a/b 长度均为 len，内容为该块两边的字节）。可多次调用，
+ * 状态跨块保持（差异段跨块不会断成两段）。返回当前区间数。 */
+size_t gg_diff_feed(gg_diff_state_t *st, const uint8_t *a, const uint8_t *b,
+                    size_t len, gg_diff_cb cb, void *ud);
+
+/* 收尾：把最后一个未关闭的区间吐出来。返回区间总数。 */
+size_t gg_diff_finish(gg_diff_state_t *st, gg_diff_cb cb, void *ud);
+
+/* 两个 dump 文件对比。要求原址与长度一致 —— 不同区域/不同长度的逐字节
+ * 比较没有意义，直接在头部阶段拒绝。两文件的 FNV 在扫描过程中顺便验证
+ * （坏文件拒绝对比，而不是吐满屏假差异）。
+ * max_regions 达到后停止扫描，*out_truncated=1。
+ * err 可传 NULL；out_* 均可传 NULL。成功 0，失败 -1。 */
+int gg_region_diff_files(const char *path_a, const char *path_b,
+                         size_t gap_merge, size_t max_regions,
+                         gg_diff_cb cb, void *ud,
+                         uint64_t *out_regions, uint64_t *out_diff_bytes,
+                         int *out_truncated, char *err, size_t errsz);
+
+/* dump 与目标进程当前内存对比（范围取自 dump 头部）。
+ * 遇短读即失败：读不到的部分不能当作"相同"，那会误导成"没变"。 */
+int gg_region_diff_live(gg_driver_t *d, pid_t pid, const char *path_a,
+                        size_t gap_merge, size_t max_regions,
+                        gg_diff_cb cb, void *ud,
+                        uint64_t *out_regions, uint64_t *out_diff_bytes,
+                        int *out_truncated, char *err, size_t errsz);
+
 #endif /* GG_DUMP_H */

@@ -363,3 +363,26 @@
    - load 后循环线程（attach 时已启动）下一轮就写目标内存：
      safe_mode 拒绝 + server `write_op=true` 双保险。
 
+52. **`gg_region_diff`：内存区域差异比较（2026-11-08，真机未验）**
+
+   CE "compare memory" 对应物，dump/restore 的配套件。纯状态机在
+   `agentd/dump.c`（`gg_diff_begin/feed/finish`），文件级驱动
+   （`gg_region_diff_files` / `gg_region_diff_live`）也在 dump.c，
+   handler 只做参数解析与 JSON 组装。
+
+   - **按区间报告，不是逐字节**：相邻差异间隔 ≤ `gap`（默认 4）合并。
+     `span` 是区间跨度、可能含中间未变字节；`diff_bytes` 才是精确差异
+     字节数。只报一个数会让"4 字节全变了"和"跨了 1KB 只改了两处"
+     看起来一样 —— 别只留 span 或只留 diff_bytes。
+   - **两 dump 互比要求原址与长度一致**：不同范围的逐字节比较会得出
+     "整段都变了"的假结论，在头部阶段就拒掉。FNV 在扫描循环里顺便
+     校验（不额外多读一遍），坏文件拒绝而不是吐满屏假差异。
+   - **dump vs live 短读即失败**：读不到的部分不能当作"相同"，那会把
+     真实差异报成"没变"。
+   - 前缀（`a`/`b`，起点最多 16 字节）**在段起点块内抓一次**：跨块的长段
+     前缀就是起点块剩余部分，可能短于 16 —— 段跨块后原指针已失效，
+     不能延后补。要完整内容用 gg_hex_dump。
+   - `max_regions` 达到后停止扫描并置 `truncated`（此时跳过 FNV 校验，
+     已提前结束）。
+   - itest 用例 15 覆盖 dump→改→diff→互比→改回归零全链路；
+     test_dump.c 覆盖状态机（区间划分/gap 边界/跨块不断段/截断/尾段 flush）。

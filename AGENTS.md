@@ -41,7 +41,7 @@ scripts\test_all.bat              # 单元 + 集成 + 基准（缺前置会明�
 scripts\benchmark.bat             # ⚠️ 仓内无基准源码，会直接报错退出
 
 # 结构守护（拆分/改分发/改驱动对接后必跑；run_tests.bat 已自动执行）
-python tests\unit\check_dispatch_consistency.py      # schema(52) ↔ session(52)
+python tests\unit\check_dispatch_consistency.py      # schema 与 session 工具表必须一一对应（脚本打印实际数量）
 python tests\unit\check_kernel_only.py               # driver.c 不得回落用户态通道
 python tests\unit\check_rwproc_locking.py            # rwproc_buf 拷贝必须在锁内
 python tests\unit\check_hwbp_detail.py               # HIT_DETAIL 的 buf_size 非 0
@@ -79,7 +79,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 | 分册 | 主题 | 条目 |
 |---|---|---|
 | `AGENTS.driver.md` | 驱动 / 内核模块 / hwbp / 隐蔽性 | 4, 20, 21, 22, 23, 24, 27, 28, 29, 31, 32, 33, 34, 43 |
-| `AGENTS.agentd.md` | 设备端 agentd / 搜索引擎 / 会话 | 1, 5, 6, 7, 8, 9, 12, 13, 14, 16, 17, 19, 26, 30, 37, 38, 40, 41, 42, 44, 45, 46, 47, 49, 50 |
+| `AGENTS.agentd.md` | 设备端 agentd / 搜索引擎 / 会话 | 1, 5, 6, 7, 8, 9, 12, 13, 14, 16, 17, 19, 26, 30, 37, 38, 40, 41, 42, 44, 45, 46, 47, 49, 50, 52 |
 | `AGENTS.server.md` | PC server / wire 协议 / UI | 2, 10, 11, 15, 18, 25, 35, 36, 39, 48, 51 |
 
 **按任务选分册（动代码前先读对应分册）**：
@@ -115,7 +115,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-11-08（server 册新增第 51 条 gg-ui 异步队列）。
+本文件最后校准：2026-11-08（agentd 册新增第 52 条 gg_region_diff 差异比较；同日：server 册第 51 条 gg-ui 异步队列）。
 上一条校准：2026-11-04（P1-15 拆分：50 条按主题入三个分册，主文件留索引+硬约束；分册内编号与原文不变）。
 上一条校准：2026-11-04（第 50 条 freeze save/load + 第 49 条 gg_results_refresh；同日：第 47 条 region dump/restore + 第 48 条 wire AUTH 断连语义修复；更早：第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。
 上一条校准：2026-11-03（第 43 条 anon_ring 审查 + 第 44 条 BACKLOG 5/6/12 收口）。
