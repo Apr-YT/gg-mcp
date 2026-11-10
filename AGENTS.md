@@ -36,7 +36,7 @@ scripts\build_ndk.bat
 build\pc\gg-ghost-mcp.exe --config configs\gg-ghost.json
 
 # 测试
-tests\unit\run_tests.bat          # 单元 + 6 道结构护栏（先跑这个）
+tests\unit\run_tests.bat          # 单元 + 7 道结构护栏（先跑这个）
 scripts\test_all.bat              # 单元 + 集成 + 基准（缺前置会明确 SKIP）
 scripts\benchmark.bat             # ⚠️ 仓内无基准源码，会直接报错退出
 
@@ -46,11 +46,12 @@ python tests\unit\check_kernel_only.py               # driver.c 不得回落用�
 python tests\unit\check_rwproc_locking.py            # rwproc_buf 拷贝必须在锁内
 python tests\unit\check_hwbp_detail.py               # HIT_DETAIL 的 buf_size 非 0
 python tests\unit\check_scalar_cmd.py                # 标量返回命令不许走 call_ex
+python tests\unit\check_tool_params.py               # 工具参数：schema 声明的键与 handler 实读的键必须互相覆盖
 python scripts\check_ko_src_sync.py                  # ko/ 快照 vs build/ 工作副本
 ```
 
 > **本机工具链现状（2026-10-21 复测）**
-> - MinGW g++ **16.2.0**（`D:\Kiln\mingw64`，已入 PATH）；Python 3.13 可用于两道结构护栏。
+> - MinGW g++ **16.2.0**（`D:\Kiln\mingw64`，已入 PATH）；Python 3.13 可跑全部 6 道 python 护栏。
 > - NDK 为 **r30**（`D:\Kiln\android-ndk-r30`，`Pkg.Revision = 30.0.16248370`）；
 >   `toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android28-clang.cmd` 存在。
 > - **capstone 5.0.1 已就位**：`D:\Kiln\capstone\capstone-5.0.1\libcapstone.a`（17:44 装入）。
@@ -80,7 +81,7 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 |---|---|---|
 | `AGENTS.driver.md` | 驱动 / 内核模块 / hwbp / 隐蔽性 | 4, 20, 21, 22, 23, 24, 27, 28, 29, 31, 32, 33, 34, 43 |
 | `AGENTS.agentd.md` | 设备端 agentd / 搜索引擎 / 会话 | 1, 5, 6, 7, 8, 9, 12, 13, 14, 16, 17, 19, 26, 30, 37, 38, 40, 41, 42, 44, 45, 46, 47, 49, 50, 52 |
-| `AGENTS.server.md` | PC server / wire 协议 / UI | 2, 10, 11, 15, 18, 25, 35, 36, 39, 48, 51 |
+| `AGENTS.server.md` | PC server / wire 协议 / UI | 2, 10, 11, 15, 18, 25, 35, 36, 39, 48, 51, 53 |
 
 **按任务选分册（动代码前先读对应分册）**：
 - 动 ko / 驱动读路径 / hwbp / 隐蔽性 → AGENTS.driver.md
@@ -115,7 +116,8 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-11-08（agentd 册新增第 52 条 gg_region_diff 差异比较；同日：server 册第 51 条 gg-ui 异步队列）。
+本文件最后校准：2026-11-10（server 册新增第 53 条：工具参数静态护栏 + 假 agentd payload 端到端用例，结构护栏 6→7 道）。
+上一条校准：2026-11-08（agentd 册新增第 52 条 gg_region_diff 差异比较；同日：server 册第 51 条 gg-ui 异步队列）。
 上一条校准：2026-11-04（P1-15 拆分：50 条按主题入三个分册，主文件留索引+硬约束；分册内编号与原文不变）。
 上一条校准：2026-11-04（第 50 条 freeze save/load + 第 49 条 gg_results_refresh；同日：第 47 条 region dump/restore + 第 48 条 wire AUTH 断连语义修复；更早：第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。
 上一条校准：2026-11-03（第 43 条 anon_ring 审查 + 第 44 条 BACKLOG 5/6/12 收口）。

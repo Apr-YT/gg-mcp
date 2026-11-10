@@ -29,6 +29,20 @@ g++ -std=c++17 -O2 -Wall -I"%ROOT%" -I"%ROOT%\third_party" -I"%ROOT%\shared" ^
   "%ROOT%\server\device\wire.cpp" -lws2_32
 if errorlevel 1 ( echo [FAIL] test_session build & exit /b 1 )
 
+rem PC-side tool parameter mapping, end to end: local fake agentd on 127.0.0.1,
+rem real Session::call_tool -> real AgentClient -> fake peer; asserts the params
+rem that actually go on the wire (addr normalization, enum ints, aligned 0/1,
+rem absent-option must not be sent). This is the only layer that would catch
+rem "schema declares it, agentd implements it, session.cpp never forwards it".
+g++ -std=c++17 -O2 -Wall -I"%ROOT%" -I"%ROOT%\third_party" -I"%ROOT%\shared" ^
+  -o "%ROOT%\build\pc\test_tool_payloads.exe" "%ROOT%\tests\unit\test_tool_payloads.cpp" ^
+  "%ROOT%\server\session.cpp" "%ROOT%\server\annotations.cpp" ^
+  "%ROOT%\server\device\wire.cpp" -lws2_32
+if errorlevel 1 ( echo [FAIL] test_tool_payloads build & exit /b 1 )
+echo === test_tool_payloads ===
+"%ROOT%\build\pc\test_tool_payloads.exe"
+if errorlevel 1 ( echo [FAIL] test_tool_payloads & exit /b 1 )
+
 rem HTTP exposure surface: host_is_loopback / origin_allowed. A string compare against
 rem "0.0.0.0" missed :: / [::] / LAN addresses (silent unauthenticated exposure), and a
 rem bare prefix check let http://127.0.0.1.evil.com through.
@@ -236,6 +250,14 @@ rem Those commands must use rwproc_call(out=NULL).
 echo === scalar-return guardrail: scalar commands must not use rwproc_call_ex ===
 "%PYEXE%" "%ROOT%\tests\unit\check_scalar_cmd.py" "%ROOT%"
 if errorlevel 1 ( echo [FAIL] scalar-return guardrail & exit /b 1 )
+rem Tool parameter drift guard: for every tool, the keys the handler reads out of
+rem args must be declared in schema.cpp (otherwise the AI can never pass them --
+rem silent feature loss), and every declared key should actually be read.
+rem Caught gg_search_range.aligned (schema + agentd had it, PC layer never
+rem forwarded it) and gg_hex_dump.save_to (handler supported it, schema did not).
+echo === tool parameter guardrail: schema keys vs handler keys ===
+"%PYEXE%" "%ROOT%\tests\unit\check_tool_params.py" "%ROOT%"
+if errorlevel 1 ( echo [FAIL] tool parameter guardrail & exit /b 1 )
 rem KO source snapshot guard: ko/rwProcMem33 must stay identical to the sources in
 rem build/rwProcMem33 (the upstream clone). The module source is the foundation of the
 rem whole kernel channel and used to exist ONLY inside an ignored directory - one lost

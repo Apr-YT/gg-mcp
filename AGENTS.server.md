@@ -192,3 +192,55 @@
    - busy 时搜索家族按钮禁用 + 顶栏旋转字符；attach 允许排队。
    - 本机只验证了编译（-Wall 零警告）与队列单测；**GUI 实际交互
      （转圈/禁用/结果回填）未人工点验**，下次开 gg-ui 时顺带确认。
+
+53. **工具参数映射的两道防线：静态护栏 + 假 agentd 端到端用例（2026-11-10）**
+
+   PC 侧 62 个工具的参数映射此前没有任何测试：itest 直连 agentd 引擎，走不到
+   session.cpp；test_session 只验证「非法枚举必须在 device_call 之前被拒」。
+   于是「schema 声明了、agentd 也实现了、session.cpp 忘了塞进 params」这类
+   缺陷完全静默 —— AI 传了没反应，还以为自己改到了行为。
+
+   新增两层（都挂在 run_tests.bat，无设备也能跑）：
+
+   - **check_tool_params.py（第 7 道结构护栏）**：静态解析 schema.cpp 的
+     properties 顶层键，与 session.cpp 各 handler 在 args 上读的键
+     （`a["k"]` / `.contains` / `.value` / `.at`，以及
+     `for (const char* k : {"pc","fp",...})` 这种动态键循环）做双向差集：
+     handler 读但 schema 没声明 = **ERR**（AI 永远传不出该参数）；
+     schema 声明但 handler 不读 = **WARN**（传了无效）。白名单必须写理由
+     （force 是故意拒绝守卫；gg_annotate_add 整包委派给 AnnotationStore::add）。
+   - **test_tool_payloads.cpp**：本机 127.0.0.1 起假 agentd（端口 bind 0 自动选，
+     避开真实 adb forward），走真 Session::call_tool → 真 AgentClient → 假对端，
+     截下真正发出去的帧，断言键名与**规范化后的值**（addr 数字→"0x..."、
+     枚举字符串→整数、aligned→0/1、缺省/可选参数不许凭空出现）。
+
+   **抓到的三个真问题**（都已修）：
+   1. `gg_search_range.aligned` 从未转发（schema 有、cmd_search.c 实现了、
+      session.cpp 漏了一行）→ aligned=false 静默失效，查 packed 结构时得到
+      一堆像模像样的非对齐巧合命中却看不出原因。
+   2. `gg_hex_dump.save_to` 未声明：handler 与 gg_read_bytes 共用，落盘模式
+      一直可用但 AI 不知道有这条路（大段 dump 只能撞 65536 的 hex 上限）。
+   3. `gg_get_results.type` 早已废弃（agentd 按结果集自身类型读值），schema
+      还挂着「已废弃/忽略」的声明，白占 AI 的注意力。
+
+   **aligned 的 null 语义**：`parse_flag01` 把 null 当 0，若照搬就会发现
+   "不传 = 1，传 null = 0" —— 默认值被悄悄翻成逐字节。所以判据是
+   `contains("aligned") && !is_null()`，null 与缺省等价。
+
+   **假对端框架坑（Windows）**：closesocket(listen) 不会打断阻塞中的 accept，
+   closesocket(连接) 也不会让阻塞的 recv 自己醒 —— 两处都得主动掐，否则
+   join() 永久挂住（现象是"断言全过但进程不退出"，很容易被误当成死循环）。
+   accept 侧改用 50ms select 轮询 stop_ 标志。另：stdout 重定向时默认全缓冲，
+   用例一旦挂住，已打印的 ok 行会整体丢失，看起来像"什么都没跑"，必须
+   `setvbuf(stdout, nullptr, _IOLBF, 0)`。
+
+   **非恒真验证**：把 `c.params["aligned"] = al;` 临时改成 `(void)al;`，
+   用例立刻红（"FAIL: sr) aligned=false -> 0"）且退出码 1；恢复后全绿。
+
+   **顺带干掉 test_session 的隐性网络等待**：f2 的 force=0 用例本来会去连本机
+   34127（无设备时先跑 adb forward，再走 20s 指数退避），整轮单测凭空慢二十秒，
+   而且结论取决于本机是否恰好跑着真 agentd —— 这不是"慢"，是**测试结果随环境
+   漂移**。假对端抽成 `tests/unit/fake_agentd.h` 后两处共用：test_session 的
+   该用例 20s → 42ms，并额外断言"请求真的发出去了 / addr 规范化了 / force 不在
+   payload 里"（原断言只有"不是 BAD_REQUEST"，判别力太弱）。
+   现在 `run_tests.bat` 全程不再有任何 adb / 真端口的痕迹。

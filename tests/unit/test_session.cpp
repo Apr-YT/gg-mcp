@@ -11,6 +11,7 @@
 // 用例全部走真实实现，不做 mock：默认值路径直接调 CallCtx（不触发网络），
 // 端到端路径调 Session::call_tool，非法枚举在 device_call 之前就该被拒。
 #include "../../server/session.h"
+#include "fake_agentd.h"
 
 #include <cstdio>
 #include <string>
@@ -47,6 +48,16 @@ int main() {
     cfg.annotations_file = "build/pc/_test_session_annotations.json";   // 不碰真实标注库
     check(cfg.export_dir == "exports", "config: export_dir defaults to exports");
     check(cfg.max_save_bytes == 256u * 1024u * 1024u, "config: max_save_bytes defaults to 256MiB");
+
+    /* 假 agentd：f2 的 force=0 用例会真的走 device_call（它要证明"视同未传"）。
+     * 没有假端就会去连本机 34127，连不上再走 20s 的指数退避 —— 单测凭空慢
+     * 二十秒，而且结论取决于本机是否恰好跑着真 agentd + adb forward。 */
+    fake::FakeAgentd fake;
+    if (!fake.start()) {
+        std::printf("FAIL: fake agentd cannot listen on 127.0.0.1\n");
+        return 1;
+    }
+    cfg.agent_port = fake.port();
 
     gg::Session s(cfg);
 
@@ -137,10 +148,20 @@ int main() {
         r = s.call_tool("gg_read", json{{"addr", "0x1000"}, {"force", 1}});
         check(error_code_of(r) == GGERR_BAD_REQUEST, "f2) force=1 -> GGERR_BAD_REQUEST (disabled)");
 
-        // force=0 视同未传：必须继续走 device_call（无设备 → NO_DEVICE，不是 BAD_REQUEST）
+        // force=0 视同未传：必须继续走 device_call，且请求内容不受影响。
+        // 假 agentd 让这条断言有判别力 —— 不只是"不是 BAD_REQUEST"，而是
+        // 真的发出了一条 GGCMD_READ、addr 规范化成 "0x1000"、且 payload 里
+        // 没有 force 键（force 不是设备端参数）。
+        fake.clear();
         r = s.call_tool("gg_read", json{{"addr", "0x1000"}, {"force", 0}});
         check(error_code_of(r) != GGERR_BAD_REQUEST, "f2) force=0 still accepted");
+        auto q = fake.last();
+        check(q.cmd == GGCMD_READ, "f2) force=0 -> request actually sent (GGCMD_READ)");
+        check(q.params.value("addr", std::string()) == "0x1000", "f2) force=0 -> addr forwarded");
+        check(!q.params.contains("force"), "f2) force never reaches the device payload");
     }
+
+    fake.stop();
 
     std::printf(fails ? "\n== FAILED: %d ==\n" : "\n== ALL PASS ==\n", fails);
     return fails ? 1 : 0;

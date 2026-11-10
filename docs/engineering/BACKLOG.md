@@ -12,6 +12,26 @@
 
 ## 已完成（近期）
 
+### 工具参数映射的两道防线（2026-11-10）
+
+PC 侧 62 个工具的参数映射此前是零测试覆盖：itest 直连 agentd 引擎走不到
+`session.cpp`，`test_session` 只测「非法参数在 device_call 之前被拒」。
+「schema 声明了、agentd 实现了、session 忘了转发」这类缺陷完全静默。
+
+- **第 7 道结构护栏 `check_tool_params.py`**：schema 的 properties 顶层键
+  ↔ handler 在 args 上读的键双向差集。handler 读而 schema 无 = ERR，
+  schema 有而 handler 不读 = WARN。支持 `for (const char* k : {...})` 动态键。
+- **`test_tool_payloads.cpp`**：本机假 agentd（bind 0 自动选端口）驱动真
+  `Session::call_tool`，断言帧里 params 的键名与规范化值。44 断言，无需设备。
+- 修出的三个真问题：`gg_search_range.aligned` 从未转发（最严重 —— 参数
+  静默失效）；`gg_hex_dump.save_to` 未声明（落盘模式 AI 不知道）；
+  `gg_get_results.type` 废弃声明残留（已删）。
+- 非恒真验证：把 aligned 转发那行改成 `(void)al`，用例立刻红。
+- 顺带修掉 `test_session` 的隐性网络等待：force=0 用例会去连本机 34127 并
+  退避 20s（结论还取决于本机是否跑着 agentd）。假对端抽成
+  `tests/unit/fake_agentd.h` 两处共用，该用例 20s → 42ms，断言也从
+  "不是 BAD_REQUEST" 升级为"请求真的发出去了 + force 不在 payload 里"。
+
 ### `gg_region_diff`：内存区域差异比较（2026-11-08）
 
 CE "compare memory" 对应物。三种用法：dump vs 目标进程当前内存
@@ -510,6 +530,13 @@ lookback=0x200 抓到存首址的持有者、差 0x201 边界外不命中。
 `gg_search_range` 的 `aligned` 默认 true（只扫自然对齐位置，`step = sz`），
 `aligned=false` 保留逐字节（查 packed 结构用）——开关语义与当初拟的"保留开关"
 一致，MCP schema 已暴露该参数。
+
+> **2026-11-10 更正**：上面那句「MCP schema 已暴露该参数」当时只到 schema 为止 ——
+> agentd（cmd_search.c）实现了、schema 声明了，但 `session.cpp` 的
+> `tool_search_range` 从不把它塞进 params，所以 AI 传 `aligned=false` 一直是
+> 无效的（默认值生效）。已补转发（null 视为未传），并纳入第 7 道护栏
+> `check_tool_params.py` 与 `test_tool_payloads.cpp`。同类"声明了但没转发"
+> 的缺陷现在会被静态扫描直接挡住。
 
 现状：`agentd/search.c` mode 1 分支是 `for (...; i++)` —— **每字节**都试。
 后果：一个 8 字节指针落在区间内会被命中 **8 次**（i..i+7 的未对齐窗口都满足），

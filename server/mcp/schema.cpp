@@ -191,7 +191,6 @@ static const std::vector<ToolDef>& build() {
              json{
                  {"offset", prop("integer", "起始下标（默认 0）")},
                  {"limit", prop("integer", "返回条数（默认 100，上限 10000）")},
-                 {"type", prop("string", "已废弃/忽略（agentd 按结果集自身类型读值）", "\"enum\":[\"byte\",\"word\",\"dword\",\"qword\",\"float\",\"double\"]")},
              },
              json::array()),
         tool("gg_clear_results",
@@ -280,10 +279,11 @@ static const std::vector<ToolDef>& build() {
              },
              json{"addr"}),
         tool("gg_hex_dump",
-             "读取指定地址的字节并以 hex 转储（同 gg_read_bytes）",
+             "读取指定地址的字节并以 hex 转储（同 gg_read_bytes，含 save_to 落盘模式）",
              json{
                  {"addr", prop("string", "目标地址")},
-                 {"len", prop("integer", "字节数（默认 64）")},
+                 {"len", prop("integer", "字节数（默认 64；hex 模式上限 65536，save_to 模式自动分段，受 max_save_bytes 约束）")},
+                 {"save_to", prop("string", "落盘相对路径（可选）：只能写到配置的 export_dir 内，拒绝绝对路径、盘符与 `..`；不再返回 hex")},
              },
              json{"addr"}),
         tool("gg_view_memory",

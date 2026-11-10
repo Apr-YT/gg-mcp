@@ -647,6 +647,19 @@ json tool_search_range(Session::CallCtx& c, const json& a) {
     if (!c.put_region(a.value("region", json()))) return c.fail(GGERR_BAD_REQUEST, "invalid region");
     if (!c.put_module(a.value("module", json())))
         return c.fail(GGERR_BAD_REQUEST, "module must be a non-empty string");
+    /* aligned（可选）：只扫自然对齐位置。agentd 侧默认 1，这里只在显式给出时
+     * 转发。此前漏了这一行：schema 声明 aligned、agentd 也实现了（逐字节扫会
+     * 让一个 8 字节值被命中 8 次），但 PC 侧从不传 —— aligned=false 静默失效，
+     * 查 packed 结构时会得到一堆像模像样的非对齐巧合命中，还没有任何迹象
+     * （2026-11-10 新增的参数护栏 check_tool_params.py 抓到）。
+     * null 视为"未传"：parse_flag01 会把 null 当 0，那等于把默认值悄悄翻成
+     * false（逐字节），与 schema 写的"默认 true"相反。 */
+    if (a.contains("aligned") && !a["aligned"].is_null()) {
+        int al = 0;
+        if (!parse_flag01(a["aligned"], &al))
+            return c.fail(GGERR_BAD_REQUEST, "aligned must be a boolean (0/1)");
+        c.params["aligned"] = al;
+    }
     return c.send(GGCMD_SEARCH_RANGE);
 }
 json tool_result_count(Session::CallCtx& c, const json& a) {
