@@ -79,9 +79,9 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 
 | 分册 | 主题 | 条目 |
 |---|---|---|
-| `AGENTS.driver.md` | 驱动 / 内核模块 / hwbp / 隐蔽性 | 4, 20, 21, 22, 23, 24, 27, 28, 29, 31, 32, 33, 34, 43 |
-| `AGENTS.agentd.md` | 设备端 agentd / 搜索引擎 / 会话 | 1, 5, 6, 7, 8, 9, 12, 13, 14, 16, 17, 19, 26, 30, 37, 38, 40, 41, 42, 44, 45, 46, 47, 49, 50, 52 |
-| `AGENTS.server.md` | PC server / wire 协议 / UI | 2, 10, 11, 15, 18, 25, 35, 36, 39, 48, 51, 53 |
+| `AGENTS.driver.md` | 驱动 / 内核模块 / hwbp / 隐蔽性 | 4, 20, 21, 22, 23, 24, 27, 28, 29, 31, 32, 33, 34, 43, 56 |
+| `AGENTS.agentd.md` | 设备端 agentd / 搜索引擎 / 会话 | 1, 5, 6, 7, 8, 9, 12, 13, 14, 16, 17, 19, 26, 30, 37, 38, 40, 41, 42, 44, 45, 46, 47, 49, 50, 52, 54, 55 |
+| `AGENTS.server.md` | PC server / wire 协议 / UI | 2, 10, 11, 15, 18, 25, 35, 36, 39, 48, 51, 53, 57 |
 
 **按任务选分册（动代码前先读对应分册）**：
 - 动 ko / 驱动读路径 / hwbp / 隐蔽性 → AGENTS.driver.md
@@ -116,7 +116,10 @@ adb 在 `D:\Kiln\platform-tools\adb.exe`（已入 PATH，`where adb` 可验）�
 apk/ 悬浮窗 APK 与 ggtool/ UI Demo 线已于 2026-08-27 下线（commit bcdcf1f，可从 git 历史恢复）。
 旧版工作区指令（apk/ggtool 时代）归档在 `docs/archive/AGENTD_HISTORY.md`。
 
-本文件最后校准：2026-11-10（server 册新增第 53 条：工具参数静态护栏 + 假 agentd payload 端到端用例，结构护栏 6→7 道）。
+本文件最后校准：2026-11-12（真机 itest 补验全绿，10-23~11-10 十批设备端改动闭环；
+新增 54/55（agentd 册：AoB pattern 上限漂移、itest 靶点构造陷阱）、56（driver 册：
+rwproc 写不 fault-in 未驻留页且返回 0）、57（server 册：test_wire_io d3 的确定性条件））。
+上一条校准：2026-11-10（server 册新增第 53 条：工具参数静态护栏 + 假 agentd payload 端到端用例，结构护栏 6→7 道）。
 上一条校准：2026-11-08（agentd 册新增第 52 条 gg_region_diff 差异比较；同日：server 册第 51 条 gg-ui 异步队列）。
 上一条校准：2026-11-04（P1-15 拆分：50 条按主题入三个分册，主文件留索引+硬约束；分册内编号与原文不变）。
 上一条校准：2026-11-04（第 50 条 freeze save/load + 第 49 条 gg_results_refresh；同日：第 47 条 region dump/restore + 第 48 条 wire AUTH 断连语义修复；更早：第 45 条 gg_pointer_path + 第 46 条搜索 module 参数）。

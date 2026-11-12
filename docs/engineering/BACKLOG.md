@@ -12,6 +12,26 @@
 
 ## 已完成（近期）
 
+### 2026-11-12 真机补验：10-23~11-10 十批设备端改动全部闭环
+
+设备 `134d2f8`（6.12.69，KernelSU）重新在位：部署自编译 KO
+（`rwNova33` 内存模块 + `rwNova` 断点模块）→ `driver self-test: channel OK
+(kernel-driver rwproc33)` → itest 用例 1-15 全过，**连续 3 轮 ALL PASS**
+（含此前一直没上机的 8-15 批次：dump/restore/dump_list、字符串/组合/
+增量 refine/module 限定/pointer_path、refresh、region diff）。
+
+首跑 14 红，逐条定位后没有一条是"产品功能不对"：
+
+| 失败 | 根因 | 处理 |
+|---|---|---|
+| 用例 9 字符串"恰好 1 次"→ 实际 2 次 | 子进程里 `memcpy(dst, 字面量, 16)`，常量被物化到栈上（栈是匿名段），多出一份副本 | 子进程只 fault-in，pattern 由父进程经驱动写入（AGENTS.agentd 55） |
+| 用例 15 diff 种子写返回 0 + 整串级联红 | rwproc 写按物理地址落盘，页未驻留时驱动 `break` 返回 0（不报错）；测试选的页从没被触碰过 | 子进程启动时先写一字节 fault-in（AGENTS.driver 56） |
+| 冻结"self-increment suppressed" 1/10 偶发红 | 冻结 100ms 写回 vs 子进程 50ms 自增，只有约 25% 的采样能落在冻结值上 | 样本 10 → 30（实测 14/30） |
+
+顺带查出一个**真 bug**（不是测试问题）：`cmd_search` 按 512 字节收 pattern，
+而搜索 worker 的 `pat[256]` 拷贝缓冲没跟着改，plen 257..512 时两次写穿栈。
+已统一为 `GG_AOB_PAT_MAX`，`test_search.c` 用例 11c 钉死（改回 256 立刻红）。
+
 ### 工具参数映射的两道防线（2026-11-10）
 
 PC 侧 62 个工具的参数映射此前是零测试覆盖：itest 直连 agentd 引擎走不到

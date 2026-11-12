@@ -361,3 +361,18 @@
      （fd 名 dmabuf → [eventpoll]）。当前设备上的 .ko 没有 .mmap，`--ring`
      会自动回落 ioctl——这条本身就是一条回归验证路径，别当成故障排查。
 
+56. **rwproc 写不 fault-in 未驻留页：返回 0、不报错（2026-11-12 真机实证）**
+
+   `OnCmdWriteProcessMemory` 在 `is_force_write=false`（agentd 恒传 0，因为
+   强写会 panic，见第 27 条）时逐页走 `get_proc_phy_addr`：**页表项不存在
+   （页从未被访问过）时返回 0，循环 `break`，最终返回已写字节数**。
+   于是"往一块刚 mmap、还没碰过的内存写 4KB"会得到 `wr == 0` 且
+   `last_error` 为空 —— 看起来像成功，实际一个字节都没写。
+
+   - 调用方必须按**返回长度**判定成败（agentd handler 和 itest 都是这么写的），
+     不能只看"没有负值"。
+   - 需要写未驻留页时，唯一安全路径是让目标进程自己先把那页 touched
+     （用例 15 的种子页就是这么修的，见 agentd 册第 55 条）。
+   - 读路径同理：`force=0` 读未驻留页会短读，所以 dump 遇短读即失败
+     （"残缺即失败"），补零备份比不备份更危险。
+
