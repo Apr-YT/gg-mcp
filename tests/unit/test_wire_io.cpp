@@ -471,12 +471,25 @@ int main() {
     {
         Peer peer;
         check(peer.listen_loopback(), "d3) fake peer listening on 127.0.0.1");
+        /* 对端接收窗口压到 8KB（listen socket 上的设置由 accept 继承）：客户端
+         * 512KB 的写不可能在 RST 前整帧塞进缓冲。不压的话 Windows loopback 的
+         * 自动调优能把窗口涨到几百 KB，偶尔整帧交付成功（wr==0 → 不重放，这是
+         * 正确行为），用例又变回掷硬币。 */
+        int rcvbuf = 8192;
+        setsockopt(peer.lfd, SOL_SOCKET, SO_RCVBUF,
+                   reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
         gg::AgentClient cli(peer_cfg(peer.port, 3000));
         std::thread th([&] {
             tsock_t c1 = peer.accept_one();
             if (c1 != TSOCK_INVALID) {
                 serve_auth(c1);
-                // 不读后续请求，直接 RST：客户端 write PING 时撞 ECONNRESET
+                /* 先收下 20B 帧头，确认客户端**已经开始写业务请求**，再 RST。
+                 * 直接 serve_auth 后立刻关会把断连落在 AUTH 应答读取阶段 ——
+                 * 那走的是 d1 的重连路径，d3 想覆盖的「写失败 → 重放」根本没被触发
+                 * （非恒真验证：把 call() 里的重放分支临时关掉，d3 依旧全绿）。 */
+                gg_wire_header_t req{};
+                if (!recv_exact(c1, &req, sizeof(req))) { /* 对端已断，照样关 */ }
+                // 不回后续、不读 payload，直接 RST：客户端写剩余 512KB 时撞 ECONNRESET
                 linger l{1, 0};
                 setsockopt(c1, SOL_SOCKET, SO_LINGER,
                            reinterpret_cast<const char*>(&l), sizeof(l));
@@ -503,8 +516,15 @@ int main() {
                 TSOCK_CLOSE(c2);
             }
         });
+        /* 请求体故意撑到 512KB：空 PING 帧（20B 头 + "{}"）在 loopback 上经常
+         * 在 RST 抵达前就整帧塞进内核发送缓冲（wr==0）—— 此时不重放是**正确**
+         * 行为（对端可能已执行），用例于是变成掷硬币（实测 5 次里 3 次红）。
+         * 大帧写不完（对端不读，缓冲区很快填满并阻塞），RST 必然落在写入过程中，
+         * "发到一半断连 → 安全重放"才是确定条件。 */
+        json big;
+        big["pad"] = std::string(512 * 1024, 'x');
         json out;
-        int rc = cli.call(GGCMD_PING, json::object(), &out);
+        int rc = cli.call(GGCMD_PING, big, &out);
         std::printf("     [d3] rc=%d outcome=%d\n", rc, static_cast<int>(cli.last_outcome));
         check(rc == 0 && out.is_object() && out.value("pong", 0) == 2,
               "d3) mid-frame reset -> reconnect & replay succeeds");

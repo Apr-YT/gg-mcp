@@ -63,6 +63,15 @@ static void on_sigusr1(int s) { (void)s; g_start = 1; }
 static volatile uint64_t g_chain_anchor = 0;
 static volatile uint32_t g_mod_marker = 0x5AFE0001u;
 
+/* 用例 9 的字符串靶址（相对 mmap 基址的偏移）。**不在子进程里放常量**：
+ * 函数内字面量/局部数组会被编译器物化到栈上（栈也是匿名段），搜索就会多
+ * 命中一份副本 —— 真机实测第二命中落在 0x7fd0... 栈范围，"恰好 1 次"恒失败。
+ * 现在改成子进程只 fault-in 页面、父进程经驱动把 pattern 写进去，
+ * 整个进程里只有 mmap 中那一份。 */
+#define STR_A_OFF  8192u
+#define STR_B_OFF  8256u
+#define STR_BYTES  64u
+
 /* 用例 15（区域差异）的区间收集：diff 回调在扫描热循环里被调用，
  * 这里只记录地址与跨度，避免在回调里做任何 IO。 */
 typedef struct {
@@ -128,17 +137,19 @@ int main(void) {
          * 注意fork 时父进程内存里绝不能出现这些值，否则"唯一命中"断言会被
          * 父进程侧副本打破 —— 所有魔数只在下面的父进程用例里以字面量出现，
          * 而 fork 在它们之前。 */
-        memcpy((char *)p + 8192, "gg-findme-ascii", 16);          /* 含 NUL */
-        {
-            const char16_t ws[] = u"GG测试Str";                   /* 7 码元 + NUL */
-            memcpy((char *)p + 8256, ws, sizeof(ws));
-        }
+        /* 用例 9 的靶页由父进程经驱动写入（见 STR_A_OFF 注释），这里只负责
+         * fault-in：rwproc 写按物理地址落盘，页未驻留时写会静默返回 0。 */
+        memset((char *)p + STR_A_OFF, 0, STR_BYTES);
         {
             volatile uint32_t *g3 = (volatile uint32_t *)((char *)p + 12288);
             g3[0] = 0x1111AAAAu; g3[1] = 0x2222BBBBu; g3[2] = 0x3333CCCCu;
         }
         *(volatile uint32_t *)((char *)p + 16384) = 0x0D15EA5Eu;  /* refine 靶 */
         *(volatile uint32_t *)((char *)p + 28672) = 0xF00DFACEu;  /* refresh 靶（用例 14） */
+        /* 用例 15 的 diff 页必须由子进程自己先 fault-in：rwproc 写是按物理地址
+         * 直接落盘的，页未驻留时 get_proc_phy_addr 返回 0 → 驱动 break 返回 0
+         * （不报错），父进程的整页种子写会静默变成 0 字节。 */
+        *(volatile uint8_t *)((char *)p + 32768) = 0x5A;
         /* 两级指针链：anchor(.data) → mid → target */
         *(volatile uint64_t *)((char *)p + 20480) = (uint64_t)(uintptr_t)((char *)p + 24576);
         *(volatile uint64_t *)((char *)p + 24576) = 0x7E57C0DEull;
@@ -204,9 +215,11 @@ int main(void) {
     freeze_init(&fz, &drv);
     freeze_start(&fz, g_child);
     freeze_add(&fz, addr, wbuf, 4);
-    /* 冻结循环每 100ms 写回; 采样 10 次×20ms: 应多次命中 0x99999999 */
-    int frozen_hits = count_equals(&drv, g_child, addr, 0x99999999u, 10, 20);
-    printf("  frozen samples hit 0x99999999: %d/10\n", frozen_hits);
+    /* 冻结循环每 100ms 写回一次，子进程每 50ms 自增一次 —— 冻结只能把值
+     * "按回"到 0x99999999，两次写回之间必然有一段时间是漂移值。取 30 个样本
+     * 才足够稳定（10 个样本真机实测有过 1/10，断言 ≥2 会偶发假红）。 */
+    int frozen_hits = count_equals(&drv, g_child, addr, 0x99999999u, 30, 20);
+    printf("  frozen samples hit 0x99999999: %d/30\n", frozen_hits);
     CHECK(frozen_hits >= 2, "freeze holds value (self-increment suppressed)");
 
     /* 6) 解冻: 等 >2 个自增周期(50ms)后, 值必然已离开冻结值 */
@@ -328,16 +341,22 @@ int main(void) {
     }
 
     /* 9) 字符串搜索：gg_str_to_pattern + search_aob（UTF-8 与 UTF-16LE 两路）。
-     * 断言"恰好 1 次"：这些字符串在子进程匿名段只有 mmap 里那一份
-     * （字面量本体在 itest 的 .rodata 文件映射段，ANONYMOUS 过滤掉）。 */
+     * 断言"恰好 1 次"：pattern 由父进程经驱动写进子进程 mmap，整个子进程里
+     * 只有这一份（详见 STR_A_OFF 注释）。 */
     {
+        const uint64_t base = addr - 4096;
         gg_results_t rs;
         results_init(&rs, 100000);
         uint8_t pat[64];
         int pl = gg_str_to_pattern("gg-findme-ascii", 0, 1, pat, sizeof(pat));
         CHECK(pl == 16, "str_to_pattern utf-8: 15 chars + NUL");
+        CHECK(driver_write(&drv, g_child, base + STR_A_OFF, pat, (size_t)pl) == pl,
+              "utf-8 pattern seeded");
         int64_t n = search_aob(&drv, g_child, &rs, pat, NULL, (size_t)pl,
                                REGION_ANONYMOUS, NULL);
+        printf("  aob utf-8 hits: %lld\n", (long long)n);
+        for (int i = 0; i < (int)n && i < 4; i++)
+            printf("    utf-8 hit[%d] = 0x%llx\n", i, (unsigned long long)rs.addrs[i]);
         CHECK(n == 1, "utf-8 string found exactly once");
         if (n == 1) {
             uint8_t vb[16];
@@ -350,8 +369,13 @@ int main(void) {
         results_init(&rs, 100000);
         pl = gg_str_to_pattern("GG测试Str", 1, 1, pat, sizeof(pat));
         CHECK(pl == 16, "str_to_pattern utf-16: 7 BMP chars + NUL = 16 bytes");
+        CHECK(driver_write(&drv, g_child, base + STR_B_OFF, pat, (size_t)pl) == pl,
+              "utf-16 pattern seeded");
         n = search_aob(&drv, g_child, &rs, pat, NULL, (size_t)pl,
                        REGION_ANONYMOUS, NULL);
+        printf("  aob utf-16 hits: %lld\n", (long long)n);
+        for (int i = 0; i < (int)n && i < 4; i++)
+            printf("    utf-16 hit[%d] = 0x%llx\n", i, (unsigned long long)rs.addrs[i]);
         CHECK(n == 1, "utf-16 string found exactly once");
         results_clear(&rs);
     }
@@ -536,7 +560,10 @@ int main(void) {
             CHECK(0, "diff: malloc failed");
         } else {
             memset(page, 0x5A, (size_t)dlen);
-            CHECK(driver_write(&drv, g_child, daddr, page, (size_t)dlen) == (ssize_t)dlen,
+            ssize_t sw = driver_write(&drv, g_child, daddr, page, (size_t)dlen);
+            printf("  diff seed: daddr=0x%llx wr=%lld (%s)\n",
+                   (unsigned long long)daddr, (long long)sw, drv.last_error);
+            CHECK(sw == (ssize_t)dlen,
                   "diff: seed page with 0x5A");
             CHECK(gg_region_dump_to_file(&drv, g_child, daddr, dlen, pa,
                                          derr, sizeof(derr)) == 0, "diff: dump A");
