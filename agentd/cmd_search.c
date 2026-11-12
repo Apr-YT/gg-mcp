@@ -112,7 +112,7 @@ void h_search(int fd, uint32_t seq, cJSON *p) {
                              vals, nvals, type, span, region, module);
         if (found < 0) { send_err(fd, GGCMD_SEARCH, seq, GGERR_INTERNAL, "group search failed"); return; }
     } else if (type == VT_BYTES) {
-        uint8_t pat[512], mask[512];
+        uint8_t pat[GG_AOB_PAT_MAX], mask[GG_AOB_PAT_MAX];
         int plen;
         /* encoding：字符串搜索模式。value 是原始文本（玩家名/道具名），
          * 转字节走 AoB 路径 —— 调用方自己拼 UTF-16LE hex 十次错三次。

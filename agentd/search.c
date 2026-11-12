@@ -42,8 +42,8 @@ typedef struct {
     size_t rbegin, rend;
     int vtype;
     int mode;              /* 0=exact 1=range 2=aob */
-    uint8_t pat[256];      /* exact: 编码 pattern; aob: 原始 pattern */
-    uint8_t pat_mask[256]; /* aob: 逐位掩码，1=比较该 bit；全 0xFF 表示无通配 */
+    uint8_t pat[GG_AOB_PAT_MAX];      /* exact: 编码 pattern; aob: 原始 pattern */
+    uint8_t pat_mask[GG_AOB_PAT_MAX]; /* aob: 逐位掩码，1=比较该 bit；全 0xFF 表示无通配 */
     int     pat_has_wild;  /* aob: 1=含通配，走逐字节比较 */
     size_t pat_len;        /* aob 用 */
     uint64_t ilo, ihi;     /* range 整数边界 */
@@ -761,7 +761,7 @@ int gg_str_to_pattern(const char *s, int utf16, int append_nul,
 int64_t search_aob(gg_driver_t *d, pid_t pid, gg_results_t *r,
                    const uint8_t *pat, const uint8_t *mask,
                    size_t plen, int region_type, const char *module) {
-    if (!pat || plen == 0 || plen > 512) return -1;
+    if (!pat || plen == 0 || plen > GG_AOB_PAT_MAX) return -1;
     int has_wild = 0;
     if (mask) {
         for (size_t i = 0; i < plen; i++) if (mask[i] != 0xFF) { has_wild = 1; break; }

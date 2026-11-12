@@ -418,6 +418,25 @@ int main(void) {
         results_clear(&r);
     }
 
+    /* === 11c) 长 pattern（超过旧 worker 缓冲 256B）必须完整匹配 ===
+     * cmd_search 允许 512 字节 pattern（UTF-16 128 字符 ×2，或长签名），
+     * 而搜索 worker 曾只有 pat[256]：plen > 256 时 memcpy 直接写穿 worker 栈
+     * （随后 pat_mask 的 memset 再溢一次）。这条用 300 字节 pattern 钉住
+     * 「接收端上限」与「worker 拷贝缓冲」必须一致。 */
+    mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + 0x10000);
+    {
+        uint64_t where = TEST_MEM_BASE + 0x2000;
+        uint8_t big[300], mask[300];
+        for (size_t i = 0; i < sizeof(big); i++) big[i] = (uint8_t)(i * 7 + 3);
+        memcpy(g_mem + (where - TEST_MEM_BASE), big, sizeof(big));
+        memset(mask, 0xFF, sizeof(mask));
+        results_init(&r, 0);
+        int64_t nh = search_aob(NULL, 0, &r, big, mask, sizeof(big), 0, NULL);
+        check(nh == 1 && results_has(&r, where),
+              "11c) 300 字节 pattern 完整匹配（worker 缓冲不得小于接收上限）");
+        results_clear(&r);
+    }
+
     /* === 12) 组合搜索（group search）：顺序无关 + 位置占用 + span 边界 === */
     mem_reset(); g_nregions = 0; region_add(TEST_MEM_BASE, TEST_MEM_BASE + 0x10000);
     {

@@ -18,6 +18,10 @@ extern "C" {
 #define GG_GROUP_MAX             8               /* 组合搜索最多 8 个值 */
 #define GG_GROUP_SPAN_MAX        4096            /* 组合搜索窗口上限（字节） */
 #define GG_SEARCH_CHUNK          (256u << 10)    /* 搜索分块 256KB */
+/* AoB / 字符串 pattern 字节上限。cmd_search 的 pat/mask 与搜索 worker 的
+ * 拷贝缓冲必须用同一个值 —— 曾经 cmd_search 按 512 收、worker 只有 pat[256]，
+ * plen>256 时 memcpy 直接写穿 worker 栈（UTF-16 下 129 字符即可触发）。 */
+#define GG_AOB_PAT_MAX           512
 /* 模糊 refine 可回退步数。每级占「元素数/8」字节（256MB 区 = 8.4MB/级），
  * 所以不设太大；3 步足够覆盖"搜错了退回去换 op 再试"。
  * 按需分配：没做过 refine 就不占内存。 */
